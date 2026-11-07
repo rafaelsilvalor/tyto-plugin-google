@@ -10,5 +10,5 @@
     "credentials:service-account"
   ],
   "namespace": "google",
-  "writes": ["clear", "write-row"]
+  "writes": ["clear", "write-row", "add-tab", "update", "move", "delete", "add"]
 }

@@ -30,6 +30,46 @@ export const NOT_REACHED = "not reached in this call's time; run the cell and Ap
 
 const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets';
 
+/** A way out that sends nothing past an Apply's budget, and says when it refused for time. */
+export interface BudgetedTransport {
+  readonly transport: Transport;
+  /** Whether the budget is spent; once it is, every later request is refused. */
+  expired(): boolean;
+  /** Whether a request was refused for time: what it would have sent was never written. */
+  refusedForTime(): boolean;
+}
+
+export function budgetedTransport(
+  host: Pick<PluginHost, 'fetch'>,
+  clock: WriteClock,
+): BudgetedTransport {
+  const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
+  let outOfTime = false;
+  let refused = false;
+  const expired = (): boolean => {
+    if (clock.now() > deadline) outOfTime = true;
+    return outOfTime;
+  };
+  return {
+    expired,
+    refusedForTime: () => refused,
+    transport: {
+      fetch: (url, init) => {
+        if (expired()) {
+          refused = true;
+          return Promise.reject(new Error(NOT_REACHED));
+        }
+        return host.fetch(url, init);
+      },
+      now: () => clock.now(),
+      sleep: async (milliseconds) => {
+        if (clock.now() + milliseconds > deadline) outOfTime = true;
+        else await (clock.sleep ?? wait)(milliseconds);
+      },
+    },
+  };
+}
+
 /** `plan/<digest>/<row>`: where a row too big for its payload waits for Apply. */
 export function spillKey(digest: string, row: number): string {
   return `plan/${digest}/${row}`;
@@ -39,7 +79,7 @@ export function spillKey(digest: string, row: number): string {
 export function clearedKey(digest: string): string {
   return `plan/${digest}/cleared`;
 }
-const PLAN_AGAIN = 'run the cell again for a new plan';
+export const PLAN_AGAIN = 'run the cell again for a new plan';
 
 interface Clear {
   readonly kind: 'clear';
@@ -117,39 +157,21 @@ export async function applySheetWrites(
   const [spreadsheetId = '', sheetText = ''] = first.s.split('/');
   const sheetId = Number(sheetText);
 
-  // A client that sends nothing past the budget: what it refused was never written.
-  const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
-  let outOfTime = false;
-  let refusedForTime = false;
-  const expired = (): boolean => {
-    if (clock.now() > deadline) outOfTime = true;
-    return outOfTime;
-  };
-  const transport: Transport = {
-    fetch: (url, init) => {
-      if (expired()) {
-        refusedForTime = true;
-        return Promise.reject(new Error(NOT_REACHED));
-      }
-      return host.fetch(url, init);
-    },
-    now: () => clock.now(),
-    sleep: async (milliseconds) => {
-      if (clock.now() + milliseconds > deadline) outOfTime = true;
-      else await (clock.sleep ?? wait)(milliseconds);
-    },
-  };
+  const budget = budgetedTransport(host, clock);
+  const { transport } = budget;
+  const refusedForTime = (): boolean => budget.refusedForTime();
+  const expired = (): boolean => budget.expired();
 
   const connection = await connect(host, request.section, transport);
   if (!connection.ok) {
-    if (refusedForTime) return done();
+    if (refusedForTime()) return done();
     settle(pending(), failedWith(connection.error));
     return done();
   }
   const { client } = connection.value;
   const tabs = await readGridTabs(client, spreadsheetId);
   if (!tabs.ok) {
-    if (refusedForTime) return done();
+    if (refusedForTime()) return done();
     settle(pending(), failedWith(tabs.error));
     return done();
   }
@@ -194,7 +216,7 @@ export async function applySheetWrites(
         Math.max(...numbers),
       );
       if (!filled.ok) {
-        if (refusedForTime) return done();
+        if (refusedForTime()) return done();
         settle(rows, failedWith(filled.error));
         return done();
       }
@@ -226,7 +248,7 @@ export async function applySheetWrites(
       requests,
     });
     if (!sent.ok) {
-      if (refusedForTime) return done();
+      if (refusedForTime()) return done();
       settle(writing, batchFailed(sent.error));
       return done();
     }
@@ -332,7 +354,7 @@ function rowOf(object: Readonly<Record<string, JsonValue>>): WriteRow | undefine
 }
 
 /** A row's payload kept in the cache at plan time, or why it cannot be had. */
-async function spilled(
+export async function spilled(
   host: ApplyHost,
   key: string,
   digest: string,
@@ -357,7 +379,7 @@ async function spilled(
   }
 }
 
-const UNREADABLE = `E_GOOGLE_PLAN: this operation carries no payload this version of the plugin reads; ${PLAN_AGAIN}`;
+export const UNREADABLE = `E_GOOGLE_PLAN: this operation carries no payload this version of the plugin reads; ${PLAN_AGAIN}`;
 
 async function wasCleared(host: ApplyHost, digest: string): Promise<boolean> {
   try {
@@ -378,7 +400,7 @@ async function markCleared(host: ApplyHost, digest: string): Promise<void> {
   }
 }
 
-async function forget(host: ApplyHost, key: string): Promise<void> {
+export async function forget(host: ApplyHost, key: string): Promise<void> {
   try {
     await host.cache.delete(key);
   } catch {
@@ -387,7 +409,7 @@ async function forget(host: ApplyHost, key: string): Promise<void> {
 }
 
 /** How a refused or lost batchUpdate went for each of its operations. */
-function batchFailed(error: GoogleError): AppliedOperation {
+export function batchFailed(error: GoogleError): AppliedOperation {
   const lost =
     (error.status !== undefined && error.status >= 500) ||
     (error.code === 'E_GOOGLE_NETWORK' && error.hostCode === undefined);
@@ -401,30 +423,32 @@ function batchFailed(error: GoogleError): AppliedOperation {
   };
 }
 
-function failed(code: GoogleError['code'], reason: string): AppliedOperation {
+export function failed(code: GoogleError['code'], reason: string): AppliedOperation {
   return { status: 'failed', reason: `${code}: ${reason}` };
 }
 
-function failedWith(error: GoogleError): AppliedOperation {
+export function failedWith(error: GoogleError): AppliedOperation {
   return { status: 'failed', reason: describeGoogleError(error) };
 }
 
 /** A reason within the host's 500 characters, the code kept first. */
-function shortReason(outcome: AppliedOperation): Partial<AppliedOperation> {
+export function shortReason(outcome: AppliedOperation): Partial<AppliedOperation> {
   const { reason } = outcome;
   if (reason === undefined || reason.length <= 500) return {};
   return { reason: `${reason.slice(0, 499)}…` };
 }
 
-function isDigest(value: JsonValue | undefined): value is string {
+export function isDigest(value: JsonValue | undefined): value is string {
   return typeof value === 'string' && /^[0-9a-f]{16}$/.test(value);
 }
 
-function isSheet(value: JsonValue | undefined): value is string {
+export function isSheet(value: JsonValue | undefined): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9_-]+\/\d+$/.test(value);
 }
 
-function recordOf(value: JsonValue | undefined): Readonly<Record<string, JsonValue>> | undefined {
+export function recordOf(
+  value: JsonValue | undefined,
+): Readonly<Record<string, JsonValue>> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Readonly<Record<string, JsonValue>>)
     : undefined;

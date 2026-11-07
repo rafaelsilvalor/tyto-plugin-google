@@ -49,7 +49,15 @@ describe('tyto-plugin.json', () => {
 
   it('declares only the kinds of write a verb of this version plans', async () => {
     const plugin = await harness();
-    expect(plugin.manifest.writes).toEqual(['clear', 'write-row']);
+    expect(plugin.manifest.writes).toEqual([
+      'clear',
+      'write-row',
+      'add-tab',
+      'update',
+      'move',
+      'delete',
+      'add',
+    ]);
     const declared = plugin.host.registry
       .recipeVerbs()
       .flatMap((verb) => verb.writes ?? [])
@@ -69,12 +77,13 @@ describe('tyto-plugin.json', () => {
 });
 
 describe('activate', () => {
-  it('registers no setting, the google.sheet-rows source and the google.sheet-write sink', async () => {
+  it('registers no setting, the google.sheet-rows source and the two sheet sinks', async () => {
     const plugin = await harness();
     expect(plugin.host.registry.configurations()).toEqual([]);
     expect(plugin.host.registry.recipeVerbs().map((verb) => `${verb.id}:${verb.kind}`)).toEqual([
       'google.sheet-rows:source',
       'google.sheet-write:sink',
+      'google.sheet-sync:sink',
     ]);
     await plugin.close();
   });

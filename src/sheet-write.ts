@@ -95,7 +95,11 @@ export async function planSheetWrite(
   request: PlanRequest,
 ): Promise<PlanAnswer> {
   const { table } = request;
-  const spreadsheetId = spreadsheetOf(request.arguments['spreadsheet'], request.section);
+  const spreadsheetId = spreadsheetOf(
+    SHEET_WRITE,
+    request.arguments['spreadsheet'],
+    request.section,
+  );
   if (typeof spreadsheetId !== 'string') return refused(spreadsheetId);
   const mode: Mode = request.arguments['mode'] === 'append' ? 'append' : 'replace';
   const columns = writeColumns(table, String(request.arguments['formulas'] ?? ''));
@@ -223,44 +227,58 @@ async function rowOperation(
   description: string,
   payload: RowPayload,
 ): Promise<PlannedOperation> {
-  const text = JSON.stringify(payload);
-  const keyed = rowKey === undefined ? {} : { rowKey };
-  if (utf8Bytes(text) <= SPILL_BYTES) {
-    return {
-      write: ROW_WRITE,
-      ...keyed,
-      description: shortened(description),
-      payload: payload as unknown as JsonValue,
-    };
-  }
-  const ck = spillKey(payload.h, payload.k);
-  try {
-    await host.cache.put(ck, text);
-  } catch (thrown) {
+  const kept = await keptPayload(host, spillKey(payload.h, payload.k), payload);
+  if (!kept.ok) {
     return plannedFailure(
       rowKey,
       `row ${payload.k}`,
-      `E_GOOGLE_PLAN: row ${payload.k} needs ${utf8Bytes(text).toLocaleString('en-US')} bytes, ` +
-        `more than a plan keeps per row, and the plugin's cache refused them: ${messageOf(thrown)}`,
+      `E_GOOGLE_PLAN: row ${payload.k} ${kept.reason}`,
     );
   }
   return {
     write: ROW_WRITE,
-    ...keyed,
+    ...(rowKey === undefined ? {} : { rowKey }),
     description: shortened(description),
-    payload: { ck, cd: fingerprint(text) },
+    payload: kept.payload,
   };
 }
 
+/**
+ * The payload as it is, or, past {@link SPILL_BYTES}, kept in the plugin's cache under `key`
+ * and replaced by `{ ck, cd }`, the entry's name and digest, which Apply reads it back by.
+ */
+export async function keptPayload(
+  host: Pick<PluginHost, 'cache'>,
+  key: string,
+  payload: object,
+): Promise<
+  | { readonly ok: true; readonly payload: JsonValue }
+  | { readonly ok: false; readonly reason: string }
+> {
+  const text = JSON.stringify(payload);
+  if (utf8Bytes(text) <= SPILL_BYTES) return { ok: true, payload: payload as JsonValue };
+  try {
+    await host.cache.put(key, text);
+  } catch (thrown) {
+    return {
+      ok: false,
+      reason:
+        `needs ${utf8Bytes(text).toLocaleString('en-US')} bytes, more than a plan keeps per ` +
+        `row, and the plugin's cache refused them: ${messageOf(thrown)}`,
+    };
+  }
+  return { ok: true, payload: { ck: key, cd: fingerprint(text) } };
+}
+
 /** Forgets the cache entries of plans made over {@link PLAN_ENTRY_DAYS} ago; never fails. */
-async function forgetOldPlans(host: SheetWriteHost): Promise<void> {
+export async function forgetOldPlans(host: Pick<PluginHost, 'cache' | 'log'>): Promise<void> {
   try {
     const cutoff = Date.now() - PLAN_ENTRY_DAYS * 24 * 60 * 60 * 1000;
     for (const entry of await host.cache.list('plan/')) {
       if (Date.parse(entry.storedAt) < cutoff) await host.cache.delete(entry.key);
     }
   } catch (thrown) {
-    host.log.warn(`${SHEET_WRITE} kept old plans in its cache: ${messageOf(thrown)}`);
+    host.log.warn(`the google plugin kept old plans in its cache: ${messageOf(thrown)}`);
   }
 }
 
@@ -352,35 +370,41 @@ function placed(
 }
 
 /** The spreadsheet's id from `spreadsheet=`, else from the section. */
-function spreadsheetOf(written: unknown, section: unknown): string | Diagnostic {
+export function spreadsheetOf(
+  verb: string,
+  written: unknown,
+  section: unknown,
+): string | Diagnostic {
   const text = typeof written === 'string' ? written.trim() : '';
   if (text !== '') {
     return (
       spreadsheetIdOf(text) ??
-      problem(
+      argumentsProblem(
+        verb,
         `spreadsheet= holds '${text}', which is neither a spreadsheet id nor its address, ` +
           'such as https://docs.google.com/spreadsheets/d/<id>/edit',
       )
     );
   }
   const read = readSection(section);
-  if (!read.ok) return verbFailed(SHEET_WRITE, read.error);
+  if (!read.ok) return verbFailed(verb, read.error);
   return (
     read.value.spreadsheet ??
-    problem(
+    argumentsProblem(
+      verb,
       'needs spreadsheet=, or spreadsheet in the google section of .tyto/project.json, and was ' +
         'given neither',
     )
   );
 }
 
-function trimmed<T>(cells: readonly (T | null)[]): (T | null)[] {
+export function trimmed<T>(cells: readonly (T | null)[]): (T | null)[] {
   let end = cells.length;
   while (end > 0 && cells[end - 1] === null) end -= 1;
   return cells.slice(0, end);
 }
 
-function listed(names: readonly string[]): string {
+export function listed(names: readonly string[]): string {
   const shown = names.slice(0, 20).map((name) => `'${name}'`);
   return `${shown.join(', ')}${names.length > 20 ? ', …' : ''}`;
 }
