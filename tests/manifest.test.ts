@@ -69,10 +69,12 @@ describe('tyto-plugin.json', () => {
 });
 
 describe('activate', () => {
-  it('registers no setting and no verb yet', async () => {
+  it('registers no setting, and the google.sheet-rows source', async () => {
     const plugin = await harness();
     expect(plugin.host.registry.configurations()).toEqual([]);
-    expect(plugin.host.registry.recipeVerbs()).toEqual([]);
+    expect(plugin.host.registry.recipeVerbs().map((verb) => `${verb.id}:${verb.kind}`)).toEqual([
+      'google.sheet-rows:source',
+    ]);
     await plugin.close();
   });
 

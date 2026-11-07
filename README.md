@@ -5,8 +5,8 @@ Google Drive from a recipe. Tyto knows no provider (Tyto ADR 0011, ADR 0127): ev
 Google-specific lives here, in its own repository, and reaches Tyto only through the plugin API.
 This repository is public and unlicensed.
 
-**Work in progress.** This version installs and activates, and adds no verb yet. The verbs
-arrive one pull request at a time, all in the `google` namespace: `google.sheet-rows`,
+**Work in progress.** This version reads a spreadsheet tab with `google.sheet-rows`. The
+other verbs arrive one pull request at a time, all in the `google` namespace:
 `google.sheet-write`, `google.sheet-sync`, `google.drive-list`, `google.drive-read`,
 `google.drive-move` and `google.drive-count`.
 
@@ -65,6 +65,42 @@ file or in Tyto's cache, and is renewed a minute before it expires.
   as its id or its address.
 - `root`: the Drive folder the Drive verbs stay under, as its id or its address.
 - `tabs`: settings per tab, by the tab's name, for the verbs that format a tab.
+
+## `google.sheet-rows`
+
+A source: one tab of a spreadsheet as a table, one row per sheet row under the header.
+
+```
+google.sheet-rows tab=Tasks key=ID links=Brief notes=Owner
+```
+
+| Argument       | What it does                                                                       |
+| -------------- | ---------------------------------------------------------------------------------- |
+| `spreadsheet=` | The spreadsheet, as its id or its address; the section's `spreadsheet` by default. |
+| `tab=`         | The tab, by its name (case is ignored when only one tab matches); the first tab.   |
+| `key=`         | The column whose value keys each row; without it a row's key is `row-<n>`.         |
+| `links=`       | Columns, comma-separated, whose cell links become a `<column>_url` link column.    |
+| `notes=`       | Columns, comma-separated, whose cell notes become a `<column>_note` text column.   |
+| `max=`         | The most rows the tab may have, 100,000 by default; more is an error, never a cut. |
+
+- **Columns** are row 1's names, in order. A column that holds values under a blank name, or
+  two names that differ only in case, is refused rather than renamed: a recipe reads a column
+  by its name. A column is a number, or a boolean, only when every filled cell in it is one;
+  otherwise it is text, and a number in it is written as its digits. Dates come as the text the
+  sheet shows.
+- **Rows** whose cells, links and notes are all empty are skipped. A `key=` value that is blank
+  or repeated is refused, naming both rows. Each row's provenance is
+  `<spreadsheetId>/<sheetId>/<row number>`, which the write verbs find the row by.
+- **Links** are read wherever Sheets keeps them: the cell's `hyperlink` (which covers
+  `=HYPERLINK`), a linked run of text, or the cell's format, where Sheets moves a link that
+  covers the whole cell. Links and notes are asked for only when `links=` or `notes=` names a
+  column, and only the fields asked for.
+- **The tab is read once.** The first page reads it and keeps it in the plugin's cache with the
+  file's Drive `version`; the following pages, up to 5,000 rows each, are cut from that one
+  copy, so a sheet edited during a run is never two tables stitched together (a later page that
+  finds another copy fails and asks you to run again). The next run uses the cached copy only
+  while Drive still gives the same `version`, and running again without cache reads Google.
+  When Drive does not give a version, the tab is read live and nothing is cached.
 
 ## Retries
 
