@@ -40,6 +40,8 @@ export interface FakeSpreadsheet {
   driveFailure?: FetchedResponse;
   /** Answers to the next batchUpdates, in order, in place of writing them. */
   batchFailures?: FetchedResponse[];
+  /** Request kinds a batchUpdate is refused for, whole, as Google refuses a bad request. */
+  refuseKinds?: string[];
 }
 
 export interface SheetCall {
@@ -157,9 +159,15 @@ function rowsOf(tab: FakeTab): number {
  */
 function batchUpdate(sheet: FakeSpreadsheet, body: unknown): FetchedResponse {
   const requests = (body as { requests: Record<string, Record<string, unknown>>[] }).requests;
+  if (requests.some((request) => sheet.refuseKinds?.includes(Object.keys(request)[0] ?? ''))) {
+    return response(400, {
+      error: { code: 400, message: 'Invalid request.', status: 'INVALID_ARGUMENT' },
+    });
+  }
   const copies = new Map<number, FakeTab>();
+  const created: FakeTab[] = [];
   const copyOf = (sheetId: unknown): FakeTab => {
-    const found = sheet.tabs.find((tab) => tab.sheetId === sheetId);
+    const found = [...sheet.tabs, ...created].find((tab) => tab.sheetId === sheetId);
     if (found === undefined) throw new Error(`no tab ${String(sheetId)}`);
     const copy = copies.get(found.sheetId) ?? structuredClone(found);
     copies.set(found.sheetId, copy);
@@ -172,6 +180,48 @@ function batchUpdate(sheet: FakeSpreadsheet, body: unknown): FetchedResponse {
       const length = Number(detail['length']);
       if (detail['dimension'] === 'ROWS') tab.rowCount = rowsOf(tab) + length;
       else tab.columnCount = (tab.columnCount ?? 26) + length;
+      continue;
+    }
+    if (kind === 'addSheet' && detail !== undefined) {
+      const properties = detail['properties'] as {
+        sheetId: number;
+        title: string;
+        gridProperties: { rowCount: number; columnCount: number };
+      };
+      if ([...sheet.tabs, ...created].some((tab) => tab.title === properties.title)) {
+        return response(400, {
+          error: {
+            code: 400,
+            message: 'A sheet with that name exists.',
+            status: 'INVALID_ARGUMENT',
+          },
+        });
+      }
+      const added: FakeTab = {
+        sheetId: properties.sheetId,
+        title: properties.title,
+        values: [],
+        ...properties.gridProperties,
+      };
+      created.push(added);
+      continue;
+    }
+    if (kind === 'deleteDimension' && detail !== undefined) {
+      const range = detail['range'] as { sheetId: number; startIndex: number; endIndex: number };
+      const tab = copyOf(range.sheetId);
+      tab.values.splice(range.startIndex, range.endIndex - range.startIndex);
+      tab.rowCount = rowsOf(tab) - (range.endIndex - range.startIndex);
+      continue;
+    }
+    if (kind === 'appendCells' && detail !== undefined) {
+      const tab = copyOf(detail['sheetId']);
+      while (tab.values.length > 0 && (tab.values.at(-1) ?? []).every((cell) => cell === '')) {
+        tab.values.pop();
+      }
+      const top = tab.values.length;
+      const rows = detail['rows'] as { values: Record<string, unknown>[] }[];
+      writeRows(tab, top, 0, rows);
+      tab.rowCount = Math.max(rowsOf(tab), top + rows.length);
       continue;
     }
     if (kind !== 'updateCells' || detail === undefined) throw new Error(`unknown ${kind}`);
@@ -192,32 +242,47 @@ function batchUpdate(sheet: FakeSpreadsheet, body: unknown): FetchedResponse {
         error: { code: 400, message: 'Range exceeds grid limits.', status: 'INVALID_ARGUMENT' },
       });
     }
-    rows.forEach((row, offset) => {
-      const values = tab.values[top + offset] ?? [];
-      while (tab.values.length < top + offset) tab.values.push([]);
-      row.values.forEach((cell, column) => {
-        const entered = (cell['userEnteredValue'] ?? {}) as Record<string, unknown>;
-        values[column] =
-          entered['stringValue'] ??
-          entered['numberValue'] ??
-          entered['boolValue'] ??
-          entered['formulaValue'] ??
-          '';
-        const run = (cell['textFormatRuns'] as { format: { link?: { uri: string } } }[])?.[0];
-        const a1 = `${String.fromCharCode(65 + column)}${top + offset + 1}`;
-        tab.links ??= {};
-        if (run?.format.link !== undefined)
-          tab.links[a1] = { uri: run.format.link.uri, place: 'run' };
-        else delete tab.links[a1];
-      });
-      tab.values[top + offset] = values;
-    });
+    writeRows(tab, top, range['startColumnIndex'] ?? 0, rows);
   }
+  for (const tab of created) copyOf(tab.sheetId);
   for (const copy of copies.values()) {
     const index = sheet.tabs.findIndex((tab) => tab.sheetId === copy.sheetId);
-    sheet.tabs[index] = copy;
+    if (index < 0) sheet.tabs.push(copy);
+    else sheet.tabs[index] = copy;
   }
   return response(200, { spreadsheetId: SPREADSHEET_ID, replies: requests.map(() => ({})) });
+}
+
+/** Cells written from `top` (a row index from 0) and `left`, as Sheets keeps them. */
+function writeRows(
+  tab: FakeTab,
+  top: number,
+  left: number,
+  rows: readonly { values: Record<string, unknown>[] }[],
+): void {
+  rows.forEach((row, offset) => {
+    while (tab.values.length < top + offset) tab.values.push([]);
+    const values = tab.values[top + offset] ?? [];
+    row.values.forEach((cell, index) => {
+      const column = left + index;
+      while (values.length < column) values.push('');
+      const entered = (cell['userEnteredValue'] ?? {}) as Record<string, unknown>;
+      values[column] =
+        entered['stringValue'] ??
+        entered['numberValue'] ??
+        entered['boolValue'] ??
+        entered['formulaValue'] ??
+        '';
+      const run = (cell['textFormatRuns'] as { format: { link?: { uri: string } } }[])?.[0];
+      const a1 = `${String.fromCharCode(65 + column)}${top + offset + 1}`;
+      tab.links ??= {};
+      if (run?.format.link !== undefined)
+        tab.links[a1] = { uri: run.format.link.uri, place: 'run' };
+      else delete tab.links[a1];
+    });
+    while (values.length > 0 && values.at(-1) === '') values.pop();
+    tab.values[top + offset] = values;
+  });
 }
 
 function tabOf(sheet: FakeSpreadsheet, quoted: string): FakeTab {

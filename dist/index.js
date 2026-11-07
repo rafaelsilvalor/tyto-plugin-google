@@ -762,11 +762,11 @@ function verbFailed(verb, error) {
     message: `'${verb}' failed: ${withoutFinalStop(describeGoogleError(error))}.`
   };
 }
-function argumentsProblem(verb, problem3) {
+function argumentsProblem(verb, problem4) {
   return {
     severity: "error",
     code: "E_RECIPE_ARGUMENTS",
-    message: `'${verb}' ${withoutFinalStop(problem3)}.`
+    message: `'${verb}' ${withoutFinalStop(problem4)}.`
   };
 }
 function failed(diagnostic) {
@@ -1426,6 +1426,33 @@ var systemClock = { now: () => Date.now() };
 var APPLY_BUDGET_MILLISECONDS = 2e4;
 var NOT_REACHED = "not reached in this call's time; run the cell and Apply again";
 var SHEETS2 = "https://sheets.googleapis.com/v4/spreadsheets";
+function budgetedTransport(host, clock) {
+  const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
+  let outOfTime = false;
+  let refused4 = false;
+  const expired = () => {
+    if (clock.now() > deadline) outOfTime = true;
+    return outOfTime;
+  };
+  return {
+    expired,
+    refusedForTime: () => refused4,
+    transport: {
+      fetch: (url, init) => {
+        if (expired()) {
+          refused4 = true;
+          return Promise.reject(new Error(NOT_REACHED));
+        }
+        return host.fetch(url, init);
+      },
+      now: () => clock.now(),
+      sleep: async (milliseconds) => {
+        if (clock.now() + milliseconds > deadline) outOfTime = true;
+        else await (clock.sleep ?? wait)(milliseconds);
+      }
+    }
+  };
+}
 function spillKey(digest, row) {
   return `plan/${digest}/${row}`;
 }
@@ -1469,37 +1496,20 @@ async function applySheetWrites(host, request, clock = systemClock) {
   }
   const [spreadsheetId = "", sheetText = ""] = first.s.split("/");
   const sheetId = Number(sheetText);
-  const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
-  let outOfTime = false;
-  let refusedForTime = false;
-  const expired = () => {
-    if (clock.now() > deadline) outOfTime = true;
-    return outOfTime;
-  };
-  const transport = {
-    fetch: (url, init) => {
-      if (expired()) {
-        refusedForTime = true;
-        return Promise.reject(new Error(NOT_REACHED));
-      }
-      return host.fetch(url, init);
-    },
-    now: () => clock.now(),
-    sleep: async (milliseconds) => {
-      if (clock.now() + milliseconds > deadline) outOfTime = true;
-      else await (clock.sleep ?? wait)(milliseconds);
-    }
-  };
+  const budget = budgetedTransport(host, clock);
+  const { transport } = budget;
+  const refusedForTime = () => budget.refusedForTime();
+  const expired = () => budget.expired();
   const connection = await connect(host, request.section, transport);
   if (!connection.ok) {
-    if (refusedForTime) return done();
+    if (refusedForTime()) return done();
     settle(pending(), failedWith(connection.error));
     return done();
   }
   const { client } = connection.value;
   const tabs = await readGridTabs(client, spreadsheetId);
   if (!tabs.ok) {
-    if (refusedForTime) return done();
+    if (refusedForTime()) return done();
     settle(pending(), failedWith(tabs.error));
     return done();
   }
@@ -1539,7 +1549,7 @@ async function applySheetWrites(host, request, clock = systemClock) {
         Math.max(...numbers)
       );
       if (!filled.ok) {
-        if (refusedForTime) return done();
+        if (refusedForTime()) return done();
         settle(rows, failedWith(filled.error));
         return done();
       }
@@ -1569,7 +1579,7 @@ async function applySheetWrites(host, request, clock = systemClock) {
       requests
     });
     if (!sent.ok) {
-      if (refusedForTime) return done();
+      if (refusedForTime()) return done();
       settle(writing, batchFailed(sent.error));
       return done();
     }
@@ -1724,6 +1734,318 @@ function recordOf4(value) {
 }
 var wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+// src/sheet-sync-apply.ts
+var SHEETS3 = "https://sheets.googleapis.com/v4/spreadsheets";
+function rowDigest(cells) {
+  const values = [...cells];
+  while (values.length > 0 && values.at(-1) === "") values.pop();
+  return fingerprint(JSON.stringify(values));
+}
+function headerDigest(names) {
+  return fingerprint(JSON.stringify(names));
+}
+function keyText(value) {
+  if (value === void 0 || value === null) return "";
+  if (Array.isArray(value)) return value.map((item) => keyText(item)).join(", ");
+  return String(value).trim();
+}
+var CHANGED = `the row changed since the plan; ${PLAN_AGAIN}`;
+async function applySheetSync(host, request, clock = systemClock) {
+  const outcomes = [];
+  const decoded = [];
+  for (const operation of request.operations) {
+    const each = await decodeOperation2(host, operation.write, operation.payload);
+    outcomes.push(typeof each === "string" ? { status: "failed", reason: each } : void 0);
+    decoded.push(typeof each === "string" ? void 0 : each);
+  }
+  const pending = () => decoded.flatMap(
+    (each, index) => each !== void 0 && outcomes[index] === void 0 ? [index] : []
+  );
+  const settle = (indexes, outcome) => {
+    for (const index of indexes) outcomes[index] = { ...outcome, ...shortReason(outcome) };
+  };
+  const done = () => ({
+    ok: true,
+    value: {
+      operations: outcomes.map((outcome) => outcome ?? { status: "skipped", reason: NOT_REACHED })
+    },
+    diagnostics: []
+  });
+  const first = decoded.find((each) => each !== void 0);
+  if (first === void 0) return done();
+  for (const index of pending()) {
+    const each = decoded[index];
+    if (each !== void 0 && (each.h !== first.h || each.s !== first.s)) {
+      settle([index], failed2("E_GOOGLE_PLAN", `this batch holds two plans; ${PLAN_AGAIN}`));
+    }
+  }
+  const [spreadsheetId = "", sheetText = ""] = first.s.split("/");
+  const sheetId = Number(sheetText);
+  const budget = budgetedTransport(host, clock);
+  const connection = await connect(host, request.section, budget.transport);
+  if (!connection.ok) {
+    if (!budget.refusedForTime()) settle(pending(), failedWith(connection.error));
+    return done();
+  }
+  const { client } = connection.value;
+  const tabs = await readGridTabs(client, spreadsheetId);
+  if (!tabs.ok) {
+    if (!budget.refusedForTime()) settle(pending(), failedWith(tabs.error));
+    return done();
+  }
+  const tab = tabs.value.find((each) => each.sheetId === sheetId);
+  if (tab === void 0) {
+    settle(
+      pending(),
+      failed2(
+        "E_GOOGLE_CHANGED",
+        `the tab the plan syncs (sheet id ${sheetId}) is gone; ${PLAN_AGAIN}`
+      )
+    );
+    return done();
+  }
+  const rowIndexes = pending().filter((index) => decoded[index]?.kind !== "add-tab");
+  const where = /* @__PURE__ */ new Map();
+  const cellsAt = /* @__PURE__ */ new Map();
+  if (rowIndexes.length > 0) {
+    const values = await readValues(client, spreadsheetId, tab);
+    if (!values.ok) {
+      if (!budget.refusedForTime()) settle(rowIndexes, failedWith(values.error));
+      return done();
+    }
+    const anchor = decoded[rowIndexes[0] ?? 0];
+    const names = headerOf2(values.value, tab.title);
+    if (typeof names === "string" || headerDigest(names) !== anchor.hd) {
+      settle(
+        rowIndexes,
+        failed2(
+          "E_GOOGLE_CHANGED",
+          `the header of the tab '${tab.title}' changed since the plan; ${PLAN_AGAIN}`
+        )
+      );
+    }
+    values.value.forEach((cells, index) => {
+      if (index === 0) return;
+      const key = keyText(cells[anchor.kc]);
+      if (key === "") return;
+      where.set(key, [...where.get(key) ?? [], index + 1]);
+      cellsAt.set(index + 1, cells);
+    });
+  }
+  const rowOf2 = /* @__PURE__ */ new Map();
+  for (const index of pending()) {
+    const each = decoded[index];
+    if (each.kind === "add-tab") continue;
+    const found = where.get(each.k) ?? [];
+    if (each.kind === "add") {
+      if (found.length > 0) {
+        settle([index], failed2("E_GOOGLE_CHANGED", `${each.k} is in the tab already: ${CHANGED}`));
+      }
+      continue;
+    }
+    const number = found[0];
+    if (found.length !== 1 || number === void 0) {
+      const why = found.length === 0 ? "is no longer in the tab" : "is in the tab twice now";
+      settle([index], failed2("E_GOOGLE_CHANGED", `${each.k} ${why}: ${CHANGED}`));
+      continue;
+    }
+    if (rowDigest(cellsAt.get(number) ?? []) !== each.d) {
+      settle([index], failed2("E_GOOGLE_CHANGED", `${each.k} (row ${number}): ${CHANGED}`));
+      continue;
+    }
+    rowOf2.set(index, number);
+  }
+  const sheetIdOf = new Map(tabs.value.map((each) => [each.title, each.sheetId]));
+  let nextId = Math.max(0, ...tabs.value.map((each) => each.sheetId)) + 1;
+  const newTabs = [];
+  for (const index of pending()) {
+    const each = decoded[index];
+    if (each.kind !== "add-tab") continue;
+    if (sheetIdOf.has(each.t)) {
+      settle([index], {
+        status: "skipped",
+        reason: `the tab '${each.t}' is in the spreadsheet already`
+      });
+      continue;
+    }
+    sheetIdOf.set(each.t, nextId);
+    nextId += 1;
+    newTabs.push(each);
+  }
+  for (const index of pending()) {
+    const each = decoded[index];
+    if (each.kind === "move" && !sheetIdOf.has(each.t)) {
+      settle(
+        [index],
+        failed2(
+          "E_GOOGLE_CHANGED",
+          `the tab '${each.t}' is no longer in the spreadsheet; ${PLAN_AGAIN}`
+        )
+      );
+    }
+  }
+  if (budget.expired()) return done();
+  const writing = pending();
+  if (writing.length === 0) return done();
+  const requests = requestsOf2(
+    tab,
+    writing.map((index) => [decoded[index], rowOf2.get(index)]),
+    newTabs,
+    sheetIdOf
+  );
+  if (requests.length > 0) {
+    const sent = await client.post(`${SHEETS3}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, {
+      requests
+    });
+    if (!sent.ok) {
+      if (!budget.refusedForTime()) settle(writing, batchFailed(sent.error));
+      return done();
+    }
+  }
+  settle(writing, { status: "applied" });
+  for (const index of writing) {
+    const ck = decoded[index]?.ck;
+    if (ck !== void 0) await forget(host, ck);
+  }
+  return done();
+}
+function requestsOf2(tab, operations, newTabs, sheetIdOf) {
+  const { sheetId } = tab;
+  const requests = [];
+  for (const added2 of newTabs) {
+    const id = sheetIdOf.get(added2.t);
+    requests.push(
+      {
+        addSheet: {
+          properties: {
+            sheetId: id,
+            title: added2.t,
+            gridProperties: { rowCount: 1e3, columnCount: Math.max(26, added2.c.length) }
+          }
+        }
+      },
+      cellsRequest(id ?? 0, 1, 0, added2.c)
+    );
+  }
+  for (const [each, row] of operations) {
+    if (each.kind !== "update" || row === void 0) continue;
+    for (const [at, cell] of each.u) requests.push(cellsRequest(sheetId, row, at, [cell]));
+  }
+  for (const [each] of operations) {
+    if (each.kind !== "move") continue;
+    requests.push({
+      appendCells: {
+        sheetId: sheetIdOf.get(each.t),
+        rows: [{ values: each.c.map(cellData) }],
+        fields: WRITTEN_FIELDS
+      }
+    });
+  }
+  const removed = operations.filter(([each]) => each.kind === "move" || each.kind === "delete").flatMap(([, row]) => row === void 0 ? [] : [row]).sort((a, b) => b - a);
+  if (removed.length > 0 && tab.rowCount - removed.length < 2) {
+    requests.push({
+      appendDimension: { sheetId, dimension: "ROWS", length: 2 - (tab.rowCount - removed.length) }
+    });
+  }
+  for (const row of removed) {
+    requests.push({
+      deleteDimension: {
+        range: { sheetId, dimension: "ROWS", startIndex: row - 1, endIndex: row }
+      }
+    });
+  }
+  const added = operations.flatMap(([each]) => each.kind === "add" ? [each.c] : []);
+  if (added.length > 0) {
+    requests.push({
+      appendCells: {
+        sheetId,
+        rows: added.map((cells) => ({ values: cells.map(cellData) })),
+        fields: WRITTEN_FIELDS
+      }
+    });
+  }
+  return requests;
+}
+function cellsRequest(sheetId, row, column, cells) {
+  return {
+    updateCells: {
+      range: {
+        sheetId,
+        startRowIndex: row - 1,
+        endRowIndex: row,
+        startColumnIndex: column,
+        endColumnIndex: column + cells.length
+      },
+      rows: [{ values: cells.map(cellData) }],
+      fields: WRITTEN_FIELDS
+    }
+  };
+}
+async function decodeOperation2(host, write, payload) {
+  let object = recordOf4(payload);
+  if (object === void 0) return UNREADABLE;
+  const planned = object["x"];
+  if (typeof planned === "string") return planned;
+  let ck;
+  if (typeof object["ck"] === "string" && typeof object["cd"] === "string") {
+    const kept = await spilled(host, object["ck"], object["cd"]);
+    if (typeof kept === "string") return kept;
+    ck = object["ck"];
+    object = kept;
+  }
+  const read = readOperation(write, object);
+  if (read === void 0) return UNREADABLE;
+  return ck === void 0 ? read : { ...read, ck };
+}
+function readOperation(write, object) {
+  const { h, s, kc, hd, k, d, t, c, u } = object;
+  if (!isDigest(h) || !isSheet(s)) return void 0;
+  if (write === "add-tab") {
+    const names = Array.isArray(c) ? c : [];
+    if (typeof t !== "string" || t === "" || !names.every((name) => typeof name === "string")) {
+      return void 0;
+    }
+    return { kind: "add-tab", h, s, t, c: names };
+  }
+  if (typeof kc !== "number" || !Number.isSafeInteger(kc) || kc < 0 || !isDigest(hd) || typeof k !== "string" || k === "") {
+    return void 0;
+  }
+  const anchor = { h, s, kc, hd, k };
+  if (write === "add") {
+    const cells = cellsOf(c);
+    return cells === void 0 ? void 0 : { ...anchor, kind: "add", c: cells };
+  }
+  if (!isDigest(d)) return void 0;
+  if (write === "delete") return { ...anchor, kind: "delete", d };
+  if (write === "move") {
+    const cells = cellsOf(c);
+    if (cells === void 0 || typeof t !== "string" || t === "") return void 0;
+    return { ...anchor, kind: "move", d, t, c: cells };
+  }
+  if (write !== "update" || !Array.isArray(u) || u.length === 0) return void 0;
+  const changes = [];
+  for (const change of u) {
+    if (!Array.isArray(change) || change.length !== 2) return void 0;
+    const [at, value] = change;
+    const cell = readWriteCell(value);
+    if (typeof at !== "number" || !Number.isSafeInteger(at) || at < 0 || cell === void 0) {
+      return void 0;
+    }
+    changes.push([at, cell]);
+  }
+  return { ...anchor, kind: "update", d, u: changes };
+}
+function cellsOf(value) {
+  if (!Array.isArray(value)) return void 0;
+  const cells = [];
+  for (const each of value) {
+    const cell = readWriteCell(each);
+    if (cell === void 0) return void 0;
+    cells.push(cell);
+  }
+  return cells;
+}
+
 // src/sheet-write.ts
 var SHEET_WRITE = "google.sheet-write";
 var CLEAR_WRITE = "clear";
@@ -1752,7 +2074,11 @@ var problem2 = (text) => argumentsProblem(SHEET_WRITE, text);
 var refused2 = (diagnostic) => ({ ok: false, error: [diagnostic] });
 async function planSheetWrite(host, request) {
   const { table } = request;
-  const spreadsheetId = spreadsheetOf(request.arguments["spreadsheet"], request.section);
+  const spreadsheetId = spreadsheetOf(
+    SHEET_WRITE,
+    request.arguments["spreadsheet"],
+    request.section
+  );
   if (typeof spreadsheetId !== "string") return refused2(spreadsheetId);
   const mode = request.arguments["mode"] === "append" ? "append" : "replace";
   const columns = writeColumns(table, String(request.arguments["formulas"] ?? ""));
@@ -1865,32 +2191,33 @@ async function planSheetWrite(host, request) {
   };
 }
 async function rowOperation(host, rowKey, description, payload) {
-  const text = JSON.stringify(payload);
-  const keyed = rowKey === void 0 ? {} : { rowKey };
-  if (utf8Bytes(text) <= SPILL_BYTES) {
-    return {
-      write: ROW_WRITE,
-      ...keyed,
-      description: shortened(description),
-      payload
-    };
-  }
-  const ck = spillKey(payload.h, payload.k);
-  try {
-    await host.cache.put(ck, text);
-  } catch (thrown) {
+  const kept = await keptPayload(host, spillKey(payload.h, payload.k), payload);
+  if (!kept.ok) {
     return plannedFailure(
       rowKey,
       `row ${payload.k}`,
-      `E_GOOGLE_PLAN: row ${payload.k} needs ${utf8Bytes(text).toLocaleString("en-US")} bytes, more than a plan keeps per row, and the plugin's cache refused them: ${messageOf(thrown)}`
+      `E_GOOGLE_PLAN: row ${payload.k} ${kept.reason}`
     );
   }
   return {
     write: ROW_WRITE,
-    ...keyed,
+    ...rowKey === void 0 ? {} : { rowKey },
     description: shortened(description),
-    payload: { ck, cd: fingerprint(text) }
+    payload: kept.payload
   };
+}
+async function keptPayload(host, key, payload) {
+  const text = JSON.stringify(payload);
+  if (utf8Bytes(text) <= SPILL_BYTES) return { ok: true, payload };
+  try {
+    await host.cache.put(key, text);
+  } catch (thrown) {
+    return {
+      ok: false,
+      reason: `needs ${utf8Bytes(text).toLocaleString("en-US")} bytes, more than a plan keeps per row, and the plugin's cache refused them: ${messageOf(thrown)}`
+    };
+  }
+  return { ok: true, payload: { ck: key, cd: fingerprint(text) } };
 }
 async function forgetOldPlans(host) {
   try {
@@ -1899,7 +2226,7 @@ async function forgetOldPlans(host) {
       if (Date.parse(entry.storedAt) < cutoff) await host.cache.delete(entry.key);
     }
   } catch (thrown) {
-    host.log.warn(`${SHEET_WRITE} kept old plans in its cache: ${messageOf(thrown)}`);
+    host.log.warn(`the google plugin kept old plans in its cache: ${messageOf(thrown)}`);
   }
 }
 function plannedFailure(rowKey, description, reason) {
@@ -1961,16 +2288,18 @@ function placed(columns, names, title) {
   }
   return positions;
 }
-function spreadsheetOf(written, section) {
+function spreadsheetOf(verb, written, section) {
   const text = typeof written === "string" ? written.trim() : "";
   if (text !== "") {
-    return spreadsheetIdOf(text) ?? problem2(
+    return spreadsheetIdOf(text) ?? argumentsProblem(
+      verb,
       `spreadsheet= holds '${text}', which is neither a spreadsheet id nor its address, such as https://docs.google.com/spreadsheets/d/<id>/edit`
     );
   }
   const read = readSection(section);
-  if (!read.ok) return verbFailed(SHEET_WRITE, read.error);
-  return read.value.spreadsheet ?? problem2(
+  if (!read.ok) return verbFailed(verb, read.error);
+  return read.value.spreadsheet ?? argumentsProblem(
+    verb,
     "needs spreadsheet=, or spreadsheet in the google section of .tyto/project.json, and was given neither"
   );
 }
@@ -1990,11 +2319,462 @@ function utf8Bytes(text) {
   return new TextEncoder().encode(text).byteLength;
 }
 
+// src/sheet-sync.ts
+var SHEET_SYNC = "google.sheet-sync";
+var SYNC_WRITES = ["add-tab", "update", "move", "delete", "add"];
+var ARGUMENTS3 = [
+  { name: "spreadsheet", type: "text" },
+  { name: "tab", type: "text", required: true },
+  { name: "key", type: "text", required: true },
+  { name: "move", type: "text" },
+  { name: "keep", type: "text" },
+  { name: "archived", type: "text" }
+];
+function sheetSyncVerb(host, clock = systemClock) {
+  return {
+    id: SHEET_SYNC,
+    kind: "sink",
+    arguments: ARGUMENTS3,
+    writes: SYNC_WRITES,
+    plan: (request) => planSheetSync(host, request),
+    apply: (request) => applySheetSync(host, request, clock)
+  };
+}
+var problem3 = (text) => argumentsProblem(SHEET_SYNC, text);
+var refused3 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var warning = (message) => ({
+  severity: "warning",
+  code: "E_RECIPE_VERB",
+  message: `'${SHEET_SYNC}' ${message}`
+});
+async function planSheetSync(host, request) {
+  const { table } = request;
+  const text = (name) => {
+    const value = request.arguments[name];
+    return typeof value === "string" ? value.trim() : "";
+  };
+  const spreadsheetId = spreadsheetOf(
+    SHEET_SYNC,
+    request.arguments["spreadsheet"],
+    request.section
+  );
+  if (typeof spreadsheetId !== "string") return refused3(spreadsheetId);
+  const columns = writeColumns(table, "");
+  if (!Array.isArray(columns)) return refused3(columns);
+  const tableColumn = (name) => columns.find((column) => column.name.toLowerCase() === name.toLowerCase());
+  const keyColumn = tableColumn(text("key"));
+  if (keyColumn === void 0) {
+    return refused3(problem3(`key= names '${text("key")}', which is not a column of the table`));
+  }
+  const moveName = text("move");
+  const moveColumn = moveName === "" ? void 0 : tableColumn(moveName);
+  if (moveName !== "" && moveColumn === void 0) {
+    return refused3(problem3(`move= names '${moveName}', which is not a column of the table`));
+  }
+  const connection = await connect(host, request.section);
+  if (!connection.ok) return refused3(verbFailed(SHEET_SYNC, connection.error));
+  const { client } = connection.value;
+  const tabs = await readGridTabs(client, spreadsheetId);
+  if (!tabs.ok) return refused3(verbFailed(SHEET_SYNC, tabs.error));
+  const tab = pickTab(tabs.value, text("tab"));
+  if (typeof tab === "string") return refused3(problem3(tab));
+  const values = await readValues(client, spreadsheetId, tab);
+  if (!values.ok) return refused3(verbFailed(SHEET_SYNC, values.error));
+  const names = headerOf2(values.value, tab.title);
+  if (typeof names === "string") return refused3(problem3(names));
+  const kc = columnIndexOf(names, keyColumn.name);
+  if (kc === void 0) {
+    return refused3(problem3(`the tab '${tab.title}' has no column '${keyColumn.name}' in row 1`));
+  }
+  const keep = listOf3(text("keep")).map((name) => [name, columnIndexOf(names, name)]);
+  const unknownKeep = keep.filter(([, index]) => index === void 0).map(([name]) => name);
+  if (unknownKeep.length > 0) {
+    return refused3(
+      problem3(`keep= names ${listed(unknownKeep)}, which the tab '${tab.title}' has no column for`)
+    );
+  }
+  const keepIndexes = new Set(keep.map(([, index]) => index));
+  const placed2 = [];
+  const unplaced = [];
+  for (const column of columns) {
+    const at = columnIndexOf(names, column.name);
+    if (at === void 0) {
+      if (column !== moveColumn) unplaced.push(column.name);
+    } else if (!keepIndexes.has(at)) {
+      placed2.push({ column, at });
+    }
+  }
+  if (unplaced.length > 0) {
+    return refused3(
+      problem3(
+        `cannot write ${listed(unplaced)}: the tab '${tab.title}' has no column of that name in row 1. Its columns are ${listed(names)}`
+      )
+    );
+  }
+  const inTab = /* @__PURE__ */ new Map();
+  const unkeyed = [];
+  for (let index = 1; index < values.value.length; index += 1) {
+    const cells = values.value[index] ?? [];
+    const number = index + 1;
+    const key = keyText(cells[kc]);
+    if (key === "") {
+      if (cells.some((cell) => cell !== "")) unkeyed.push(number);
+      continue;
+    }
+    const before = inTab.get(key);
+    if (before !== void 0) {
+      return refused3(
+        problem3(
+          `rows ${before.number} and ${number} of the tab '${tab.title}' both hold '${key}' in ${names[kc] ?? ""}; a key must be unique, and the sync does not guess which row is it`
+        )
+      );
+    }
+    inTab.set(key, { number, cells });
+  }
+  const inTable = /* @__PURE__ */ new Map();
+  const drafts = [];
+  for (const row of table.rows) {
+    const key = keyText(row.values[keyColumn.name]);
+    if (key === "") {
+      drafts.push({
+        write: "add",
+        rowKey: row.key,
+        description: `add ${row.key}`,
+        failure: `E_GOOGLE_PLAN: ${row.key} has no ${keyColumn.name}, which key= names`
+      });
+      continue;
+    }
+    if (inTable.has(key)) {
+      return refused3(
+        problem3(`the table holds '${key}' in ${keyColumn.name} twice; a key must be unique`)
+      );
+    }
+    inTable.set(key, row);
+  }
+  if (table.rows.length === 0 && inTab.size > 0) {
+    return {
+      ok: true,
+      value: { target: targetOf(tab, spreadsheetId), operations: [], count: 0 },
+      diagnostics: [
+        warning(
+          `was handed no rows, and the tab '${tab.title}' holds ${inTab.size}: it deletes nothing. An empty table is what a failed read before this step looks like; check it before you trust this run`
+        )
+      ]
+    };
+  }
+  const tabsRead = /* @__PURE__ */ new Map();
+  const archived = /* @__PURE__ */ new Set();
+  for (const title of listOf3(text("archived"))) {
+    const found = pickTab(tabs.value, title);
+    if (typeof found === "string") continue;
+    const read = await readValues(client, spreadsheetId, found);
+    if (!read.ok) return refused3(verbFailed(SHEET_SYNC, read.error));
+    tabsRead.set(found.title, read.value);
+    if (read.value.length === 0) continue;
+    const archivedNames = headerOf2(read.value, found.title);
+    if (typeof archivedNames === "string") return refused3(problem3(archivedNames));
+    const at = columnIndexOf(archivedNames, keyColumn.name);
+    if (at === void 0) {
+      return refused3(
+        problem3(`archived= names '${found.title}', which has no column '${keyColumn.name}'`)
+      );
+    }
+    for (const row of read.value.slice(1)) {
+      const key = keyText(row[at]);
+      if (key !== "") archived.add(key);
+    }
+  }
+  const linked = placed2.filter(
+    ({ column }) => column.link !== void 0 || column.linksItself === true
+  );
+  const cellsOf2 = (row) => {
+    const cells = /* @__PURE__ */ new Map();
+    for (const { column, at } of placed2) {
+      const cell = writeCellOf(
+        row.values[column.name],
+        column,
+        column.link === void 0 ? void 0 : row.values[column.link]
+      );
+      if (cell !== null && typeof cell === "object" && "problem" in cell) return cell.problem;
+      cells.set(at, cell);
+    }
+    return cells;
+  };
+  const destinationOf = (key) => moveColumn === void 0 ? "" : keyText(inTable.get(key)?.values[moveColumn.name]);
+  const moving = [...inTab.keys()].some((key) => inTable.has(key) && destinationOf(key) !== "");
+  const lastRow = values.value.length;
+  const extras = await readCellExtras(
+    client,
+    spreadsheetId,
+    tab,
+    { links: moving ? names.map((_, index) => index) : linked.map(({ at }) => at), notes: [] },
+    lastRow
+  );
+  if (!extras.ok) return refused3(verbFailed(SHEET_SYNC, extras.error));
+  const linkAt = (at, number) => extras.value.links[String(at)]?.[String(number)];
+  const s = `${spreadsheetId}/${tab.sheetId}`;
+  const hd = headerDigest(names);
+  const anchor = (key) => ({ s, kc, hd, k: key });
+  const preserved = [];
+  let unchanged = 0;
+  const moves = [];
+  const deletes = [];
+  for (const [key, row] of inTab) {
+    const input = inTable.get(key);
+    if (input === void 0) {
+      const kept = [...keepIndexes].some((at) => keyText(row.cells[at]) !== "");
+      if (kept) preserved.push(key);
+      else {
+        deletes.push({
+          write: "delete",
+          // No rowKey: the host names only rows of the table, and this one left it.
+          description: `delete ${key} (row ${row.number}), which the table no longer holds`,
+          payload: { ...anchor(key), d: rowDigest(row.cells) }
+        });
+      }
+      continue;
+    }
+    const cells = cellsOf2(input);
+    if (typeof cells === "string") {
+      drafts.push({
+        write: "update",
+        rowKey: input.key,
+        description: `update ${key}`,
+        failure: `E_GOOGLE_PLAN: ${key}: ${cells}`
+      });
+      continue;
+    }
+    const destination = destinationOf(key);
+    if (destination !== "") {
+      moves.push({ key, row, destination, cells });
+      continue;
+    }
+    const changed = [];
+    for (const [at, cell] of cells) {
+      const read = linked.some((each) => each.at === at);
+      if (!sameCell(cell, row.cells[at], read ? linkAt(at, row.number) : void 0)) {
+        changed.push([at, cell]);
+      }
+    }
+    if (changed.length === 0) {
+      unchanged += 1;
+      continue;
+    }
+    const shown = changed.map(([at, cell]) => `${names[at] ?? ""}: ${shownRaw(row.cells[at])} \u2192 ${shownCell(cell)}`).join("; ");
+    drafts.push({
+      write: "update",
+      rowKey: input.key,
+      description: `update ${key} (row ${row.number}): ${shown}`,
+      payload: {
+        ...anchor(key),
+        d: rowDigest(row.cells),
+        u: changed.map(([at, cell]) => [at, cell])
+      }
+    });
+  }
+  const destinations = /* @__PURE__ */ new Map();
+  const tabDrafts = [];
+  for (const { destination } of moves) {
+    if (destinations.has(destination)) continue;
+    const found = pickTab(tabs.value, destination);
+    if (typeof found === "string") {
+      destinations.set(destination, names);
+      tabDrafts.push({
+        write: "add-tab",
+        description: `add the tab '${destination}', with the header ${names.join(", ")}`,
+        payload: { s, t: destination, c: names }
+      });
+      continue;
+    }
+    if (found.sheetId === tab.sheetId) {
+      destinations.set(destination, `move= names the tab '${tab.title}' this step syncs`);
+      continue;
+    }
+    let read = tabsRead.get(found.title);
+    if (read === void 0) {
+      const answer = await readValues(client, spreadsheetId, found);
+      if (!answer.ok) return refused3(verbFailed(SHEET_SYNC, answer.error));
+      read = answer.value;
+      tabsRead.set(found.title, read);
+    }
+    const header = read.length === 0 ? "is empty" : headerOf2(read, found.title);
+    destinations.set(
+      destination,
+      header === "is empty" ? `the tab '${found.title}' is empty; write its header in row 1, or delete the tab so the sync adds it` : header
+    );
+  }
+  const moveDrafts = moves.map(({ key, row, destination, cells }) => {
+    const header = destinations.get(destination) ?? names;
+    const base = {
+      write: "move",
+      rowKey: inTable.get(key)?.key ?? key,
+      description: `move ${key} (row ${row.number}) to the tab '${destination}'`
+    };
+    if (typeof header === "string") return { ...base, failure: `E_GOOGLE_PLAN: ${header}` };
+    const merged = names.map(
+      (_, at) => cells.has(at) ? cells.get(at) ?? null : sheetCell(row.cells[at], linkAt(at, row.number))
+    );
+    const placedCells = header.map(() => null);
+    const missing = [];
+    merged.forEach((cell, at) => {
+      const to = columnIndexOf(header, names[at] ?? "");
+      if (to !== void 0) placedCells[to] = cell;
+      else if (cell !== null) missing.push(names[at] ?? "");
+    });
+    if (missing.length > 0) {
+      return {
+        ...base,
+        failure: `E_GOOGLE_PLAN: the tab '${destination}' has no column ${listed(missing)}, which ${key} fills`
+      };
+    }
+    const title = pickTab(tabs.value, destination);
+    return {
+      ...base,
+      payload: {
+        ...anchor(key),
+        d: rowDigest(row.cells),
+        t: typeof title === "string" ? destination : title.title,
+        c: trimmed(placedCells)
+      }
+    };
+  });
+  const skippedArchived = [];
+  const skippedNeverHere = [];
+  const addDrafts = [];
+  for (const [key, row] of inTable) {
+    if (inTab.has(key)) continue;
+    if (archived.has(key)) {
+      skippedArchived.push(key);
+      continue;
+    }
+    if (destinationOf(key) !== "") {
+      skippedNeverHere.push(key);
+      continue;
+    }
+    const cells = cellsOf2(row);
+    if (typeof cells === "string") {
+      addDrafts.push({
+        write: "add",
+        rowKey: row.key,
+        description: `add ${key}`,
+        failure: `E_GOOGLE_PLAN: ${key}: ${cells}`
+      });
+      continue;
+    }
+    const line = trimmed(names.map((_, at) => cells.get(at) ?? null));
+    addDrafts.push({
+      write: "add",
+      rowKey: row.key,
+      description: `add ${key}: ${line.map(shownCell).join(" | ")}`,
+      payload: { ...anchor(key), c: line }
+    });
+  }
+  const ordered = [...tabDrafts, ...drafts, ...moveDrafts, ...deletes, ...addDrafts];
+  if (ordered.length > MAX_OPERATIONS) {
+    return refused3(
+      problem3(
+        `would plan ${ordered.length.toLocaleString("en-US")} operations, over the ${MAX_OPERATIONS.toLocaleString("en-US")} one plan holds; split the table`
+      )
+    );
+  }
+  const h = fingerprint(JSON.stringify([s, hd, ordered]));
+  await forgetOldPlans(host);
+  const operations = [];
+  for (const [index, draft] of ordered.entries()) {
+    operations.push(await operationOf(host, draft, h, index + 1));
+  }
+  const diagnostics = [];
+  if (preserved.length > 0) {
+    diagnostics.push(
+      warning(
+        `keeps ${preserved.length} row(s) the table no longer holds, because their ${listed(keep.map(([name]) => name))} hold text a person wrote: ${listed(preserved)}`
+      )
+    );
+  }
+  if (skippedArchived.length > 0) {
+    diagnostics.push(
+      warning(
+        `does not add ${listed(skippedArchived)}, already in ${listed(listOf3(text("archived")))}`
+      )
+    );
+  }
+  if (skippedNeverHere.length > 0) {
+    diagnostics.push(
+      warning(
+        `does not add ${listed(skippedNeverHere)}: move= sends them to another tab, and they were never in '${tab.title}'`
+      )
+    );
+  }
+  if (unkeyed.length > 0) {
+    diagnostics.push(
+      warning(
+        `leaves rows ${unkeyed.join(", ")} of '${tab.title}' as they are: they hold no ${names[kc] ?? ""}`
+      )
+    );
+  }
+  if (unchanged > 0)
+    host.log.info(`${SHEET_SYNC}: ${unchanged} row(s) already as the table has them`);
+  return {
+    ok: true,
+    value: { target: targetOf(tab, spreadsheetId), operations, count: operations.length },
+    diagnostics
+  };
+}
+async function operationOf(host, draft, h, index) {
+  const keyed = draft.rowKey === void 0 ? {} : { rowKey: draft.rowKey };
+  const failing = (reason) => ({
+    write: draft.write,
+    ...keyed,
+    description: shortened(`${draft.description} (will fail: ${reason})`),
+    payload: { x: shortened(reason) }
+  });
+  if (draft.failure !== void 0 || draft.payload === void 0) {
+    return failing(draft.failure ?? "E_GOOGLE_PLAN: nothing to write");
+  }
+  const kept = await keptPayload(host, spillKey(h, index), { h, ...draft.payload });
+  if (!kept.ok) return failing(`E_GOOGLE_PLAN: ${draft.rowKey ?? draft.write} ${kept.reason}`);
+  return {
+    write: draft.write,
+    ...keyed,
+    description: shortened(draft.description),
+    payload: kept.payload
+  };
+}
+function sameCell(cell, raw, link) {
+  const value = raw ?? "";
+  if (cell === null) return value === "" && link === void 0;
+  if (typeof cell !== "object")
+    return value === cell && (typeof cell !== "string" || link === void 0);
+  return "t" in cell && value === cell.t && link === cell.u;
+}
+function sheetCell(raw, link) {
+  const value = raw ?? "";
+  if (link !== void 0 && /^(https?:\/\/|mailto:)\S+$/i.test(link)) {
+    return { t: value === "" ? link : String(value), u: link };
+  }
+  return value === "" ? null : value;
+}
+function shownRaw(raw) {
+  if (raw === void 0 || raw === "") return "(blank)";
+  return typeof raw === "boolean" ? raw ? "TRUE" : "FALSE" : String(raw);
+}
+function listOf3(text) {
+  return [
+    ...new Set(
+      text.split(",").map((name) => name.trim()).filter((name) => name !== "")
+    )
+  ];
+}
+function targetOf(tab, spreadsheetId) {
+  return `the tab '${tab.title}' of spreadsheet ${spreadsheetId}`;
+}
+
 // src/index.ts
 function activate(host) {
   const registered = [
     host.registerRecipeVerb(sheetRowsVerb(host)),
-    host.registerRecipeVerb(sheetWriteVerb(host))
+    host.registerRecipeVerb(sheetWriteVerb(host)),
+    host.registerRecipeVerb(sheetSyncVerb(host))
   ];
   return {
     dispose() {

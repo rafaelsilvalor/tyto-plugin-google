@@ -156,6 +156,57 @@ digest; if the cache no longer holds it, or holds something else, the row fails 
 `E_GOOGLE_PLAN` and asks you to run the cell again. Kept rows of plans over 7 days old are
 forgotten when a new plan is made.
 
+## `google.sheet-sync`
+
+A sink: makes one tab hold the table's rows, matched by a key column, as a plan you read and
+then apply. Rows the table no longer holds leave the tab, and rows marked done move to another
+tab.
+
+```
+google.sheet-sync tab=Queue key=ID move=Filed keep=Notes archived=Archive
+```
+
+| Argument       | What it does                                                                        |
+| -------------- | ----------------------------------------------------------------------------------- |
+| `spreadsheet=` | The spreadsheet, as its id or its address; the section's `spreadsheet` by default.  |
+| `tab=`         | The tab the rows live in; required. Row 1 holds the column names.                   |
+| `key=`         | The column, in the table and in the tab, that says which row is which; required.    |
+| `move=`        | A column of the table naming the tab a row moves to; blank keeps the row here.      |
+| `keep=`        | Columns, comma-separated, that people write by hand: never overwritten.             |
+| `archived=`    | Tabs, comma-separated, whose keys were filed away: the sync does not add them back. |
+
+| In the tab | In the table           | Planned                                                   |
+| ---------- | ---------------------- | --------------------------------------------------------- |
+| yes        | yes, `move=` blank     | `update` of the cells that differ; nothing when none does |
+| yes        | yes, `move=` names tab | `move` to that tab, after an `add-tab` when it is missing |
+| yes        | no, `keep=` blank      | `delete`                                                  |
+| yes        | no, `keep=` holds text | nothing: kept, with a warning naming it                   |
+| no         | yes, in `archived=`    | nothing: it was filed away, with a warning                |
+| no         | yes, `move=` names tab | nothing: a row never in the tab is not invented           |
+| no         | yes                    | `add` under the last row                                  |
+
+- **An empty table over a tab with rows plans nothing**, and warns: an empty input looks the
+  same as a read that failed before this step, and every row would be deleted.
+- **A key twice in the tab or in the table is refused**, naming the rows; the sync never
+  guesses which one is meant. A tab row with a blank key is left as it is, with a warning.
+- Every table column must be a column of the tab, except `move=`'s; `keep=` columns are written
+  only by `add`. Cells are written as `google.sheet-write` writes them: text is never a
+  formula, and a `<name>_url` column links its column.
+- A **moved** row takes the tab's cells, the table's over them, to its new tab under each
+  column of the same name; a column the new tab lacks, where the row holds something, fails
+  that move in the plan. A new tab gets this tab's header. A moved cell keeps its web link, but
+  it is written as its value: a formula or a date's format does not travel.
+
+### Applying a sync
+
+Each batch of 100 is **one `spreadsheets.batchUpdate`**: new tabs, cell updates, moved rows
+copied, rows removed from the bottom up, then new rows appended. A move's copy and its removal
+land together or not at all. Before it writes, the batch reads the tab once and finds each row
+by its key, not by the number it had when planned: a row whose cells changed since the plan
+fails alone with `E_GOOGLE_CHANGED` "the row changed since the plan", as does an `add` whose
+key reached the tab, and the others are written. A refused or lost batch reads as for
+`google.sheet-write`, and so do the 20 s budget and the rows kept in the cache.
+
 ## Retries
 
 A 429, and Drive's `rateLimitExceeded` and `userRateLimitExceeded` 403s, are retried on any
