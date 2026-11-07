@@ -1,0 +1,21 @@
+name: contract
+# Moves this repository onto the newest published Tyto contract (Tyto ADR 0154). Tyto's
+# reusable workflow re-adds every `@tyto/*` alias package.json asks for at `@latest`, moves the
+# manifest's `engine` with `@tyto/plugin-api`, runs the checks on that tree, and opens one pull
+# request on `tyto/contract-update` only when they pass. A red run here is a warning, not a
+# broken main: the newest contract breaks this repository, and nothing was opened.
+on:
+  schedule:
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+concurrency: { group: contract, cancel-in-progress: false }
+# The job pushes the bot branch, opens the pull request and dispatches ci.yml on it, because a
+# pull request opened with the workflow's own token starts no checks by itself.
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+  packages: read
+jobs:
+  newest-contract:
+    uses: rafaelsilvalor/tyto/.github/workflows/contract-update.yml@main
