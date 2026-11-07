@@ -33,6 +33,61 @@ the permissions below and asks for your approval.
 The plugin signs in as a Google Cloud service account only. Signing in as a person is a later
 version.
 
+## Credentials
+
+The plugin signs in as a Google Cloud service account, with the account's JSON key. Create
+one in Google Cloud (IAM, Service accounts, Keys, **Add key**, JSON), enable the Sheets and
+Drive APIs in its project, and share each spreadsheet or folder with the account's email,
+such as `tyto@example-project.iam.gserviceaccount.com`.
+
+| Where        | The whole JSON key, from `{` to `}`          |
+| ------------ | -------------------------------------------- |
+| Command line | `TYTO_PLUGIN_GOOGLE_SERVICE_ACCOUNT`         |
+| Desktop app  | the system keychain, from the plugins screen |
+
+The key must be a `service_account` key with a PKCS#8 `private_key`. Its assertion goes only to
+`https://oauth2.googleapis.com/token`, whatever the key's `token_uri` says; a key naming another
+endpoint is refused. The access token it buys is kept in the plugin's memory only, never in a
+file or in Tyto's cache, and is renewed a minute before it expires.
+
+## The `google` section of `.tyto/project.json`
+
+```json
+{
+  "google": {
+    "spreadsheet": "https://docs.google.com/spreadsheets/d/<id>/edit",
+    "root": "https://drive.google.com/drive/folders/<id>"
+  }
+}
+```
+
+- `spreadsheet`: the spreadsheet the Sheets verbs read and write unless a step names another,
+  as its id or its address.
+- `root`: the Drive folder the Drive verbs stay under, as its id or its address.
+- `tabs`: settings per tab, by the tab's name, for the verbs that format a tab.
+
+## Retries
+
+A 429, and Drive's `rateLimitExceeded` and `userRateLimitExceeded` 403s, are retried on any
+request; a 5xx and a network failure only on a read, because a write that failed that way may
+have been done. Each retry waits Google's `Retry-After`, or 10 s and then 20 s, and never past
+20 s from the first try: Tyto gives one call of a plugin 30 s. Past that, the call answers
+`E_GOOGLE_RATE` and asks you to run again in a minute. A redirect is never followed.
+
+## Errors
+
+| Code                | What happened                                                                                      |
+| ------------------- | -------------------------------------------------------------------------------------------------- |
+| `E_GOOGLE_CONFIG`   | No key, a key that is not a service account's, a wrong `google` section, or an API not enabled.    |
+| `E_GOOGLE_AUTH`     | Google refused the key (`invalid_grant`: revoked, or the clock is off), or the file is not shared. |
+| `E_GOOGLE_REDIRECT` | Google answered a redirect, which is never followed.                                               |
+| `E_GOOGLE_HTTP`     | Any other failed answer, such as a missing file or a 5xx still failing after its retry.            |
+| `E_GOOGLE_RATE`     | Google kept asking to slow down for the whole retry budget.                                        |
+| `E_GOOGLE_NETWORK`  | No answer: Tyto refused the request, or the network failed.                                        |
+| `E_GOOGLE_RESPONSE` | A 2xx that is not the JSON Google promises.                                                        |
+
+No message carries the token, the signed assertion or the key, even when Google echoes them.
+
 ## Development
 
 `pnpm check` runs Prettier, the type checker, ESLint and the tests; `pnpm build` writes

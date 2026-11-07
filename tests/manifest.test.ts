@@ -36,6 +36,8 @@ describe('tyto-plugin.json', () => {
     const plugin = await harness();
     expect(plugin.manifest.name).toBe('google');
     expect(plugin.manifest.namespace).toBe('google');
+    // No setting: the configuration is the project's `google` section, handed to every call.
+    expect(plugin.manifest.contributes).toEqual(['recipe-verb']);
     expect(plugin.manifest.permissions).toEqual([
       'net:oauth2.googleapis.com',
       'net:sheets.googleapis.com',

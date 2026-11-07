@@ -2,7 +2,7 @@
   "name": "google",
   "version": "0.1.0",
   "engine": ">=0.15",
-  "contributes": ["configuration", "recipe-verb"],
+  "contributes": ["recipe-verb"],
   "permissions": [
     "net:oauth2.googleapis.com",
     "net:sheets.googleapis.com",
