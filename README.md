@@ -5,9 +5,9 @@ Google Drive from a recipe. Tyto knows no provider (Tyto ADR 0011, ADR 0127): ev
 Google-specific lives here, in its own repository, and reaches Tyto only through the plugin API.
 This repository is public and unlicensed.
 
-**Work in progress.** This version reads a spreadsheet tab with `google.sheet-rows`. The
-other verbs arrive one pull request at a time, all in the `google` namespace:
-`google.sheet-write`, `google.sheet-sync`, `google.drive-list`, `google.drive-read`,
+**Work in progress.** This version reads a spreadsheet tab with `google.sheet-rows` and writes
+one with `google.sheet-write`. The other verbs arrive one pull request at a time, all in the
+`google` namespace: `google.sheet-sync`, `google.drive-list`, `google.drive-read`,
 `google.drive-move` and `google.drive-count`.
 
 ## Install
@@ -102,6 +102,60 @@ google.sheet-rows tab=Tasks key=ID links=Brief notes=Owner
   while Drive still gives the same `version`, and running again without cache reads Google.
   When Drive does not give a version, the tab is read live and nothing is cached.
 
+## `google.sheet-write`
+
+A sink: writes the table into one tab of a spreadsheet, as a plan you read and then apply.
+Nothing is written until you apply it.
+
+```
+google.sheet-write tab=Report mode=replace formulas=Total
+```
+
+| Argument       | What it does                                                                       |
+| -------------- | ---------------------------------------------------------------------------------- |
+| `spreadsheet=` | The spreadsheet, as its id or its address; the section's `spreadsheet` by default. |
+| `tab=`         | The tab, by its name, as `google.sheet-rows` finds it; the first tab by default.   |
+| `mode=`        | `replace` or `append`; required, because `replace` clears the tab.                 |
+| `formulas=`    | Columns, comma-separated, whose cells starting with `=` are written as formulas.   |
+
+- **`mode=replace`** plans a `clear` of the tab's values and links, then a `write-row` for the
+  header (the table's column names, in row 1) and one for each row under it. Colours, borders
+  and number formats stay as the sheet has them.
+- **`mode=append`** plans a `write-row` for each row under the last row that holds anything,
+  each cell under the header of its column's name (case is ignored). A column the header does
+  not name is refused before anything is planned. An empty tab gets the header first.
+- **Text is never a formula.** A cell that starts with `=` is written as text unless its column
+  is in `formulas=`, so a recipe cannot be made to write a formula it read from a web page or a
+  ticket. Numbers and booleans keep their type; a list is written as its items joined by `, `.
+- **Links** are written as a linked run of text, the link Ctrl+K makes, never as
+  `=HYPERLINK`. A `<name>_url` link column beside a `<name>` column links that column's text
+  and is not written as a column of its own, which is how `google.sheet-rows links=` reads it
+  back; any other link column is written as its address, linked. A link that is not `http`,
+  `https` or `mailto` is a planned failure.
+- **A row that cannot be written** (a refused link, a cell over the 50,000 characters a Sheets
+  cell holds) is shown in the plan as one that will fail, and fails on Apply with no request.
+
+### Applying a plan
+
+Tyto applies a plan 100 operations at a time. Each batch is **one `spreadsheets.batchUpdate`**:
+the clear first when the batch holds it, then the rows and columns the grid lacks, then the
+rows. Google writes a batch whole or not at all, so its operations share one outcome:
+
+- A refusal (a 400, a 403, a 429 past the retries) wrote **none** of the batch.
+- A 5xx or a lost answer **may** have written it, and is not retried, because a second try
+  could write the rows twice: read the tab before you apply again.
+- A row lands only where the tab is still empty, unless its batch clears the tab first; a row
+  filled since the plan fails alone with `E_GOOGLE_CHANGED`. A replace plan's later batches
+  write only after its clear was applied, so a refused clear never leaves new rows among old
+  ones.
+- One batch spends at most 20 s; what it did not reach is `skipped`, never half-written.
+
+A plan keeps at most 2,048 bytes per row. A row whose cells take more is kept in the plugin's
+cache until it is applied, under `plan/<digest>/<row>`, and the plan holds only its name and
+digest; if the cache no longer holds it, or holds something else, the row fails with
+`E_GOOGLE_PLAN` and asks you to run the cell again. Kept rows of plans over 7 days old are
+forgotten when a new plan is made.
+
 ## Retries
 
 A 429, and Drive's `rateLimitExceeded` and `userRateLimitExceeded` 403s, are retried on any
@@ -121,6 +175,8 @@ have been done. Each retry waits Google's `Retry-After`, or 10 s and then 20 s, 
 | `E_GOOGLE_RATE`     | Google kept asking to slow down for the whole retry budget.                                        |
 | `E_GOOGLE_NETWORK`  | No answer: Tyto refused the request, or the network failed.                                        |
 | `E_GOOGLE_RESPONSE` | A 2xx that is not the JSON Google promises.                                                        |
+| `E_GOOGLE_PLAN`     | A planned row that cannot be written as planned: run the cell again for a new plan.                |
+| `E_GOOGLE_CHANGED`  | The tab changed since the plan where a row would land: run the cell again for a new plan.          |
 
 No message carries the token, the signed assertion or the key, even when Google echoes them.
 

@@ -19,7 +19,11 @@ export type GoogleErrorCode =
   /** The request never got an answer: Tyto refused it, or the network failed. */
   | 'E_GOOGLE_NETWORK'
   /** A 2xx whose body is not the JSON Google promises. */
-  | 'E_GOOGLE_RESPONSE';
+  | 'E_GOOGLE_RESPONSE'
+  /** A planned write that cannot be applied as planned: run the cell again for a new plan. */
+  | 'E_GOOGLE_PLAN'
+  /** The tab a plan writes to changed since the plan, so the write would land on other cells. */
+  | 'E_GOOGLE_CHANGED';
 
 export interface GoogleError {
   readonly code: GoogleErrorCode;

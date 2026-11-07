@@ -94,8 +94,8 @@ var PKCS8_HEADER = "-----BEGIN PRIVATE KEY-----";
 var PKCS8_FOOTER = "-----END PRIVATE KEY-----";
 var SIGNING_ALGORITHM = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" };
 function isPkcs8Pem(pem) {
-  const trimmed = pem.trim();
-  return trimmed.startsWith(PKCS8_HEADER) && trimmed.endsWith(PKCS8_FOOTER);
+  const trimmed2 = pem.trim();
+  return trimmed2.startsWith(PKCS8_HEADER) && trimmed2.endsWith(PKCS8_FOOTER);
 }
 function pemToDer(pem) {
   const body = pem.trim().slice(PKCS8_HEADER.length, -PKCS8_FOOTER.length).replace(/\s+/g, "");
@@ -279,11 +279,11 @@ function folderIdOf(written) {
 }
 function idOf(written, path, hostname) {
   if (typeof written !== "string") return void 0;
-  const trimmed = written.trim();
-  if (DRIVE_ID.test(trimmed)) return trimmed;
+  const trimmed2 = written.trim();
+  if (DRIVE_ID.test(trimmed2)) return trimmed2;
   let url;
   try {
-    url = new URL(trimmed);
+    url = new URL(trimmed2);
   } catch {
     return void 0;
   }
@@ -322,9 +322,9 @@ async function send(transport, outgoing, redact) {
       const hostCode = hostCodeOf(thrown);
       const why = `${label} got no answer: ${messageOf(thrown)}`;
       if (idempotent && hostCode === void 0) {
-        const wait2 = waitFor(void 0, retry);
-        if (now() - started + wait2 <= RETRY_BUDGET_MILLISECONDS) {
-          await sleep(wait2);
+        const wait3 = waitFor(void 0, retry);
+        if (now() - started + wait3 <= RETRY_BUDGET_MILLISECONDS) {
+          await sleep(wait3);
           continue;
         }
       }
@@ -350,9 +350,9 @@ async function send(transport, outgoing, redact) {
     const rate = isRateLimited(status, readErrorBody(text));
     if (!rate && !(idempotent && status >= 500)) return googleOk({ status, headers, text });
     const asked = retryAfter(headerOf(headers, "retry-after"), now());
-    const wait = waitFor(asked, retry);
-    if (now() - started + wait <= RETRY_BUDGET_MILLISECONDS) {
-      await sleep(wait);
+    const wait2 = waitFor(asked, retry);
+    if (now() - started + wait2 <= RETRY_BUDGET_MILLISECONDS) {
+      await sleep(wait2);
       continue;
     }
     const tried = retry === 0 ? "" : ` after ${retry} ${retry === 1 ? "retry" : "retries"}`;
@@ -379,9 +379,9 @@ function waitFor(asked, retry) {
 }
 function retryAfter(header, now) {
   if (header === void 0) return void 0;
-  const trimmed = header.trim();
-  if (/^\d+$/.test(trimmed)) return Number(trimmed) * 1e3;
-  const date = Date.parse(trimmed);
+  const trimmed2 = header.trim();
+  if (/^\d+$/.test(trimmed2)) return Number(trimmed2) * 1e3;
+  const date = Date.parse(trimmed2);
   return Number.isNaN(date) ? void 0 : Math.max(0, date - now);
 }
 function createGoogleClient(options) {
@@ -636,10 +636,10 @@ function tokenRefusal(text) {
 }
 
 // src/connect.ts
-async function connect(host, section) {
+async function connect(host, section, through) {
   const config = await resolveGoogleConfig(host, section);
   if (!config.ok) return config;
-  const transport = { fetch: (url, init) => host.fetch(url, init) };
+  const transport = through ?? { fetch: (url, init) => host.fetch(url, init) };
   const tokens = createTokenSource({ transport, account: config.value.account });
   const client = createGoogleClient({
     transport,
@@ -762,11 +762,11 @@ function verbFailed(verb, error) {
     message: `'${verb}' failed: ${withoutFinalStop(describeGoogleError(error))}.`
   };
 }
-function argumentsProblem(verb, problem2) {
+function argumentsProblem(verb, problem3) {
   return {
     severity: "error",
     code: "E_RECIPE_ARGUMENTS",
-    message: `'${verb}' ${withoutFinalStop(problem2)}.`
+    message: `'${verb}' ${withoutFinalStop(problem3)}.`
   };
 }
 function failed(diagnostic) {
@@ -940,6 +940,48 @@ function pickTab(tabs, written) {
   const loose = tabs.filter((tab) => tab.title.toLowerCase() === lowered);
   if (loose.length === 1 && loose[0] !== void 0) return loose[0];
   return `the spreadsheet has no tab '${written}'; its tabs are ${tabs.map((tab) => `'${tab.title}'`).join(", ")}`;
+}
+async function readGridTabs(client, spreadsheetId) {
+  const answer = await client.get(`${SHEETS}/${encodeURIComponent(spreadsheetId)}`, {
+    fields: "sheets.properties(sheetId,title,gridProperties(rowCount,columnCount))"
+  });
+  if (!answer.ok) return answer;
+  const sheets = recordOf3(answer.value)?.["sheets"];
+  if (!Array.isArray(sheets)) return malformed("the spreadsheet", "no sheets");
+  const tabs = [];
+  for (const sheet of sheets) {
+    const properties = recordOf3(recordOf3(sheet)?.["properties"]);
+    const sheetId = properties?.["sheetId"] ?? 0;
+    const title = properties?.["title"];
+    const grid = recordOf3(properties?.["gridProperties"]);
+    if (!Number.isSafeInteger(sheetId) || typeof title !== "string") {
+      return malformed("the spreadsheet", "a tab with no id or title");
+    }
+    tabs.push({
+      sheetId,
+      title,
+      rowCount: numberOr(grid?.["rowCount"], 0),
+      columnCount: numberOr(grid?.["columnCount"], 0)
+    });
+  }
+  return googleOk(tabs);
+}
+async function filledRows(client, spreadsheetId, tab, from, to) {
+  const range = encodeURIComponent(`${quotedTitle(tab.title)}!${from}:${to}`);
+  const answer = await client.get(
+    `${SHEETS}/${encodeURIComponent(spreadsheetId)}/values/${range}`,
+    { majorDimension: "ROWS", valueRenderOption: "FORMULA" }
+  );
+  if (!answer.ok) return answer;
+  const rows = recordOf3(answer.value)?.["values"] ?? [];
+  if (!Array.isArray(rows)) return malformed(`the tab '${tab.title}'`, "values that are no list");
+  const filled = /* @__PURE__ */ new Set();
+  rows.forEach((row, offset) => {
+    if (Array.isArray(row) && row.some((cell) => cell !== null && cell !== "")) {
+      filled.add(from + offset);
+    }
+  });
+  return googleOk(filled);
 }
 function quotedTitle(title) {
   return `'${title.replace(/'/g, "''")}'`;
@@ -1216,9 +1258,9 @@ function readOf(snapshot, asked, fetchedAt) {
   const find = (argument, written) => {
     const index = columnIndexOf(names, written);
     if (index !== void 0) return index;
-    const listed = names.slice(0, 20).map((name) => `'${name}'`).join(", ");
+    const listed2 = names.slice(0, 20).map((name) => `'${name}'`).join(", ");
     return problem(
-      `${argument}= names '${written}', which is not a column of the tab '${snapshot.title}'; its columns are ${listed}${names.length > 20 ? ", \u2026" : ""}`
+      `${argument}= names '${written}', which is not a column of the tab '${snapshot.title}'; its columns are ${listed2}${names.length > 20 ? ", \u2026" : ""}`
     );
   };
   let key;
@@ -1260,8 +1302,8 @@ function readArguments(values, section) {
   const text = (name) => {
     const value = values[name];
     if (value === void 0) return void 0;
-    const trimmed = String(value).trim();
-    return trimmed === "" ? void 0 : trimmed;
+    const trimmed2 = String(value).trim();
+    return trimmed2 === "" ? void 0 : trimmed2;
   };
   let spreadsheetId;
   const written = text("spreadsheet");
@@ -1301,9 +1343,659 @@ function readArguments(values, section) {
   };
 }
 
+// src/sheet-cells.ts
+var CELL_TEXT_LIMIT = 5e4;
+var LINK = /^(https?:\/\/[^\s]+|mailto:[^\s]+)$/i;
+function writeCellOf(value, column, link) {
+  const text = textOf(value ?? null);
+  const uri = textOf((column.linksItself === true ? value : link) ?? null);
+  if (uri !== null && uri !== "") {
+    if (!LINK.test(uri)) {
+      return {
+        problem: `${column.link ?? column.name} holds '${shortly(uri)}', which is not a web address`
+      };
+    }
+    const shown = text === null || text === "" ? uri : text;
+    return tooLong(column, shown) ?? { t: shown, u: uri };
+  }
+  if (value === void 0 || value === null) return null;
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (text === null || text === "") return null;
+  const limit = tooLong(column, text);
+  if (limit !== void 0) return limit;
+  return column.formula && text.startsWith("=") ? { f: text } : text;
+}
+function tooLong(column, text) {
+  if (text.length <= CELL_TEXT_LIMIT) return void 0;
+  return {
+    problem: `${column.name} holds ${text.length.toLocaleString("en-US")} characters, over the ${CELL_TEXT_LIMIT.toLocaleString("en-US")} a Sheets cell holds`
+  };
+}
+function textOf(value) {
+  if (value === null) return null;
+  if (Array.isArray(value)) {
+    return value.map((item) => textOf(item)).filter((item) => item !== null && item !== "").join(", ");
+  }
+  return String(value);
+}
+function shortly(text) {
+  return text.length > 60 ? `${text.slice(0, 59)}\u2026` : text;
+}
+function readWriteCell(value) {
+  if (value === null || typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") return value;
+  if (typeof value !== "object" || Array.isArray(value)) return void 0;
+  const record = value;
+  const keys = Object.keys(record).sort().join(",");
+  const f = record["f"];
+  if (keys === "f" && typeof f === "string" && f.startsWith("=")) return { f };
+  const t = record["t"];
+  const u = record["u"];
+  if (keys === "t,u" && typeof t === "string" && typeof u === "string" && LINK.test(u)) {
+    return { t, u };
+  }
+  return void 0;
+}
+var WRITTEN_FIELDS = "userEnteredValue,textFormatRuns,userEnteredFormat.textFormat.link";
+var LINK_COLOUR = { red: 0.067, green: 0.4, blue: 0.86 };
+function cellData(cell) {
+  if (cell === null) return {};
+  if (typeof cell === "number") return { userEnteredValue: { numberValue: cell } };
+  if (typeof cell === "boolean") return { userEnteredValue: { boolValue: cell } };
+  if (typeof cell === "string") return { userEnteredValue: { stringValue: cell } };
+  if ("f" in cell) return { userEnteredValue: { formulaValue: cell.f } };
+  return {
+    userEnteredValue: { stringValue: cell.t },
+    textFormatRuns: [
+      {
+        startIndex: 0,
+        format: { link: { uri: cell.u }, underline: true, foregroundColor: LINK_COLOUR }
+      }
+    ]
+  };
+}
+function shownCell(cell) {
+  if (cell === null) return "";
+  if (typeof cell === "boolean") return cell ? "TRUE" : "FALSE";
+  if (typeof cell !== "object") return String(cell);
+  return "f" in cell ? cell.f : `${cell.t} (${cell.u})`;
+}
+
+// src/sheet-write-apply.ts
+var systemClock = { now: () => Date.now() };
+var APPLY_BUDGET_MILLISECONDS = 2e4;
+var NOT_REACHED = "not reached in this call's time; run the cell and Apply again";
+var SHEETS2 = "https://sheets.googleapis.com/v4/spreadsheets";
+function spillKey(digest, row) {
+  return `plan/${digest}/${row}`;
+}
+function clearedKey(digest) {
+  return `plan/${digest}/cleared`;
+}
+var PLAN_AGAIN = "run the cell again for a new plan";
+async function applySheetWrites(host, request, clock = systemClock) {
+  const outcomes = [];
+  const decoded = [];
+  for (const operation of request.operations) {
+    const each = await decodeOperation(host, operation.write, operation.payload);
+    if (typeof each === "string") {
+      outcomes.push({ status: "failed", reason: each });
+      decoded.push(void 0);
+    } else {
+      outcomes.push(void 0);
+      decoded.push(each);
+    }
+  }
+  const pending = () => decoded.flatMap(
+    (each, index) => each !== void 0 && outcomes[index] === void 0 ? [index] : []
+  );
+  const settle = (indexes, outcome) => {
+    for (const index of indexes) outcomes[index] = { ...outcome, ...shortReason(outcome) };
+  };
+  const done = () => ({
+    ok: true,
+    value: {
+      operations: outcomes.map((outcome) => outcome ?? { status: "skipped", reason: NOT_REACHED })
+    },
+    diagnostics: []
+  });
+  const first = decoded.find((each) => each !== void 0);
+  if (first === void 0) return done();
+  for (const index of pending()) {
+    const each = decoded[index];
+    if (each !== void 0 && (each.h !== first.h || each.s !== first.s)) {
+      settle([index], failed2("E_GOOGLE_PLAN", `this batch holds two plans; ${PLAN_AGAIN}`));
+    }
+  }
+  const [spreadsheetId = "", sheetText = ""] = first.s.split("/");
+  const sheetId = Number(sheetText);
+  const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
+  let outOfTime = false;
+  let refusedForTime = false;
+  const expired = () => {
+    if (clock.now() > deadline) outOfTime = true;
+    return outOfTime;
+  };
+  const transport = {
+    fetch: (url, init) => {
+      if (expired()) {
+        refusedForTime = true;
+        return Promise.reject(new Error(NOT_REACHED));
+      }
+      return host.fetch(url, init);
+    },
+    now: () => clock.now(),
+    sleep: async (milliseconds) => {
+      if (clock.now() + milliseconds > deadline) outOfTime = true;
+      else await (clock.sleep ?? wait)(milliseconds);
+    }
+  };
+  const connection = await connect(host, request.section, transport);
+  if (!connection.ok) {
+    if (refusedForTime) return done();
+    settle(pending(), failedWith(connection.error));
+    return done();
+  }
+  const { client } = connection.value;
+  const tabs = await readGridTabs(client, spreadsheetId);
+  if (!tabs.ok) {
+    if (refusedForTime) return done();
+    settle(pending(), failedWith(tabs.error));
+    return done();
+  }
+  const tab = tabs.value.find((each) => each.sheetId === sheetId);
+  if (tab === void 0) {
+    settle(
+      pending(),
+      failed2(
+        "E_GOOGLE_CHANGED",
+        `the tab the plan writes to (sheet id ${sheetId}) is no longer in the spreadsheet; ` + PLAN_AGAIN
+      )
+    );
+    return done();
+  }
+  const clears = pending().filter((index) => decoded[index]?.kind === "clear");
+  const clearsHere = clears.length > 0;
+  const rowIndexes = () => pending().filter((index) => decoded[index]?.kind === "row");
+  if (!clearsHere) {
+    const replacing = rowIndexes().filter((index) => decoded[index].m === "r");
+    if (replacing.length > 0 && !await wasCleared(host, first.h)) {
+      settle(
+        replacing,
+        failed2(
+          "E_GOOGLE_PLAN",
+          `the clear this plan starts with was not applied, so these rows would land among the tab's old ones; ${PLAN_AGAIN}`
+        )
+      );
+    }
+    const rows = rowIndexes();
+    const numbers = rows.map((index) => decoded[index].k);
+    if (numbers.length > 0) {
+      const filled = await filledRows(
+        client,
+        spreadsheetId,
+        tab,
+        Math.min(...numbers),
+        Math.max(...numbers)
+      );
+      if (!filled.ok) {
+        if (refusedForTime) return done();
+        settle(rows, failedWith(filled.error));
+        return done();
+      }
+      for (const index of rows) {
+        const row = decoded[index];
+        if (filled.value.has(row.k)) {
+          settle(
+            [index],
+            failed2(
+              "E_GOOGLE_CHANGED",
+              `row ${row.k} of the tab '${tab.title}' holds values the plan did not see, so writing it would overwrite them; ${PLAN_AGAIN}`
+            )
+          );
+        }
+      }
+    }
+  }
+  if (expired()) return done();
+  const writing = pending();
+  if (writing.length === 0) return done();
+  const requests = requestsOf(
+    tab,
+    writing.map((index) => decoded[index])
+  );
+  if (requests.length > 0) {
+    const sent = await client.post(`${SHEETS2}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, {
+      requests
+    });
+    if (!sent.ok) {
+      if (refusedForTime) return done();
+      settle(writing, batchFailed(sent.error));
+      return done();
+    }
+  }
+  settle(writing, { status: "applied" });
+  if (clearsHere) await markCleared(host, first.h);
+  for (const index of writing) {
+    const ck = decoded[index].ck;
+    if (ck !== void 0) await forget(host, ck);
+  }
+  return done();
+}
+function requestsOf(tab, operations) {
+  const requests = [];
+  const { sheetId } = tab;
+  if (operations.some((each) => each.kind === "clear")) {
+    requests.push({ updateCells: { range: { sheetId }, fields: WRITTEN_FIELDS } });
+  }
+  const rows = operations.filter((each) => each.kind === "row");
+  const lastRow = Math.max(0, ...rows.map((row) => row.k));
+  const width = Math.max(0, ...rows.map((row) => row.c.length));
+  if (lastRow > tab.rowCount) {
+    requests.push({
+      appendDimension: { sheetId, dimension: "ROWS", length: lastRow - tab.rowCount }
+    });
+  }
+  if (width > tab.columnCount) {
+    requests.push({
+      appendDimension: { sheetId, dimension: "COLUMNS", length: width - tab.columnCount }
+    });
+  }
+  for (const row of rows) {
+    if (row.c.length === 0) continue;
+    requests.push({
+      updateCells: {
+        range: {
+          sheetId,
+          startRowIndex: row.k - 1,
+          endRowIndex: row.k,
+          startColumnIndex: 0,
+          endColumnIndex: row.c.length
+        },
+        rows: [{ values: row.c.map(cellData) }],
+        fields: WRITTEN_FIELDS
+      }
+    });
+  }
+  return requests;
+}
+async function decodeOperation(host, write, payload) {
+  const object = recordOf4(payload);
+  if (object === void 0) return UNREADABLE;
+  const planned = object["x"];
+  if (typeof planned === "string") return planned;
+  if (write === "clear") {
+    const { h, s } = object;
+    return isDigest(h) && isSheet(s) ? { kind: "clear", h, s } : UNREADABLE;
+  }
+  if (write !== "write-row") return UNREADABLE;
+  const ck = object["ck"];
+  const cd = object["cd"];
+  if (typeof ck === "string" && typeof cd === "string") {
+    const kept = await spilled(host, ck, cd);
+    if (typeof kept === "string") return kept;
+    const row = rowOf(kept);
+    return row === void 0 ? UNREADABLE : { ...row, ck };
+  }
+  return rowOf(object) ?? UNREADABLE;
+}
+function rowOf(object) {
+  const { k, h, s, m, c } = object;
+  if (typeof k !== "number" || !Number.isSafeInteger(k) || k < 1 || !isDigest(h) || !isSheet(s) || m !== "r" && m !== "a" || !Array.isArray(c)) {
+    return void 0;
+  }
+  const cells = [];
+  for (const cell of c) {
+    const read = readWriteCell(cell);
+    if (read === void 0) return void 0;
+    cells.push(read);
+  }
+  return { kind: "row", k, h, s, m, c: cells };
+}
+async function spilled(host, key, digest) {
+  let stored;
+  try {
+    stored = await host.cache.get(key);
+  } catch (thrown) {
+    return `E_GOOGLE_PLAN: the row's cells, kept in the plugin's cache, could not be read (${messageOf(thrown)}); ${PLAN_AGAIN}`;
+  }
+  if (stored === void 0) {
+    return `E_GOOGLE_PLAN: the row's cells were kept in the plugin's cache, which no longer holds them; ${PLAN_AGAIN}`;
+  }
+  const text = new TextDecoder().decode(stored.bytes);
+  if (fingerprint(text) !== digest) {
+    return `E_GOOGLE_PLAN: the plugin's cache holds other cells for this row than the plan kept; ${PLAN_AGAIN}`;
+  }
+  try {
+    return recordOf4(JSON.parse(text)) ?? UNREADABLE;
+  } catch {
+    return UNREADABLE;
+  }
+}
+var UNREADABLE = `E_GOOGLE_PLAN: this operation carries no payload this version of the plugin reads; ${PLAN_AGAIN}`;
+async function wasCleared(host, digest) {
+  try {
+    return await host.cache.get(clearedKey(digest)) !== void 0;
+  } catch {
+    return false;
+  }
+}
+async function markCleared(host, digest) {
+  try {
+    await host.cache.put(clearedKey(digest), (/* @__PURE__ */ new Date()).toISOString());
+  } catch (thrown) {
+    host.log.warn(
+      `google.sheet-write could not remember that the tab was cleared (${messageOf(thrown)}); the plan's later batches will fail and ask for a new plan`
+    );
+  }
+}
+async function forget(host, key) {
+  try {
+    await host.cache.delete(key);
+  } catch {
+  }
+}
+function batchFailed(error) {
+  const lost = error.status !== void 0 && error.status >= 500 || error.code === "E_GOOGLE_NETWORK" && error.hostCode === void 0;
+  return {
+    status: "failed",
+    reason: lost ? `${describeGoogleError(error)} This batch may have been written: Google did not say. Read the tab before you apply again.` : `${describeGoogleError(error)} None of this batch was written: Google writes a batch whole or not at all.`
+  };
+}
+function failed2(code, reason) {
+  return { status: "failed", reason: `${code}: ${reason}` };
+}
+function failedWith(error) {
+  return { status: "failed", reason: describeGoogleError(error) };
+}
+function shortReason(outcome) {
+  const { reason } = outcome;
+  if (reason === void 0 || reason.length <= 500) return {};
+  return { reason: `${reason.slice(0, 499)}\u2026` };
+}
+function isDigest(value) {
+  return typeof value === "string" && /^[0-9a-f]{16}$/.test(value);
+}
+function isSheet(value) {
+  return typeof value === "string" && /^[A-Za-z0-9_-]+\/\d+$/.test(value);
+}
+function recordOf4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+var wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+// src/sheet-write.ts
+var SHEET_WRITE = "google.sheet-write";
+var CLEAR_WRITE = "clear";
+var ROW_WRITE = "write-row";
+var MAX_OPERATIONS = 1e4;
+var MAX_DESCRIPTION_LENGTH = 500;
+var SPILL_BYTES = 1800;
+var PLAN_ENTRY_DAYS = 7;
+var ARGUMENTS2 = [
+  { name: "spreadsheet", type: "text" },
+  { name: "tab", type: "text" },
+  { name: "mode", type: "text", required: true, values: ["replace", "append"] },
+  { name: "formulas", type: "text" }
+];
+function sheetWriteVerb(host, clock = systemClock) {
+  return {
+    id: SHEET_WRITE,
+    kind: "sink",
+    arguments: ARGUMENTS2,
+    writes: [CLEAR_WRITE, ROW_WRITE],
+    plan: (request) => planSheetWrite(host, request),
+    apply: (request) => applySheetWrites(host, request, clock)
+  };
+}
+var problem2 = (text) => argumentsProblem(SHEET_WRITE, text);
+var refused2 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+async function planSheetWrite(host, request) {
+  const { table } = request;
+  const spreadsheetId = spreadsheetOf(request.arguments["spreadsheet"], request.section);
+  if (typeof spreadsheetId !== "string") return refused2(spreadsheetId);
+  const mode = request.arguments["mode"] === "append" ? "append" : "replace";
+  const columns = writeColumns(table, String(request.arguments["formulas"] ?? ""));
+  if (!Array.isArray(columns)) return refused2(columns);
+  const connection = await connect(host, request.section);
+  if (!connection.ok) return refused2(verbFailed(SHEET_WRITE, connection.error));
+  const { client } = connection.value;
+  const tabs = await readGridTabs(client, spreadsheetId);
+  if (!tabs.ok) return refused2(verbFailed(SHEET_WRITE, tabs.error));
+  const written = request.arguments["tab"];
+  const tab = pickTab(
+    tabs.value,
+    typeof written === "string" ? written.trim() || void 0 : void 0
+  );
+  if (typeof tab === "string") return refused2(problem2(tab));
+  let positions;
+  let header;
+  let start;
+  if (mode === "replace") {
+    positions = columns.map((_, index) => index);
+    header = columns.map((column) => column.name);
+    start = 2;
+  } else {
+    const values = await readValues(client, spreadsheetId, tab);
+    if (!values.ok) return refused2(verbFailed(SHEET_WRITE, values.error));
+    if (values.value.length === 0) {
+      positions = columns.map((_, index) => index);
+      header = columns.map((column) => column.name);
+      start = 2;
+    } else {
+      const names = headerOf2(values.value, tab.title);
+      if (typeof names === "string") return refused2(problem2(names));
+      const found = placed(columns, names, tab.title);
+      if (!Array.isArray(found)) return refused2(found);
+      positions = found;
+      start = values.value.length + 1;
+    }
+  }
+  const fixed = (mode === "replace" ? 1 : 0) + (header === void 0 ? 0 : 1);
+  if (fixed + table.rows.length > MAX_OPERATIONS) {
+    return refused2(
+      problem2(
+        `would write ${table.rows.length.toLocaleString("en-US")} rows, over the ${(MAX_OPERATIONS - fixed).toLocaleString("en-US")} one plan holds; split the table`
+      )
+    );
+  }
+  const rows = table.rows.map((row) => {
+    const cells = [];
+    for (const [index, column] of columns.entries()) {
+      const cell = writeCellOf(
+        row.values[column.name],
+        column,
+        column.link === void 0 ? void 0 : row.values[column.link]
+      );
+      if (cell !== null && typeof cell === "object" && "problem" in cell) return cell.problem;
+      cells[positions[index] ?? index] = cell;
+    }
+    return trimmed(Array.from(cells, (cell) => cell ?? null));
+  });
+  const headerCells = header === void 0 ? void 0 : trimmed(header);
+  const s = `${spreadsheetId}/${tab.sheetId}`;
+  const h = fingerprint(JSON.stringify([s, mode, start, headerCells ?? null, rows]));
+  await forgetOldPlans(host);
+  const m = mode === "replace" ? "r" : "a";
+  const operations = [];
+  if (mode === "replace") {
+    operations.push({
+      write: CLEAR_WRITE,
+      description: shortened(
+        `clear every value and link of the tab '${tab.title}', then write the table from row 1`
+      ),
+      payload: { h, s }
+    });
+  }
+  if (headerCells !== void 0) {
+    operations.push(
+      await rowOperation(host, void 0, `row 1: the header ${headerCells.join(", ")}`, {
+        k: 1,
+        h,
+        s,
+        m,
+        c: headerCells
+      })
+    );
+  }
+  for (const [index, row] of table.rows.entries()) {
+    const k = start + index;
+    const cells = rows[index];
+    if (cells === void 0) continue;
+    if (typeof cells === "string") {
+      operations.push(plannedFailure(row.key, `row ${k}`, `E_GOOGLE_PLAN: ${row.key}: ${cells}`));
+      continue;
+    }
+    const shown = cells.map(shownCell).join(" | ");
+    operations.push(
+      await rowOperation(host, row.key, `row ${k}: ${shown === "" ? "(blank)" : shown}`, {
+        k,
+        h,
+        s,
+        m,
+        c: cells
+      })
+    );
+  }
+  const target = `the tab '${tab.title}' of spreadsheet ${spreadsheetId}`;
+  return {
+    ok: true,
+    value: { target, operations, count: operations.length },
+    diagnostics: []
+  };
+}
+async function rowOperation(host, rowKey, description, payload) {
+  const text = JSON.stringify(payload);
+  const keyed = rowKey === void 0 ? {} : { rowKey };
+  if (utf8Bytes(text) <= SPILL_BYTES) {
+    return {
+      write: ROW_WRITE,
+      ...keyed,
+      description: shortened(description),
+      payload
+    };
+  }
+  const ck = spillKey(payload.h, payload.k);
+  try {
+    await host.cache.put(ck, text);
+  } catch (thrown) {
+    return plannedFailure(
+      rowKey,
+      `row ${payload.k}`,
+      `E_GOOGLE_PLAN: row ${payload.k} needs ${utf8Bytes(text).toLocaleString("en-US")} bytes, more than a plan keeps per row, and the plugin's cache refused them: ${messageOf(thrown)}`
+    );
+  }
+  return {
+    write: ROW_WRITE,
+    ...keyed,
+    description: shortened(description),
+    payload: { ck, cd: fingerprint(text) }
+  };
+}
+async function forgetOldPlans(host) {
+  try {
+    const cutoff = Date.now() - PLAN_ENTRY_DAYS * 24 * 60 * 60 * 1e3;
+    for (const entry of await host.cache.list("plan/")) {
+      if (Date.parse(entry.storedAt) < cutoff) await host.cache.delete(entry.key);
+    }
+  } catch (thrown) {
+    host.log.warn(`${SHEET_WRITE} kept old plans in its cache: ${messageOf(thrown)}`);
+  }
+}
+function plannedFailure(rowKey, description, reason) {
+  return {
+    write: ROW_WRITE,
+    ...rowKey === void 0 ? {} : { rowKey },
+    description: shortened(`${description} (will fail: ${reason})`),
+    payload: { x: shortened(reason) }
+  };
+}
+function writeColumns(table, formulas) {
+  const byName = new Map(table.columns.map((column) => [column.name.toLowerCase(), column]));
+  const folded = /* @__PURE__ */ new Map();
+  for (const column of table.columns) {
+    const match = /^(.*)_url$/i.exec(column.name);
+    const base = match?.[1] === void 0 ? void 0 : byName.get(match[1].toLowerCase());
+    if (column.type === "link" && base !== void 0 && base.type !== "link") {
+      folded.set(base.name, column.name);
+    }
+  }
+  const linkColumns = new Set(folded.values());
+  const asked = [
+    ...new Set(
+      formulas.split(",").map((name) => name.trim()).filter((name) => name !== "")
+    )
+  ];
+  const formulaNames = /* @__PURE__ */ new Set();
+  for (const name of asked) {
+    const column = byName.get(name.toLowerCase());
+    if (column === void 0 || linkColumns.has(column.name)) {
+      return problem2(
+        `formulas= names '${name}', which is not a column the table writes; its columns are ` + listed(table.columns.map((each) => each.name).filter((each) => !linkColumns.has(each)))
+      );
+    }
+    formulaNames.add(column.name);
+  }
+  return table.columns.filter((column) => !linkColumns.has(column.name)).map((column) => {
+    const link = folded.get(column.name);
+    return {
+      name: column.name,
+      ...link === void 0 ? {} : { link },
+      ...column.type === "link" ? { linksItself: true } : {},
+      formula: formulaNames.has(column.name)
+    };
+  });
+}
+function placed(columns, names, title) {
+  const positions = [];
+  const missing = [];
+  for (const column of columns) {
+    const index = names.findIndex((name) => name.toLowerCase() === column.name.toLowerCase());
+    if (index < 0) missing.push(column.name);
+    positions.push(index);
+  }
+  if (missing.length > 0) {
+    return problem2(
+      `cannot append ${listed(missing)}: the tab '${title}' has no column of that name in row 1. Its columns are ${listed(names)}; rename the table's columns, or add them to the tab`
+    );
+  }
+  return positions;
+}
+function spreadsheetOf(written, section) {
+  const text = typeof written === "string" ? written.trim() : "";
+  if (text !== "") {
+    return spreadsheetIdOf(text) ?? problem2(
+      `spreadsheet= holds '${text}', which is neither a spreadsheet id nor its address, such as https://docs.google.com/spreadsheets/d/<id>/edit`
+    );
+  }
+  const read = readSection(section);
+  if (!read.ok) return verbFailed(SHEET_WRITE, read.error);
+  return read.value.spreadsheet ?? problem2(
+    "needs spreadsheet=, or spreadsheet in the google section of .tyto/project.json, and was given neither"
+  );
+}
+function trimmed(cells) {
+  let end = cells.length;
+  while (end > 0 && cells[end - 1] === null) end -= 1;
+  return cells.slice(0, end);
+}
+function listed(names) {
+  const shown = names.slice(0, 20).map((name) => `'${name}'`);
+  return `${shown.join(", ")}${names.length > 20 ? ", \u2026" : ""}`;
+}
+function shortened(text, limit = MAX_DESCRIPTION_LENGTH) {
+  return text.length <= limit ? text : `${text.slice(0, limit - 1)}\u2026`;
+}
+function utf8Bytes(text) {
+  return new TextEncoder().encode(text).byteLength;
+}
+
 // src/index.ts
 function activate(host) {
-  const registered = [host.registerRecipeVerb(sheetRowsVerb(host))];
+  const registered = [
+    host.registerRecipeVerb(sheetRowsVerb(host)),
+    host.registerRecipeVerb(sheetWriteVerb(host))
+  ];
   return {
     dispose() {
       for (const registration of registered) registration.dispose();

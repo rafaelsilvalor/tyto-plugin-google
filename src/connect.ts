@@ -19,10 +19,12 @@ export interface Connection {
 export async function connect(
   host: ConnectHost,
   section: unknown,
+  /** A way out other than `host.fetch` alone: an Apply's, which stops at its budget. */
+  through?: Transport,
 ): Promise<GoogleResult<Connection>> {
   const config = await resolveGoogleConfig(host, section);
   if (!config.ok) return config;
-  const transport: Transport = { fetch: (url, init) => host.fetch(url, init) };
+  const transport: Transport = through ?? { fetch: (url, init) => host.fetch(url, init) };
   const tokens = createTokenSource({ transport, account: config.value.account });
   const client = createGoogleClient({
     transport,
