@@ -19,6 +19,21 @@ export type Diagnostic = Extract<PageAnswer, { readonly ok: false }>['error'][nu
 export type ArgumentSpec = RecipeVerbContribution['arguments'][number];
 export type ArgumentValues = PageRequest['arguments'];
 
+/** What a sink plans (Tyto ADR 0129) and Apply hands back (ADR 0170), off the same contract. */
+type PlanFunction = NonNullable<RecipeVerbContribution['plan']>;
+export type PlanRequest = Parameters<PlanFunction>[0];
+export type PlanAnswer = Awaited<ReturnType<PlanFunction>>;
+export type Plan = Extract<PlanAnswer, { readonly ok: true }>['value'];
+export type PlannedOperation = Plan['operations'][number];
+export type JsonValue = Exclude<PlannedOperation['payload'], undefined>;
+type ApplyFunction = NonNullable<RecipeVerbContribution['apply']>;
+export type ApplyRequest = Parameters<ApplyFunction>[0];
+export type ApplyAnswer = Awaited<ReturnType<ApplyFunction>>;
+export type AppliedOperation = Extract<
+  ApplyAnswer,
+  { readonly ok: true }
+>['value']['operations'][number];
+
 /** Who made a column, and the source a row's provenance names. */
 export const ORIGIN = 'google';
 

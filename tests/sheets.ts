@@ -27,6 +27,9 @@ export interface FakeTab {
   /** By A1 cell, such as `B2`. */
   links?: Record<string, { readonly uri: string; readonly place?: LinkPlace }>;
   notes?: Record<string, string>;
+  /** The grid's size, 1,000 by 26 when left out, as a new tab's. */
+  rowCount?: number;
+  columnCount?: number;
 }
 
 export interface FakeSpreadsheet {
@@ -35,6 +38,8 @@ export interface FakeSpreadsheet {
   version: string;
   /** Drive's answer to the version, when a test wants it to fail. */
   driveFailure?: FetchedResponse;
+  /** Answers to the next batchUpdates, in order, in place of writing them. */
+  batchFailures?: FetchedResponse[];
 }
 
 export interface SheetCall {
@@ -42,6 +47,8 @@ export interface SheetCall {
   readonly host: string;
   readonly path: string;
   readonly query: Readonly<Record<string, string | string[]>>;
+  /** The JSON body, parsed, when the call sent one. */
+  readonly body?: unknown;
 }
 
 export interface FakeGoogle {
@@ -84,6 +91,7 @@ export async function fakeGoogle(
         host: parsed.host,
         path: decodeURIComponent(parsed.pathname),
         query,
+        ...(typeof init.body === 'string' ? { body: JSON.parse(init.body) as unknown } : {}),
       };
       calls.push(call);
       return answerOf(sheet, call);
@@ -106,14 +114,110 @@ function answerOf(sheet: FakeSpreadsheet, call: SheetCall): FetchedResponse {
       sheets: sheet.tabs.map((tab) => ({ properties: { sheetId: tab.sheetId, title: tab.title } })),
     });
   }
+  if (call.path === base && String(call.query['fields']).includes('gridProperties')) {
+    return response(200, {
+      sheets: sheet.tabs.map((tab) => ({
+        properties: {
+          sheetId: tab.sheetId,
+          title: tab.title,
+          gridProperties: { rowCount: rowsOf(tab), columnCount: tab.columnCount ?? 26 },
+        },
+      })),
+    });
+  }
+  if (call.method === 'POST' && call.path === `${base}:batchUpdate`) {
+    return sheet.batchFailures?.shift() ?? batchUpdate(sheet, call.body);
+  }
   if (call.path.startsWith(`${base}/values/`)) {
-    const tab = tabOf(sheet, call.path.slice(`${base}/values/`.length));
+    const range = call.path.slice(`${base}/values/`.length);
+    const rows = /^(.*)!(\d+):(\d+)$/.exec(range);
+    if (rows !== null) {
+      const tab = tabOf(sheet, rows[1] ?? '');
+      const from = Number(rows[2]);
+      const slice = tab.values.slice(from - 1, Number(rows[3]));
+      while (slice.length > 0 && (slice.at(-1) ?? []).every((cell) => cell === '')) slice.pop();
+      return response(200, { range, majorDimension: 'ROWS', values: slice });
+    }
+    const tab = tabOf(sheet, range);
     return response(200, { range: tab.title, majorDimension: 'ROWS', values: tab.values });
   }
   if (call.path === base && call.query['ranges'] !== undefined) {
     return response(200, extrasOf(sheet, call));
   }
   throw new Error(`no fake answers ${call.method} ${call.path}`);
+}
+
+function rowsOf(tab: FakeTab): number {
+  return tab.rowCount ?? 1000;
+}
+
+/**
+ * `spreadsheets.batchUpdate` over the fake, as Google runs it: every request in order on a
+ * copy, kept only when all of them succeed. A cell written outside the grid is Google's 400.
+ */
+function batchUpdate(sheet: FakeSpreadsheet, body: unknown): FetchedResponse {
+  const requests = (body as { requests: Record<string, Record<string, unknown>>[] }).requests;
+  const copies = new Map<number, FakeTab>();
+  const copyOf = (sheetId: unknown): FakeTab => {
+    const found = sheet.tabs.find((tab) => tab.sheetId === sheetId);
+    if (found === undefined) throw new Error(`no tab ${String(sheetId)}`);
+    const copy = copies.get(found.sheetId) ?? structuredClone(found);
+    copies.set(found.sheetId, copy);
+    return copy;
+  };
+  for (const request of requests) {
+    const [kind, detail] = Object.entries(request)[0] ?? [];
+    if (kind === 'appendDimension' && detail !== undefined) {
+      const tab = copyOf(detail['sheetId']);
+      const length = Number(detail['length']);
+      if (detail['dimension'] === 'ROWS') tab.rowCount = rowsOf(tab) + length;
+      else tab.columnCount = (tab.columnCount ?? 26) + length;
+      continue;
+    }
+    if (kind !== 'updateCells' || detail === undefined) throw new Error(`unknown ${kind}`);
+    const range = detail['range'] as Record<string, number>;
+    const tab = copyOf(range['sheetId']);
+    const rows = detail['rows'] as { values: Record<string, unknown>[] }[] | undefined;
+    if (rows === undefined) {
+      tab.values = [];
+      tab.links = {};
+      continue;
+    }
+    const top = range['startRowIndex'] ?? 0;
+    if (
+      top + rows.length > rowsOf(tab) ||
+      (range['endColumnIndex'] ?? 0) > (tab.columnCount ?? 26)
+    ) {
+      return response(400, {
+        error: { code: 400, message: 'Range exceeds grid limits.', status: 'INVALID_ARGUMENT' },
+      });
+    }
+    rows.forEach((row, offset) => {
+      const values = tab.values[top + offset] ?? [];
+      while (tab.values.length < top + offset) tab.values.push([]);
+      row.values.forEach((cell, column) => {
+        const entered = (cell['userEnteredValue'] ?? {}) as Record<string, unknown>;
+        values[column] =
+          entered['stringValue'] ??
+          entered['numberValue'] ??
+          entered['boolValue'] ??
+          entered['formulaValue'] ??
+          '';
+        const run = (cell['textFormatRuns'] as { format: { link?: { uri: string } } }[])?.[0];
+        const a1 = `${String.fromCharCode(65 + column)}${top + offset + 1}`;
+        tab.links ??= {};
+        if (run?.format.link !== undefined)
+          tab.links[a1] = { uri: run.format.link.uri, place: 'run' };
+        else delete tab.links[a1];
+      });
+      tab.values[top + offset] = values;
+    });
+  }
+  for (const copy of copies.values()) {
+    const index = sheet.tabs.findIndex((tab) => tab.sheetId === copy.sheetId);
+    sheet.tabs[index] = copy;
+  }
+  return response(200, { spreadsheetId: SPREADSHEET_ID, replies: requests.map(() => ({})) });
 }
 
 function tabOf(sheet: FakeSpreadsheet, quoted: string): FakeTab {

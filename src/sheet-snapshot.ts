@@ -47,7 +47,10 @@ export async function readTabs(
 }
 
 /** The tab named, exactly or else ignoring case; the first tab when none is named. */
-export function pickTab(tabs: readonly Tab[], written: string | undefined): Tab | string {
+export function pickTab<T extends Tab>(
+  tabs: readonly T[],
+  written: string | undefined,
+): T | string {
   if (written === undefined) return tabs[0] ?? 'the spreadsheet has no tab';
   const exact = tabs.find((tab) => tab.title === written);
   if (exact !== undefined) return exact;
@@ -59,8 +62,72 @@ export function pickTab(tabs: readonly Tab[], written: string | undefined): Tab 
     .join(', ')}`;
 }
 
+/** A tab with the size of its grid, which a write must stay inside or grow first. */
+export interface GridTab extends Tab {
+  readonly rowCount: number;
+  readonly columnCount: number;
+}
+
+/** The spreadsheet's tabs with their grid sizes, in their order. */
+export async function readGridTabs(
+  client: GoogleClient,
+  spreadsheetId: string,
+): Promise<GoogleResult<GridTab[]>> {
+  const answer = await client.get(`${SHEETS}/${encodeURIComponent(spreadsheetId)}`, {
+    fields: 'sheets.properties(sheetId,title,gridProperties(rowCount,columnCount))',
+  });
+  if (!answer.ok) return answer;
+  const sheets = recordOf(answer.value)?.['sheets'];
+  if (!Array.isArray(sheets)) return malformed('the spreadsheet', 'no sheets');
+  const tabs: GridTab[] = [];
+  for (const sheet of sheets) {
+    const properties = recordOf(recordOf(sheet)?.['properties']);
+    const sheetId = properties?.['sheetId'] ?? 0;
+    const title = properties?.['title'];
+    const grid = recordOf(properties?.['gridProperties']);
+    if (!Number.isSafeInteger(sheetId) || typeof title !== 'string') {
+      return malformed('the spreadsheet', 'a tab with no id or title');
+    }
+    tabs.push({
+      sheetId: sheetId as number,
+      title,
+      rowCount: numberOr(grid?.['rowCount'], 0),
+      columnCount: numberOr(grid?.['columnCount'], 0),
+    });
+  }
+  return googleOk(tabs);
+}
+
+/**
+ * Which of the sheet rows `from` to `to` hold any value, read in one `values.get`. Google
+ * answers the rows of the range up to the last one that holds anything.
+ */
+export async function filledRows(
+  client: GoogleClient,
+  spreadsheetId: string,
+  tab: Tab,
+  from: number,
+  to: number,
+): Promise<GoogleResult<Set<number>>> {
+  const range = encodeURIComponent(`${quotedTitle(tab.title)}!${from}:${to}`);
+  const answer = await client.get(
+    `${SHEETS}/${encodeURIComponent(spreadsheetId)}/values/${range}`,
+    { majorDimension: 'ROWS', valueRenderOption: 'FORMULA' },
+  );
+  if (!answer.ok) return answer;
+  const rows = recordOf(answer.value)?.['values'] ?? [];
+  if (!Array.isArray(rows)) return malformed(`the tab '${tab.title}'`, 'values that are no list');
+  const filled = new Set<number>();
+  rows.forEach((row, offset) => {
+    if (Array.isArray(row) && row.some((cell) => cell !== null && cell !== '')) {
+      filled.add(from + offset);
+    }
+  });
+  return googleOk(filled);
+}
+
 /** `'Tab name'`, quoted as A1 notation quotes a title, which works for every title. */
-function quotedTitle(title: string): string {
+export function quotedTitle(title: string): string {
   return `'${title.replace(/'/g, "''")}'`;
 }
 
