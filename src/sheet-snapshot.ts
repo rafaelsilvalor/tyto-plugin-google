@@ -73,10 +73,24 @@ export async function readGridTabs(
   client: GoogleClient,
   spreadsheetId: string,
 ): Promise<GoogleResult<GridTab[]>> {
+  const read = await readGridSpreadsheet(client, spreadsheetId);
+  return read.ok ? googleOk(read.value.tabs) : read;
+}
+
+/**
+ * The spreadsheet's tabs with their grid sizes, and its locale (`pt_BR`, `en_US`), which
+ * decides how a formula separates its arguments. Blank when Google answers none.
+ */
+export async function readGridSpreadsheet(
+  client: GoogleClient,
+  spreadsheetId: string,
+): Promise<GoogleResult<{ readonly locale: string; readonly tabs: GridTab[] }>> {
   const answer = await client.get(`${SHEETS}/${encodeURIComponent(spreadsheetId)}`, {
-    fields: 'sheets.properties(sheetId,title,gridProperties(rowCount,columnCount))',
+    fields:
+      'properties.locale,sheets.properties(sheetId,title,gridProperties(rowCount,columnCount))',
   });
   if (!answer.ok) return answer;
+  const locale = recordOf(recordOf(answer.value)?.['properties'])?.['locale'];
   const sheets = recordOf(answer.value)?.['sheets'];
   if (!Array.isArray(sheets)) return malformed('the spreadsheet', 'no sheets');
   const tabs: GridTab[] = [];
@@ -95,7 +109,7 @@ export async function readGridTabs(
       columnCount: numberOr(grid?.['columnCount'], 0),
     });
   }
-  return googleOk(tabs);
+  return googleOk({ locale: typeof locale === 'string' ? locale : '', tabs });
 }
 
 /**

@@ -2,8 +2,17 @@ import type { PluginHost, RecipeVerbContribution } from '@tyto/plugin-api';
 
 import { connect } from './connect.js';
 import { fingerprint } from './cursor.js';
+import { googleOk, type GoogleResult } from './errors.js';
 import { columnIndexOf, headerOf, type RawCell } from './sheet-grid.js';
 import { shownCell, writeCellOf, type WriteCell, type WriteColumn } from './sheet-cells.js';
+import {
+  formatRequests,
+  NEW_TAB,
+  readTabFormat,
+  tabSettingsOf,
+  wantOf,
+  type FormatWant,
+} from './sheet-format.js';
 import {
   pickTab,
   readCellExtras,
@@ -11,7 +20,7 @@ import {
   readValues,
   type GridTab,
 } from './sheet-snapshot.js';
-import { applySheetSync, headerDigest, keyText, rowDigest } from './sheet-sync-apply.js';
+import { applySheetSync, headerDigest, keyText, rowDigest, rowLinks } from './sheet-sync-apply.js';
 import {
   forgetOldPlans,
   keptPayload,
@@ -35,7 +44,7 @@ import {
 } from './verb.js';
 
 export const SHEET_SYNC = 'google.sheet-sync';
-export const SYNC_WRITES = ['add-tab', 'update', 'move', 'delete', 'add'] as const;
+export const SYNC_WRITES = ['add-tab', 'update', 'move', 'delete', 'add', 'format-tab'] as const;
 export type SyncWrite = (typeof SYNC_WRITES)[number];
 
 const ARGUMENTS: readonly ArgumentSpec[] = [
@@ -298,22 +307,39 @@ export async function planSheetSync(
   };
   const destinationOf = (key: string): string =>
     moveColumn === undefined ? '' : keyText(inTable.get(key)?.values[moveColumn.name]);
-  const moving = [...inTab.keys()].some((key) => inTable.has(key) && destinationOf(key) !== '');
+  // Every column's links: a row's digest covers them, so a link changed before Apply fails it.
   const lastRow = values.value.length;
   const extras = await readCellExtras(
     client,
     spreadsheetId,
     tab,
-    { links: moving ? names.map((_, index) => index) : linked.map(({ at }) => at), notes: [] },
+    { links: names.map((_, index) => index), notes: [] },
     lastRow,
   );
   if (!extras.ok) return refused(verbFailed(SHEET_SYNC, extras.error));
   const linkAt = (at: number, number: number): string | undefined =>
     extras.value.links[String(at)]?.[String(number)];
+  const digestOf = (row: SheetRow): string =>
+    rowDigest(row.cells, rowLinks(extras.value.links, row.number));
+  /** The table's cells that would change the sheet's, with the sheet's link where it reads one. */
+  const changedOf = (cells: ReadonlyMap<number, WriteCell>, row: SheetRow) => {
+    const changed: [number, WriteCell][] = [];
+    for (const [at, cell] of cells) {
+      const read = linked.some((each) => each.at === at);
+      if (!sameCell(cell, row.cells[at], read ? linkAt(at, row.number) : undefined)) {
+        changed.push([at, cell]);
+      }
+    }
+    return changed;
+  };
 
   const s = `${spreadsheetId}/${tab.sheetId}`;
   const hd = headerDigest(names);
   const anchor = (key: string) => ({ s, kc, hd, k: key });
+  const shownChanges = (changed: readonly (readonly [number, WriteCell])[], row: SheetRow) =>
+    changed
+      .map(([at, cell]) => `${names[at] ?? ''}: ${shownRaw(row.cells[at])} → ${shownCell(cell)}`)
+      .join('; ');
   const preserved: string[] = [];
   let unchanged = 0;
   const moves: {
@@ -333,7 +359,7 @@ export async function planSheetSync(
           write: 'delete',
           // No rowKey: the host names only rows of the table, and this one left it.
           description: `delete ${key} (row ${row.number}), which the table no longer holds`,
-          payload: { ...anchor(key), d: rowDigest(row.cells) },
+          payload: { ...anchor(key), d: digestOf(row) },
         });
       }
       continue;
@@ -353,27 +379,19 @@ export async function planSheetSync(
       moves.push({ key, row, destination, cells });
       continue;
     }
-    const changed: [number, WriteCell][] = [];
-    for (const [at, cell] of cells) {
-      const read = linked.some((each) => each.at === at);
-      if (!sameCell(cell, row.cells[at], read ? linkAt(at, row.number) : undefined)) {
-        changed.push([at, cell]);
-      }
-    }
+    const changed = changedOf(cells, row);
     if (changed.length === 0) {
       unchanged += 1;
       continue;
     }
-    const shown = changed
-      .map(([at, cell]) => `${names[at] ?? ''}: ${shownRaw(row.cells[at])} → ${shownCell(cell)}`)
-      .join('; ');
+    const shown = shownChanges(changed, row);
     drafts.push({
       write: 'update',
       rowKey: input.key,
       description: `update ${key} (row ${row.number}): ${shown}`,
       payload: {
         ...anchor(key),
-        d: rowDigest(row.cells),
+        d: digestOf(row),
         u: changed.map(([at, cell]) => [at, cell]),
       },
     });
@@ -416,21 +434,28 @@ export async function planSheetSync(
   }
   const moveDrafts: Draft[] = moves.map(({ key, row, destination, cells }) => {
     const header = destinations.get(destination) ?? names;
+    const changed = changedOf(cells, row);
     const base = {
       write: 'move' as const,
       rowKey: inTable.get(key)?.key ?? key,
-      description: `move ${key} (row ${row.number}) to the tab '${destination}'`,
+      description:
+        `move ${key} (row ${row.number}) to the tab '${destination}'` +
+        (changed.length === 0 ? '' : `, writing ${shownChanges(changed, row)}`),
     };
     if (typeof header === 'string') return { ...base, failure: `E_GOOGLE_PLAN: ${header}` };
-    const merged = names.map((_, at) =>
-      cells.has(at) ? (cells.get(at) ?? null) : sheetCell(row.cells[at], linkAt(at, row.number)),
-    );
-    const placedCells: (WriteCell | null)[] = header.map(() => null);
+    // The row travels by copyPaste, cell by cell under the column of its name: what the
+    // table changes is written over the row first, so the copy carries it too.
+    const filled = (at: number): boolean => {
+      const cell = cells.get(at);
+      if (cells.has(at)) return cell !== null;
+      return (row.cells[at] ?? '') !== '' || linkAt(at, row.number) !== undefined;
+    };
+    const pairs: [number, number][] = [];
     const missing: string[] = [];
-    merged.forEach((cell, at) => {
-      const to = columnIndexOf(header, names[at] ?? '');
-      if (to !== undefined) placedCells[to] = cell;
-      else if (cell !== null) missing.push(names[at] ?? '');
+    names.forEach((name, at) => {
+      const to = columnIndexOf(header, name);
+      if (to !== undefined) pairs.push([at, to]);
+      else if (filled(at)) missing.push(name);
     });
     if (missing.length > 0) {
       return {
@@ -443,9 +468,11 @@ export async function planSheetSync(
       ...base,
       payload: {
         ...anchor(key),
-        d: rowDigest(row.cells),
+        d: digestOf(row),
         t: typeof title === 'string' ? destination : title.title,
-        c: trimmed(placedCells),
+        dh: headerDigest(header),
+        m: pairs,
+        ...(changed.length === 0 ? {} : { u: changed.map(([at, cell]) => [at, cell]) }),
       },
     };
   });
@@ -482,7 +509,75 @@ export async function planSheetSync(
     });
   }
 
-  const ordered = [...tabDrafts, ...drafts, ...moveDrafts, ...deletes, ...addDrafts];
+  // How the tabs look: the synced one, and each tab rows move to, when the section says.
+  const writes = (list: readonly Draft[]): number =>
+    list.filter((each) => each.payload !== undefined && each.failure === undefined).length;
+  const formatDrafts: Draft[] = [];
+  const format = async (
+    title: string,
+    sheetId: number | undefined,
+    header: readonly string[],
+    last: number,
+    destination: boolean,
+  ): Promise<GoogleResult<void>> => {
+    const settings = tabSettingsOf(request.section, title);
+    if (settings === undefined) return googleOk(undefined);
+    const description = `format the tab '${title}'`;
+    const want = typeof settings === 'string' ? settings : wantOf(settings, header);
+    if (typeof want === 'string') {
+      formatDrafts.push({ write: 'format-tab', description, failure: `E_GOOGLE_CONFIG: ${want}` });
+      return googleOk(undefined);
+    }
+    let now = NEW_TAB;
+    if (sheetId !== undefined) {
+      const read = await readTabFormat(client, spreadsheetId, { sheetId, title }, header.length);
+      if (!read.ok) return read;
+      now = read.value;
+    }
+    const { said } = formatRequests(sheetId ?? 0, want, now, last);
+    if (said.length === 0) return googleOk(undefined);
+    formatDrafts.push({
+      write: 'format-tab',
+      description: `${description}: ${said.join('; ')}`,
+      payload: { s, ...(destination ? { t: title } : {}), ...formatPayload(want) },
+    });
+    return googleOk(undefined);
+  };
+  const formatted = await format(
+    tab.title,
+    tab.sheetId,
+    names,
+    lastRow - writes(deletes) - writes(moveDrafts) + writes(addDrafts),
+    false,
+  );
+  if (!formatted.ok) return refused(verbFailed(SHEET_SYNC, formatted.error));
+  for (const [destination, header] of destinations) {
+    if (typeof header === 'string') continue;
+    const into = moveDrafts.filter(
+      (draft, index) => draft.payload !== undefined && moves[index]?.destination === destination,
+    ).length;
+    const found = pickTab(tabs.value, destination);
+    const done =
+      typeof found === 'string'
+        ? await format(destination, undefined, header, 1 + into, true)
+        : await format(
+            found.title,
+            found.sheetId,
+            header,
+            (tabsRead.get(found.title)?.length ?? 1) + into,
+            true,
+          );
+    if (!done.ok) return refused(verbFailed(SHEET_SYNC, done.error));
+  }
+
+  const ordered = [
+    ...tabDrafts,
+    ...drafts,
+    ...moveDrafts,
+    ...deletes,
+    ...addDrafts,
+    ...formatDrafts,
+  ];
   if (ordered.length > MAX_OPERATIONS) {
     return refused(
       problem(
@@ -574,13 +669,13 @@ function sameCell(cell: WriteCell, raw: RawCell | undefined, link: string | unde
   return 't' in cell && value === cell.t && link === cell.u;
 }
 
-/** A sheet cell as a move writes it to its new tab, its link kept when it is a web one. */
-function sheetCell(raw: RawCell | undefined, link: string | undefined): WriteCell {
-  const value = raw ?? '';
-  if (link !== undefined && /^(https?:\/\/|mailto:)\S+$/i.test(link)) {
-    return { t: value === '' ? link : String(value), u: link };
-  }
-  return value === '' ? null : value;
+function formatPayload(want: FormatWant): Readonly<Record<string, JsonValue>> {
+  return {
+    c: [...want.c],
+    ...(want.n === undefined ? {} : { n: want.n }),
+    ...(want.b === undefined ? {} : { b: want.b }),
+    ...(want.v === undefined ? {} : { v: want.v.map(([at, values]) => [at, [...values]]) }),
+  };
 }
 
 function shownRaw(raw: RawCell | undefined): string {

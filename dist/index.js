@@ -942,10 +942,15 @@ function pickTab(tabs, written) {
   return `the spreadsheet has no tab '${written}'; its tabs are ${tabs.map((tab) => `'${tab.title}'`).join(", ")}`;
 }
 async function readGridTabs(client, spreadsheetId) {
+  const read = await readGridSpreadsheet(client, spreadsheetId);
+  return read.ok ? googleOk(read.value.tabs) : read;
+}
+async function readGridSpreadsheet(client, spreadsheetId) {
   const answer = await client.get(`${SHEETS}/${encodeURIComponent(spreadsheetId)}`, {
-    fields: "sheets.properties(sheetId,title,gridProperties(rowCount,columnCount))"
+    fields: "properties.locale,sheets.properties(sheetId,title,gridProperties(rowCount,columnCount))"
   });
   if (!answer.ok) return answer;
+  const locale = recordOf3(recordOf3(answer.value)?.["properties"])?.["locale"];
   const sheets = recordOf3(answer.value)?.["sheets"];
   if (!Array.isArray(sheets)) return malformed("the spreadsheet", "no sheets");
   const tabs = [];
@@ -964,7 +969,7 @@ async function readGridTabs(client, spreadsheetId) {
       columnCount: numberOr(grid?.["columnCount"], 0)
     });
   }
-  return googleOk(tabs);
+  return googleOk({ locale: typeof locale === "string" ? locale : "", tabs });
 }
 async function filledRows(client, spreadsheetId, tab, from, to) {
   const range = encodeURIComponent(`${quotedTitle(tab.title)}!${from}:${to}`);
@@ -1414,6 +1419,33 @@ function cellData(cell) {
     ]
   };
 }
+var SEMICOLON_LOCALES = ["pt", "es", "fr", "it", "de", "nl", "pl", "ru", "tr"];
+function formulaSeparator(locale) {
+  const lowered = locale.toLowerCase();
+  return SEMICOLON_LOCALES.some((prefix) => lowered.startsWith(prefix)) ? ";" : ",";
+}
+function localFormula(formula, separator) {
+  if (separator === ",") return formula;
+  let quote;
+  let braces = 0;
+  let out = "";
+  for (const character of formula) {
+    if (quote !== void 0) {
+      if (character === quote) quote = void 0;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === "{") {
+      braces += 1;
+    } else if (character === "}") {
+      braces = Math.max(0, braces - 1);
+    } else if (character === "," && braces === 0) {
+      out += ";";
+      continue;
+    }
+    out += character;
+  }
+  return out;
+}
 function shownCell(cell) {
   if (cell === null) return "";
   if (typeof cell === "boolean") return cell ? "TRUE" : "FALSE";
@@ -1421,11 +1453,296 @@ function shownCell(cell) {
   return "f" in cell ? cell.f : `${cell.t} (${cell.u})`;
 }
 
+// src/sheet-format.ts
+var SHEETS2 = "https://sheets.googleapis.com/v4/spreadsheets";
+var NEW_TAB = { banded: [], header: [], validation: [] };
+var HEX = /^#[0-9A-Fa-f]{6}$/;
+var TABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,99}$/;
+var MAX_DROPDOWN_VALUES = 500;
+function tabSettingsOf(section, title) {
+  const read = readSection(section);
+  if (!read.ok) return read.error.message;
+  const tabs = read.value.tabs ?? {};
+  const name = title in tabs ? title : Object.keys(tabs).find((each) => each.toLowerCase() === title.toLowerCase());
+  if (name === void 0) return void 0;
+  const where = `tabs.${name} in the google section of .tyto/project.json`;
+  const value = tabs[name];
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return `${where} is not an object`;
+  }
+  const record = value;
+  const unknown = Object.keys(record).filter(
+    (key) => !["table", "header", "dropdowns"].includes(key)
+  );
+  if (unknown.length > 0) {
+    return `${where} holds ${unknown.join(", ")}, which is none of table, header, dropdowns`;
+  }
+  let table;
+  if (record["table"] === true) table = `Table_${title.replace(/[^A-Za-z0-9_]/g, "_")}`;
+  else if (typeof record["table"] === "string") table = record["table"];
+  else if (record["table"] !== void 0 && record["table"] !== false) {
+    return `${where}: table is neither a name nor true`;
+  }
+  if (table !== void 0 && !TABLE_NAME.test(table)) {
+    return `${where}: the table name '${table}' may hold only letters, digits and _`;
+  }
+  const header = record["header"];
+  if (header !== void 0 && (typeof header !== "string" || !HEX.test(header))) {
+    return `${where}: header is not a colour such as #D9EAD3`;
+  }
+  const dropdowns = [];
+  const asked = record["dropdowns"] ?? {};
+  if (typeof asked !== "object" || asked === null || Array.isArray(asked)) {
+    return `${where}: dropdowns is not an object of column names`;
+  }
+  for (const [column, values] of Object.entries(asked)) {
+    const list = Array.isArray(values) ? values : [];
+    const valid = list.length > 0 && list.length <= MAX_DROPDOWN_VALUES && list.every((each) => typeof each === "string" && each.trim() !== "") && new Set(list).size === list.length;
+    if (!valid) {
+      return `${where}: dropdowns.${column} is not a list of 1 to ${MAX_DROPDOWN_VALUES} different, non-blank texts`;
+    }
+    dropdowns.push([column, list]);
+  }
+  return {
+    ...table === void 0 ? {} : { table },
+    ...typeof header === "string" ? { header: header.toUpperCase() } : {},
+    dropdowns
+  };
+}
+function wantOf(settings, names) {
+  const v = [];
+  for (const [column, values] of settings.dropdowns) {
+    const at = names.findIndex((name) => name.toLowerCase() === column.toLowerCase());
+    if (at < 0) return `the settings give '${column}' a dropdown, and the tab has no such column`;
+    v.push([at, values]);
+  }
+  return {
+    c: names,
+    ...settings.table === void 0 ? {} : { n: settings.table },
+    ...settings.header === void 0 ? {} : { b: settings.header },
+    ...v.length === 0 ? {} : { v }
+  };
+}
+function readWant(object) {
+  const { c, n, b, v } = object;
+  if (!Array.isArray(c) || c.length === 0 || !c.every((name) => typeof name === "string")) {
+    return void 0;
+  }
+  if (n !== void 0 && (typeof n !== "string" || !TABLE_NAME.test(n))) return void 0;
+  if (b !== void 0 && (typeof b !== "string" || !HEX.test(b))) return void 0;
+  const dropdowns = [];
+  for (const each of v === void 0 ? [] : Array.isArray(v) ? v : [null]) {
+    if (!Array.isArray(each) || each.length !== 2) return void 0;
+    const [at, values] = each;
+    if (typeof at !== "number" || !Number.isSafeInteger(at) || at < 0 || at >= c.length || !Array.isArray(values) || !values.every((value) => typeof value === "string")) {
+      return void 0;
+    }
+    dropdowns.push([at, values]);
+  }
+  return {
+    c,
+    ...n === void 0 ? {} : { n },
+    ...b === void 0 ? {} : { b },
+    ...dropdowns.length === 0 ? {} : { v: dropdowns }
+  };
+}
+async function readTabFormat(client, spreadsheetId, tab, width) {
+  const answer = await client.get(`${SHEETS2}/${encodeURIComponent(spreadsheetId)}`, {
+    ranges: [`${quotedTitle(tab.title)}!A1:${columnLetter(Math.max(0, width - 1))}2`],
+    fields: "sheets(properties(sheetId),tables(tableId,range,columnProperties),bandedRanges(bandedRangeId),data(rowData(values(userEnteredFormat(backgroundColor),dataValidation))))"
+  });
+  if (!answer.ok) return answer;
+  const sheets = listOf3(recordOf4(answer.value)?.["sheets"]);
+  const sheet = sheets.map(recordOf4).find((each) => {
+    return recordOf4(each?.["properties"])?.["sheetId"] === tab.sheetId;
+  }) ?? recordOf4(sheets[0]);
+  if (sheet === void 0) {
+    return googleError(
+      "E_GOOGLE_RESPONSE",
+      `Google answered the tab '${tab.title}' with no sheet.`
+    );
+  }
+  const first = recordOf4(listOf3(sheet["tables"])[0]);
+  const tableId = first?.["tableId"];
+  const rows = listOf3(recordOf4(listOf3(sheet["data"])[0])?.["rowData"]).map(
+    (row) => listOf3(recordOf4(row)?.["values"]).map(recordOf4)
+  );
+  return googleOk({
+    ...typeof tableId === "string" ? {
+      table: {
+        tableId,
+        range: recordOf4(first?.["range"]) ?? {},
+        columnProperties: listOf3(first?.["columnProperties"]).flatMap((each) => {
+          const property = recordOf4(each);
+          return property === void 0 ? [] : [property];
+        })
+      }
+    } : {},
+    banded: listOf3(sheet["bandedRanges"]).flatMap((each) => {
+      const id = recordOf4(each)?.["bandedRangeId"];
+      return typeof id === "number" ? [id] : [];
+    }),
+    header: (rows[0] ?? []).map(
+      (cell) => hexOf(recordOf4(recordOf4(cell?.["userEnteredFormat"])?.["backgroundColor"]))
+    ),
+    validation: (rows[1] ?? []).map((cell) => listValues(recordOf4(cell?.["dataValidation"])))
+  });
+}
+function formatRequests(sheetId, want, now, lastRow) {
+  const requests = [];
+  const said = [];
+  const width = want.c.length;
+  const endRow = Math.max(2, lastRow);
+  const range = {
+    sheetId,
+    startRowIndex: 0,
+    endRowIndex: endRow,
+    startColumnIndex: 0,
+    endColumnIndex: width
+  };
+  const changedDropdowns = (want.v ?? []).filter(([at, values]) => {
+    const current = now.table === void 0 ? now.validation[at] : tableValues(now.table, at);
+    return !sameList(current, values);
+  });
+  const shownDropdowns = changedDropdowns.map(
+    ([at, values]) => `the dropdown of ${want.c[at] ?? ""}: ${values.join(", ")}`
+  );
+  if (now.table !== void 0) {
+    const { table } = now;
+    const stretch = want.n !== void 0 && (table.range.startRowIndex ?? 0) === 0 && ((table.range.endRowIndex ?? 0) !== endRow || (table.range.startColumnIndex ?? 0) !== 0 || (table.range.endColumnIndex ?? 0) !== width);
+    const fields = [
+      ...stretch ? ["range"] : [],
+      ...changedDropdowns.length > 0 ? ["columnProperties"] : []
+    ];
+    if (fields.length > 0) {
+      requests.push({
+        updateTable: {
+          table: {
+            tableId: table.tableId,
+            ...stretch ? { range } : {},
+            ...changedDropdowns.length > 0 ? { columnProperties: mergedProperties(table, want, changedDropdowns) } : {}
+          },
+          fields: fields.join(",")
+        }
+      });
+      if (stretch) said.push(`stretch its table over rows 1 to ${endRow}`);
+      said.push(...shownDropdowns);
+    }
+  } else if (want.n !== void 0) {
+    for (const bandedRangeId of now.banded) requests.push({ deleteBanding: { bandedRangeId } });
+    if (now.banded.length > 0) said.push(`remove its ${now.banded.length} alternating colours`);
+    requests.push({
+      addTable: {
+        table: {
+          name: want.n,
+          range,
+          ...(want.v ?? []).length > 0 ? {
+            columnProperties: (want.v ?? []).map(
+              ([at, values]) => dropdownProperty(at, want.c[at] ?? "", values)
+            )
+          } : {}
+        }
+      }
+    });
+    said.push(`add the table '${want.n}' over rows 1 to ${endRow}`);
+    said.push(
+      ...(want.v ?? []).map(
+        ([at, values]) => `the dropdown of ${want.c[at] ?? ""}: ${values.join(", ")}`
+      )
+    );
+  } else {
+    for (const [at, values] of changedDropdowns) {
+      requests.push({
+        setDataValidation: {
+          range: { sheetId, startRowIndex: 1, startColumnIndex: at, endColumnIndex: at + 1 },
+          rule: { condition: listCondition(values), strict: false, showCustomUi: true }
+        }
+      });
+    }
+    said.push(...shownDropdowns);
+  }
+  if (want.b !== void 0 && want.c.some((_, at) => now.header[at] !== want.b)) {
+    requests.push({
+      repeatCell: {
+        range: {
+          sheetId,
+          startRowIndex: 0,
+          endRowIndex: 1,
+          startColumnIndex: 0,
+          endColumnIndex: width
+        },
+        cell: { userEnteredFormat: { backgroundColor: colourOf(want.b) } },
+        fields: "userEnteredFormat.backgroundColor"
+      }
+    });
+    said.push(`colour its header ${want.b}`);
+  }
+  return { requests, said };
+}
+function mergedProperties(table, want, changed) {
+  const start = table.range.startColumnIndex ?? 0;
+  const properties = table.columnProperties.map((each) => ({ ...each }));
+  for (const [at, values] of changed) {
+    const index = at - start;
+    const property = dropdownProperty(index, want.c[at] ?? "", values);
+    const found = properties.findIndex((each) => (each["columnIndex"] ?? 0) === index);
+    if (found < 0) properties.push(property);
+    else properties[found] = { ...properties[found], ...property };
+  }
+  return properties;
+}
+function dropdownProperty(columnIndex, columnName, values) {
+  return {
+    columnIndex,
+    columnName,
+    columnType: "DROPDOWN",
+    dataValidationRule: { condition: listCondition(values) }
+  };
+}
+function listCondition(values) {
+  return { type: "ONE_OF_LIST", values: values.map((value) => ({ userEnteredValue: value })) };
+}
+function tableValues(table, at) {
+  const index = at - (table.range.startColumnIndex ?? 0);
+  const property = table.columnProperties.find((each) => (each["columnIndex"] ?? 0) === index);
+  if (property?.["columnType"] !== "DROPDOWN") return void 0;
+  return listValues(recordOf4(property["dataValidationRule"]));
+}
+function listValues(rule) {
+  const condition = recordOf4(rule?.["condition"]);
+  if (condition?.["type"] !== "ONE_OF_LIST") return void 0;
+  return listOf3(condition["values"]).map(
+    (each) => String(recordOf4(each)?.["userEnteredValue"] ?? "")
+  );
+}
+function sameList(a, b) {
+  return a !== void 0 && a.length === b.length && a.every((value, index) => value === b[index]);
+}
+function hexOf(colour) {
+  if (colour === void 0) return void 0;
+  const channel = (name) => {
+    const value = colour[name];
+    const byte = Math.round((typeof value === "number" ? value : 0) * 255);
+    return Math.min(255, Math.max(0, byte)).toString(16).padStart(2, "0");
+  };
+  return `#${channel("red")}${channel("green")}${channel("blue")}`.toUpperCase();
+}
+function colourOf(hex) {
+  const channel = (at) => parseInt(hex.slice(at, at + 2), 16) / 255;
+  return { red: channel(1), green: channel(3), blue: channel(5) };
+}
+function recordOf4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function listOf3(value) {
+  return Array.isArray(value) ? value : [];
+}
+
 // src/sheet-write-apply.ts
 var systemClock = { now: () => Date.now() };
 var APPLY_BUDGET_MILLISECONDS = 2e4;
 var NOT_REACHED = "not reached in this call's time; run the cell and Apply again";
-var SHEETS2 = "https://sheets.googleapis.com/v4/spreadsheets";
+var SHEETS3 = "https://sheets.googleapis.com/v4/spreadsheets";
 function budgetedTransport(host, clock) {
   const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
   let outOfTime = false;
@@ -1575,7 +1892,7 @@ async function applySheetWrites(host, request, clock = systemClock) {
     writing.map((index) => decoded[index])
   );
   if (requests.length > 0) {
-    const sent = await client.post(`${SHEETS2}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, {
+    const sent = await client.post(`${SHEETS3}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, {
       requests
     });
     if (!sent.ok) {
@@ -1630,7 +1947,7 @@ function requestsOf(tab, operations) {
   return requests;
 }
 async function decodeOperation(host, write, payload) {
-  const object = recordOf4(payload);
+  const object = recordOf5(payload);
   if (object === void 0) return UNREADABLE;
   const planned = object["x"];
   if (typeof planned === "string") return planned;
@@ -1677,7 +1994,7 @@ async function spilled(host, key, digest) {
     return `E_GOOGLE_PLAN: the plugin's cache holds other cells for this row than the plan kept; ${PLAN_AGAIN}`;
   }
   try {
-    return recordOf4(JSON.parse(text)) ?? UNREADABLE;
+    return recordOf5(JSON.parse(text)) ?? UNREADABLE;
   } catch {
     return UNREADABLE;
   }
@@ -1729,17 +2046,23 @@ function isDigest(value) {
 function isSheet(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]+\/\d+$/.test(value);
 }
-function recordOf4(value) {
+function recordOf5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 var wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 // src/sheet-sync-apply.ts
-var SHEETS3 = "https://sheets.googleapis.com/v4/spreadsheets";
-function rowDigest(cells) {
+var SHEETS4 = "https://sheets.googleapis.com/v4/spreadsheets";
+function rowDigest(cells, links = []) {
   const values = [...cells];
   while (values.length > 0 && values.at(-1) === "") values.pop();
-  return fingerprint(JSON.stringify(values));
+  return fingerprint(JSON.stringify(links.length === 0 ? values : [values, links]));
+}
+function rowLinks(links, row) {
+  return Object.entries(links).flatMap(([column, rows]) => {
+    const uri = rows[String(row)];
+    return uri === void 0 ? [] : [[Number(column), uri]];
+  }).sort((a, b) => a[0] - b[0]);
 }
 function headerDigest(names) {
   return fingerprint(JSON.stringify(names));
@@ -1771,6 +2094,7 @@ async function applySheetSync(host, request, clock = systemClock) {
     },
     diagnostics: []
   });
+  const at = (index) => decoded[index];
   const first = decoded.find((each) => each !== void 0);
   if (first === void 0) return done();
   for (const index of pending()) {
@@ -1782,17 +2106,15 @@ async function applySheetSync(host, request, clock = systemClock) {
   const [spreadsheetId = "", sheetText = ""] = first.s.split("/");
   const sheetId = Number(sheetText);
   const budget = budgetedTransport(host, clock);
-  const connection = await connect(host, request.section, budget.transport);
-  if (!connection.ok) {
-    if (!budget.refusedForTime()) settle(pending(), failedWith(connection.error));
+  const refusedOr = (indexes, outcome) => {
+    if (!budget.refusedForTime()) settle(indexes, outcome);
     return done();
-  }
+  };
+  const connection = await connect(host, request.section, budget.transport);
+  if (!connection.ok) return refusedOr(pending(), failedWith(connection.error));
   const { client } = connection.value;
   const tabs = await readGridTabs(client, spreadsheetId);
-  if (!tabs.ok) {
-    if (!budget.refusedForTime()) settle(pending(), failedWith(tabs.error));
-    return done();
-  }
+  if (!tabs.ok) return refusedOr(pending(), failedWith(tabs.error));
   const tab = tabs.value.find((each) => each.sheetId === sheetId);
   if (tab === void 0) {
     settle(
@@ -1804,38 +2126,68 @@ async function applySheetSync(host, request, clock = systemClock) {
     );
     return done();
   }
-  const rowIndexes = pending().filter((index) => decoded[index]?.kind !== "add-tab");
+  const isRow = (index) => {
+    const kind = decoded[index]?.kind;
+    return kind !== "add-tab" && kind !== "format-tab";
+  };
+  const ownFormat = (index) => {
+    const each = decoded[index];
+    return each?.kind === "format-tab" && each.t === void 0;
+  };
+  const rowIndexes = pending().filter(isRow);
   const where = /* @__PURE__ */ new Map();
   const cellsAt = /* @__PURE__ */ new Map();
-  if (rowIndexes.length > 0) {
+  let lastRow = 0;
+  let width = 0;
+  if (rowIndexes.length > 0 || pending().some(ownFormat)) {
+    const reading = pending().filter((index) => isRow(index) || ownFormat(index));
     const values = await readValues(client, spreadsheetId, tab);
-    if (!values.ok) {
-      if (!budget.refusedForTime()) settle(rowIndexes, failedWith(values.error));
-      return done();
+    if (!values.ok) return refusedOr(reading, failedWith(values.error));
+    lastRow = values.value.length;
+    const read = headerOf2(values.value, tab.title);
+    const names = typeof read === "string" ? void 0 : read;
+    width = names?.length ?? 0;
+    const headerChanged = failed2(
+      "E_GOOGLE_CHANGED",
+      `the header of the tab '${tab.title}' changed since the plan; ${PLAN_AGAIN}`
+    );
+    for (const index of pending().filter(ownFormat)) {
+      const { want } = at(index);
+      if (names === void 0 || headerDigest(names) !== headerDigest(want.c)) {
+        settle([index], headerChanged);
+      }
     }
-    const anchor = decoded[rowIndexes[0] ?? 0];
-    const names = headerOf2(values.value, tab.title);
-    if (typeof names === "string" || headerDigest(names) !== anchor.hd) {
-      settle(
-        rowIndexes,
-        failed2(
-          "E_GOOGLE_CHANGED",
-          `the header of the tab '${tab.title}' changed since the plan; ${PLAN_AGAIN}`
-        )
-      );
+    if (rowIndexes.length > 0) {
+      const anchor = at(rowIndexes[0] ?? 0);
+      if (names === void 0 || headerDigest(names) !== anchor.hd) {
+        settle(rowIndexes, headerChanged);
+      }
+      values.value.forEach((cells, index) => {
+        if (index === 0) return;
+        const key = keyText(cells[anchor.kc]);
+        if (key === "") return;
+        where.set(key, [...where.get(key) ?? [], index + 1]);
+        cellsAt.set(index + 1, cells);
+      });
     }
-    values.value.forEach((cells, index) => {
-      if (index === 0) return;
-      const key = keyText(cells[anchor.kc]);
-      if (key === "") return;
-      where.set(key, [...where.get(key) ?? [], index + 1]);
-      cellsAt.set(index + 1, cells);
-    });
+  }
+  let links = {};
+  const digested = pending().filter((index) => isRow(index) && at(index).kind !== "add");
+  if (digested.length > 0) {
+    const extras = await readCellExtras(
+      client,
+      spreadsheetId,
+      tab,
+      { links: Array.from({ length: width }, (_, index) => index), notes: [] },
+      lastRow
+    );
+    if (!extras.ok) return refusedOr(digested, failedWith(extras.error));
+    links = extras.value.links;
   }
   const rowOf2 = /* @__PURE__ */ new Map();
   for (const index of pending()) {
-    const each = decoded[index];
-    if (each.kind === "add-tab") continue;
+    const each = at(index);
+    if (each.kind === "add-tab" || each.kind === "format-tab") continue;
     const found = where.get(each.k) ?? [];
     if (each.kind === "add") {
       if (found.length > 0) {
@@ -1849,7 +2201,7 @@ async function applySheetSync(host, request, clock = systemClock) {
       settle([index], failed2("E_GOOGLE_CHANGED", `${each.k} ${why}: ${CHANGED}`));
       continue;
     }
-    if (rowDigest(cellsAt.get(number) ?? []) !== each.d) {
+    if (rowDigest(cellsAt.get(number) ?? [], rowLinks(links, number)) !== each.d) {
       settle([index], failed2("E_GOOGLE_CHANGED", `${each.k} (row ${number}): ${CHANGED}`));
       continue;
     }
@@ -1859,7 +2211,7 @@ async function applySheetSync(host, request, clock = systemClock) {
   let nextId = Math.max(0, ...tabs.value.map((each) => each.sheetId)) + 1;
   const newTabs = [];
   for (const index of pending()) {
-    const each = decoded[index];
+    const each = at(index);
     if (each.kind !== "add-tab") continue;
     if (sheetIdOf.has(each.t)) {
       settle([index], {
@@ -1872,35 +2224,107 @@ async function applySheetSync(host, request, clock = systemClock) {
     nextId += 1;
     newTabs.push(each);
   }
-  for (const index of pending()) {
-    const each = decoded[index];
-    if (each.kind === "move" && !sheetIdOf.has(each.t)) {
+  const destinations = /* @__PURE__ */ new Map();
+  const destinationOf = (index) => {
+    const each = at(index);
+    return each.kind === "move" || each.kind === "format-tab" ? each.t : void 0;
+  };
+  for (const title of new Set(pending().flatMap((index) => destinationOf(index) ?? []))) {
+    const into = pending().filter((index) => destinationOf(index) === title);
+    const added = newTabs.find((each) => each.t === title);
+    const found = tabs.value.find((each) => each.title === title);
+    if (added !== void 0) {
+      const id = sheetIdOf.get(title) ?? 0;
+      destinations.set(title, {
+        sheetId: id,
+        last: 1,
+        rowCount: 1e3,
+        header: added.c,
+        added: true
+      });
+    } else if (found !== void 0) {
+      const values = await readValues(client, spreadsheetId, found);
+      if (!values.ok) return refusedOr(into, failedWith(values.error));
+      const header = values.value.length === 0 ? void 0 : headerOf2(values.value, title);
+      destinations.set(title, {
+        sheetId: found.sheetId,
+        last: values.value.length,
+        rowCount: found.rowCount,
+        ...Array.isArray(header) ? { header } : {},
+        added: false
+      });
+    } else {
       settle(
-        [index],
+        into,
         failed2(
           "E_GOOGLE_CHANGED",
-          `the tab '${each.t}' is no longer in the spreadsheet; ${PLAN_AGAIN}`
+          `the tab '${title}' is no longer in the spreadsheet; ${PLAN_AGAIN}`
         )
       );
+      continue;
+    }
+    const destination = destinations.get(title);
+    for (const index of into) {
+      const each = at(index);
+      const planned = each.kind === "move" ? each.dh : headerDigest(each.want.c);
+      if (destination?.header === void 0 || headerDigest(destination.header) !== planned) {
+        settle(
+          [index],
+          failed2(
+            "E_GOOGLE_CHANGED",
+            `the header of the tab '${title}' changed since the plan; ${PLAN_AGAIN}`
+          )
+        );
+      }
     }
   }
+  const looks = /* @__PURE__ */ new Map();
+  for (const index of pending()) {
+    const each = at(index);
+    if (each.kind !== "format-tab") continue;
+    const destination = each.t === void 0 ? void 0 : destinations.get(each.t);
+    if (destination?.added === true) {
+      looks.set(index, NEW_TAB);
+      continue;
+    }
+    const target = each.t === void 0 ? tab : { sheetId: destination?.sheetId ?? 0, title: each.t };
+    const read = await readTabFormat(client, spreadsheetId, target, each.want.c.length);
+    if (!read.ok) {
+      if (budget.refusedForTime()) return done();
+      settle([index], failedWith(read.error));
+      continue;
+    }
+    looks.set(index, read.value);
+  }
   if (budget.expired()) return done();
+  const rows = rowRequests(
+    tab,
+    pending().map((index) => [at(index), rowOf2.get(index)]),
+    newTabs,
+    sheetIdOf,
+    destinations
+  );
+  const formats = [];
+  for (const index of pending()) {
+    const each = at(index);
+    if (each.kind !== "format-tab") continue;
+    const destination = each.t === void 0 ? void 0 : destinations.get(each.t);
+    const id = destination?.sheetId ?? tab.sheetId;
+    const last = destination === void 0 ? lastRow - rows.removed + rows.appended : destination.last + (rows.copied.get(id) ?? 0);
+    const { requests: requests2 } = formatRequests(id, each.want, looks.get(index) ?? NEW_TAB, last);
+    if (requests2.length === 0) {
+      settle([index], { status: "skipped", reason: "the tab looks as its settings ask already" });
+    }
+    formats.push(...requests2);
+  }
   const writing = pending();
   if (writing.length === 0) return done();
-  const requests = requestsOf2(
-    tab,
-    writing.map((index) => [decoded[index], rowOf2.get(index)]),
-    newTabs,
-    sheetIdOf
-  );
+  const requests = [...rows.requests, ...formats];
   if (requests.length > 0) {
-    const sent = await client.post(`${SHEETS3}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, {
+    const sent = await client.post(`${SHEETS4}/${encodeURIComponent(spreadsheetId)}:batchUpdate`, {
       requests
     });
-    if (!sent.ok) {
-      if (!budget.refusedForTime()) settle(writing, batchFailed(sent.error));
-      return done();
-    }
+    if (!sent.ok) return refusedOr(writing, batchFailed(sent.error));
   }
   settle(writing, { status: "applied" });
   for (const index of writing) {
@@ -1909,7 +2333,7 @@ async function applySheetSync(host, request, clock = systemClock) {
   }
   return done();
 }
-function requestsOf2(tab, operations, newTabs, sheetIdOf) {
+function rowRequests(tab, operations, newTabs, sheetIdOf, destinations) {
   const { sheetId } = tab;
   const requests = [];
   for (const added2 of newTabs) {
@@ -1928,19 +2352,50 @@ function requestsOf2(tab, operations, newTabs, sheetIdOf) {
     );
   }
   for (const [each, row] of operations) {
-    if (each.kind !== "update" || row === void 0) continue;
+    if (each.kind !== "update" && each.kind !== "move" || row === void 0) continue;
     for (const [at, cell] of each.u) requests.push(cellsRequest(sheetId, row, at, [cell]));
   }
-  for (const [each] of operations) {
-    if (each.kind !== "move") continue;
-    requests.push({
-      appendCells: {
-        sheetId: sheetIdOf.get(each.t),
-        rows: [{ values: each.c.map(cellData) }],
-        fields: WRITTEN_FIELDS
-      }
-    });
+  const copied = /* @__PURE__ */ new Map();
+  const copies = [];
+  for (const [each, row] of operations) {
+    if (each.kind !== "move" || row === void 0) continue;
+    const destination = destinations.get(each.t);
+    if (destination === void 0) continue;
+    const count = (copied.get(destination.sheetId) ?? 0) + 1;
+    copied.set(destination.sheetId, count);
+    const target = destination.last + count;
+    for (const [from, to, width] of runsOf(each.m)) {
+      copies.push({
+        copyPaste: {
+          source: {
+            sheetId,
+            startRowIndex: row - 1,
+            endRowIndex: row,
+            startColumnIndex: from,
+            endColumnIndex: from + width
+          },
+          destination: {
+            sheetId: destination.sheetId,
+            startRowIndex: target - 1,
+            endRowIndex: target,
+            startColumnIndex: to,
+            endColumnIndex: to + width
+          },
+          pasteType: "PASTE_NORMAL",
+          pasteOrientation: "NORMAL"
+        }
+      });
+    }
   }
+  for (const destination of destinations.values()) {
+    const short = destination.last + (copied.get(destination.sheetId) ?? 0) - destination.rowCount;
+    if (short > 0) {
+      requests.push({
+        appendDimension: { sheetId: destination.sheetId, dimension: "ROWS", length: short }
+      });
+    }
+  }
+  requests.push(...copies);
   const removed = operations.filter(([each]) => each.kind === "move" || each.kind === "delete").flatMap(([, row]) => row === void 0 ? [] : [row]).sort((a, b) => b - a);
   if (removed.length > 0 && tab.rowCount - removed.length < 2) {
     requests.push({
@@ -1964,7 +2419,16 @@ function requestsOf2(tab, operations, newTabs, sheetIdOf) {
       }
     });
   }
-  return requests;
+  return { requests, removed: removed.length, appended: added.length, copied };
+}
+function runsOf(pairs) {
+  const runs = [];
+  for (const [from, to] of [...pairs].sort((a, b) => a[0] - b[0])) {
+    const last = runs.at(-1);
+    if (last !== void 0 && last[0] + last[2] === from && last[1] + last[2] === to) last[2] += 1;
+    else runs.push([from, to, 1]);
+  }
+  return runs;
 }
 function cellsRequest(sheetId, row, column, cells) {
   return {
@@ -1982,7 +2446,7 @@ function cellsRequest(sheetId, row, column, cells) {
   };
 }
 async function decodeOperation2(host, write, payload) {
-  let object = recordOf4(payload);
+  let object = recordOf5(payload);
   if (object === void 0) return UNREADABLE;
   const planned = object["x"];
   if (typeof planned === "string") return planned;
@@ -1998,7 +2462,7 @@ async function decodeOperation2(host, write, payload) {
   return ck === void 0 ? read : { ...read, ck };
 }
 function readOperation(write, object) {
-  const { h, s, kc, hd, k, d, t, c, u } = object;
+  const { h, s, kc, hd, k, d, t, c, u, dh, m } = object;
   if (!isDigest(h) || !isSheet(s)) return void 0;
   if (write === "add-tab") {
     const names = Array.isArray(c) ? c : [];
@@ -2006,6 +2470,13 @@ function readOperation(write, object) {
       return void 0;
     }
     return { kind: "add-tab", h, s, t, c: names };
+  }
+  if (write === "format-tab") {
+    const want = readWant(object);
+    if (want === void 0 || t !== void 0 && (typeof t !== "string" || t === "")) {
+      return void 0;
+    }
+    return { kind: "format-tab", h, s, ...t === void 0 ? {} : { t }, want };
   }
   if (typeof kc !== "number" || !Number.isSafeInteger(kc) || kc < 0 || !isDigest(hd) || typeof k !== "string" || k === "") {
     return void 0;
@@ -2017,23 +2488,43 @@ function readOperation(write, object) {
   }
   if (!isDigest(d)) return void 0;
   if (write === "delete") return { ...anchor, kind: "delete", d };
+  const changes = u === void 0 && write === "move" ? [] : changesOf(u);
+  if (changes === void 0) return void 0;
   if (write === "move") {
-    const cells = cellsOf(c);
-    if (cells === void 0 || typeof t !== "string" || t === "") return void 0;
-    return { ...anchor, kind: "move", d, t, c: cells };
-  }
-  if (write !== "update" || !Array.isArray(u) || u.length === 0) return void 0;
-  const changes = [];
-  for (const change of u) {
-    if (!Array.isArray(change) || change.length !== 2) return void 0;
-    const [at, value] = change;
-    const cell = readWriteCell(value);
-    if (typeof at !== "number" || !Number.isSafeInteger(at) || at < 0 || cell === void 0) {
+    const pairs = pairsOf(m);
+    if (pairs === void 0 || typeof t !== "string" || t === "" || !isDigest(dh)) {
       return void 0;
     }
+    return { ...anchor, kind: "move", d, t, dh, m: pairs, u: changes };
+  }
+  if (write !== "update" || changes.length === 0) return void 0;
+  return { ...anchor, kind: "update", d, u: changes };
+}
+function changesOf(value) {
+  if (!Array.isArray(value)) return void 0;
+  const changes = [];
+  for (const change of value) {
+    if (!Array.isArray(change) || change.length !== 2) return void 0;
+    const [at, written] = change;
+    const cell = readWriteCell(written);
+    if (!isIndex(at) || cell === void 0) return void 0;
     changes.push([at, cell]);
   }
-  return { ...anchor, kind: "update", d, u: changes };
+  return changes;
+}
+function pairsOf(value) {
+  if (!Array.isArray(value) || value.length === 0) return void 0;
+  const pairs = [];
+  for (const pair of value) {
+    if (!Array.isArray(pair) || pair.length !== 2) return void 0;
+    const [from, to] = pair;
+    if (!isIndex(from) || !isIndex(to)) return void 0;
+    pairs.push([from, to]);
+  }
+  return pairs;
+}
+function isIndex(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 function cellsOf(value) {
   if (!Array.isArray(value)) return void 0;
@@ -2086,11 +2577,12 @@ async function planSheetWrite(host, request) {
   const connection = await connect(host, request.section);
   if (!connection.ok) return refused2(verbFailed(SHEET_WRITE, connection.error));
   const { client } = connection.value;
-  const tabs = await readGridTabs(client, spreadsheetId);
-  if (!tabs.ok) return refused2(verbFailed(SHEET_WRITE, tabs.error));
+  const spreadsheet = await readGridSpreadsheet(client, spreadsheetId);
+  if (!spreadsheet.ok) return refused2(verbFailed(SHEET_WRITE, spreadsheet.error));
+  const separator = formulaSeparator(spreadsheet.value.locale);
   const written = request.arguments["tab"];
   const tab = pickTab(
-    tabs.value,
+    spreadsheet.value.tabs,
     typeof written === "string" ? written.trim() || void 0 : void 0
   );
   if (typeof tab === "string") return refused2(problem2(tab));
@@ -2134,7 +2626,7 @@ async function planSheetWrite(host, request) {
         column.link === void 0 ? void 0 : row.values[column.link]
       );
       if (cell !== null && typeof cell === "object" && "problem" in cell) return cell.problem;
-      cells[positions[index] ?? index] = cell;
+      cells[positions[index] ?? index] = cell !== null && typeof cell === "object" && "f" in cell ? { f: localFormula(cell.f, separator) } : cell;
     }
     return trimmed(Array.from(cells, (cell) => cell ?? null));
   });
@@ -2321,7 +2813,7 @@ function utf8Bytes(text) {
 
 // src/sheet-sync.ts
 var SHEET_SYNC = "google.sheet-sync";
-var SYNC_WRITES = ["add-tab", "update", "move", "delete", "add"];
+var SYNC_WRITES = ["add-tab", "update", "move", "delete", "add", "format-tab"];
 var ARGUMENTS3 = [
   { name: "spreadsheet", type: "text" },
   { name: "tab", type: "text", required: true },
@@ -2386,7 +2878,7 @@ async function planSheetSync(host, request) {
   if (kc === void 0) {
     return refused3(problem3(`the tab '${tab.title}' has no column '${keyColumn.name}' in row 1`));
   }
-  const keep = listOf3(text("keep")).map((name) => [name, columnIndexOf(names, name)]);
+  const keep = listOf4(text("keep")).map((name) => [name, columnIndexOf(names, name)]);
   const unknownKeep = keep.filter(([, index]) => index === void 0).map(([name]) => name);
   if (unknownKeep.length > 0) {
     return refused3(
@@ -2464,7 +2956,7 @@ async function planSheetSync(host, request) {
   }
   const tabsRead = /* @__PURE__ */ new Map();
   const archived = /* @__PURE__ */ new Set();
-  for (const title of listOf3(text("archived"))) {
+  for (const title of listOf4(text("archived"))) {
     const found = pickTab(tabs.value, title);
     if (typeof found === "string") continue;
     const read = await readValues(client, spreadsheetId, found);
@@ -2501,20 +2993,31 @@ async function planSheetSync(host, request) {
     return cells;
   };
   const destinationOf = (key) => moveColumn === void 0 ? "" : keyText(inTable.get(key)?.values[moveColumn.name]);
-  const moving = [...inTab.keys()].some((key) => inTable.has(key) && destinationOf(key) !== "");
   const lastRow = values.value.length;
   const extras = await readCellExtras(
     client,
     spreadsheetId,
     tab,
-    { links: moving ? names.map((_, index) => index) : linked.map(({ at }) => at), notes: [] },
+    { links: names.map((_, index) => index), notes: [] },
     lastRow
   );
   if (!extras.ok) return refused3(verbFailed(SHEET_SYNC, extras.error));
   const linkAt = (at, number) => extras.value.links[String(at)]?.[String(number)];
+  const digestOf2 = (row) => rowDigest(row.cells, rowLinks(extras.value.links, row.number));
+  const changedOf = (cells, row) => {
+    const changed = [];
+    for (const [at, cell] of cells) {
+      const read = linked.some((each) => each.at === at);
+      if (!sameCell(cell, row.cells[at], read ? linkAt(at, row.number) : void 0)) {
+        changed.push([at, cell]);
+      }
+    }
+    return changed;
+  };
   const s = `${spreadsheetId}/${tab.sheetId}`;
   const hd = headerDigest(names);
   const anchor = (key) => ({ s, kc, hd, k: key });
+  const shownChanges = (changed, row) => changed.map(([at, cell]) => `${names[at] ?? ""}: ${shownRaw(row.cells[at])} \u2192 ${shownCell(cell)}`).join("; ");
   const preserved = [];
   let unchanged = 0;
   const moves = [];
@@ -2529,7 +3032,7 @@ async function planSheetSync(host, request) {
           write: "delete",
           // No rowKey: the host names only rows of the table, and this one left it.
           description: `delete ${key} (row ${row.number}), which the table no longer holds`,
-          payload: { ...anchor(key), d: rowDigest(row.cells) }
+          payload: { ...anchor(key), d: digestOf2(row) }
         });
       }
       continue;
@@ -2549,25 +3052,19 @@ async function planSheetSync(host, request) {
       moves.push({ key, row, destination, cells });
       continue;
     }
-    const changed = [];
-    for (const [at, cell] of cells) {
-      const read = linked.some((each) => each.at === at);
-      if (!sameCell(cell, row.cells[at], read ? linkAt(at, row.number) : void 0)) {
-        changed.push([at, cell]);
-      }
-    }
+    const changed = changedOf(cells, row);
     if (changed.length === 0) {
       unchanged += 1;
       continue;
     }
-    const shown = changed.map(([at, cell]) => `${names[at] ?? ""}: ${shownRaw(row.cells[at])} \u2192 ${shownCell(cell)}`).join("; ");
+    const shown = shownChanges(changed, row);
     drafts.push({
       write: "update",
       rowKey: input.key,
       description: `update ${key} (row ${row.number}): ${shown}`,
       payload: {
         ...anchor(key),
-        d: rowDigest(row.cells),
+        d: digestOf2(row),
         u: changed.map(([at, cell]) => [at, cell])
       }
     });
@@ -2605,21 +3102,24 @@ async function planSheetSync(host, request) {
   }
   const moveDrafts = moves.map(({ key, row, destination, cells }) => {
     const header = destinations.get(destination) ?? names;
+    const changed = changedOf(cells, row);
     const base = {
       write: "move",
       rowKey: inTable.get(key)?.key ?? key,
-      description: `move ${key} (row ${row.number}) to the tab '${destination}'`
+      description: `move ${key} (row ${row.number}) to the tab '${destination}'` + (changed.length === 0 ? "" : `, writing ${shownChanges(changed, row)}`)
     };
     if (typeof header === "string") return { ...base, failure: `E_GOOGLE_PLAN: ${header}` };
-    const merged = names.map(
-      (_, at) => cells.has(at) ? cells.get(at) ?? null : sheetCell(row.cells[at], linkAt(at, row.number))
-    );
-    const placedCells = header.map(() => null);
+    const filled = (at) => {
+      const cell = cells.get(at);
+      if (cells.has(at)) return cell !== null;
+      return (row.cells[at] ?? "") !== "" || linkAt(at, row.number) !== void 0;
+    };
+    const pairs = [];
     const missing = [];
-    merged.forEach((cell, at) => {
-      const to = columnIndexOf(header, names[at] ?? "");
-      if (to !== void 0) placedCells[to] = cell;
-      else if (cell !== null) missing.push(names[at] ?? "");
+    names.forEach((name, at) => {
+      const to = columnIndexOf(header, name);
+      if (to !== void 0) pairs.push([at, to]);
+      else if (filled(at)) missing.push(name);
     });
     if (missing.length > 0) {
       return {
@@ -2632,9 +3132,11 @@ async function planSheetSync(host, request) {
       ...base,
       payload: {
         ...anchor(key),
-        d: rowDigest(row.cells),
+        d: digestOf2(row),
         t: typeof title === "string" ? destination : title.title,
-        c: trimmed(placedCells)
+        dh: headerDigest(header),
+        m: pairs,
+        ...changed.length === 0 ? {} : { u: changed.map(([at, cell]) => [at, cell]) }
       }
     };
   });
@@ -2669,7 +3171,63 @@ async function planSheetSync(host, request) {
       payload: { ...anchor(key), c: line }
     });
   }
-  const ordered = [...tabDrafts, ...drafts, ...moveDrafts, ...deletes, ...addDrafts];
+  const writes = (list) => list.filter((each) => each.payload !== void 0 && each.failure === void 0).length;
+  const formatDrafts = [];
+  const format = async (title, sheetId, header, last, destination) => {
+    const settings = tabSettingsOf(request.section, title);
+    if (settings === void 0) return googleOk(void 0);
+    const description = `format the tab '${title}'`;
+    const want = typeof settings === "string" ? settings : wantOf(settings, header);
+    if (typeof want === "string") {
+      formatDrafts.push({ write: "format-tab", description, failure: `E_GOOGLE_CONFIG: ${want}` });
+      return googleOk(void 0);
+    }
+    let now = NEW_TAB;
+    if (sheetId !== void 0) {
+      const read = await readTabFormat(client, spreadsheetId, { sheetId, title }, header.length);
+      if (!read.ok) return read;
+      now = read.value;
+    }
+    const { said } = formatRequests(sheetId ?? 0, want, now, last);
+    if (said.length === 0) return googleOk(void 0);
+    formatDrafts.push({
+      write: "format-tab",
+      description: `${description}: ${said.join("; ")}`,
+      payload: { s, ...destination ? { t: title } : {}, ...formatPayload(want) }
+    });
+    return googleOk(void 0);
+  };
+  const formatted = await format(
+    tab.title,
+    tab.sheetId,
+    names,
+    lastRow - writes(deletes) - writes(moveDrafts) + writes(addDrafts),
+    false
+  );
+  if (!formatted.ok) return refused3(verbFailed(SHEET_SYNC, formatted.error));
+  for (const [destination, header] of destinations) {
+    if (typeof header === "string") continue;
+    const into = moveDrafts.filter(
+      (draft, index) => draft.payload !== void 0 && moves[index]?.destination === destination
+    ).length;
+    const found = pickTab(tabs.value, destination);
+    const done = typeof found === "string" ? await format(destination, void 0, header, 1 + into, true) : await format(
+      found.title,
+      found.sheetId,
+      header,
+      (tabsRead.get(found.title)?.length ?? 1) + into,
+      true
+    );
+    if (!done.ok) return refused3(verbFailed(SHEET_SYNC, done.error));
+  }
+  const ordered = [
+    ...tabDrafts,
+    ...drafts,
+    ...moveDrafts,
+    ...deletes,
+    ...addDrafts,
+    ...formatDrafts
+  ];
   if (ordered.length > MAX_OPERATIONS) {
     return refused3(
       problem3(
@@ -2694,7 +3252,7 @@ async function planSheetSync(host, request) {
   if (skippedArchived.length > 0) {
     diagnostics.push(
       warning(
-        `does not add ${listed(skippedArchived)}, already in ${listed(listOf3(text("archived")))}`
+        `does not add ${listed(skippedArchived)}, already in ${listed(listOf4(text("archived")))}`
       )
     );
   }
@@ -2747,18 +3305,19 @@ function sameCell(cell, raw, link) {
     return value === cell && (typeof cell !== "string" || link === void 0);
   return "t" in cell && value === cell.t && link === cell.u;
 }
-function sheetCell(raw, link) {
-  const value = raw ?? "";
-  if (link !== void 0 && /^(https?:\/\/|mailto:)\S+$/i.test(link)) {
-    return { t: value === "" ? link : String(value), u: link };
-  }
-  return value === "" ? null : value;
+function formatPayload(want) {
+  return {
+    c: [...want.c],
+    ...want.n === void 0 ? {} : { n: want.n },
+    ...want.b === void 0 ? {} : { b: want.b },
+    ...want.v === void 0 ? {} : { v: want.v.map(([at, values]) => [at, [...values]]) }
+  };
 }
 function shownRaw(raw) {
   if (raw === void 0 || raw === "") return "(blank)";
   return typeof raw === "boolean" ? raw ? "TRUE" : "FALSE" : String(raw);
 }
-function listOf3(text) {
+function listOf4(text) {
   return [
     ...new Set(
       text.split(",").map((name) => name.trim()).filter((name) => name !== "")
