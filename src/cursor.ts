@@ -75,3 +75,24 @@ export function fingerprint(text: string): string {
   }
   return hash.toString(16).padStart(16, '0');
 }
+
+/**
+ * Any JSON value as a cursor, for the Drive verbs, whose cursors carry their own shapes; the
+ * verb checks the shape. `limit` is the longest cursor the verb writes.
+ */
+export function encodeOpaque(value: unknown): string {
+  return base64Url(new TextEncoder().encode(JSON.stringify(value)));
+}
+
+/** The JSON a cursor of {@link encodeOpaque} carries, or why the text is not one. */
+export function decodeOpaque(text: string, limit: number): { readonly value: unknown } | string {
+  if (text.length > limit) return `the cursor is ${text.length} characters long, over ${limit}`;
+  if (!/^[A-Za-z0-9_-]*$/.test(text)) return 'the cursor is not base64url';
+  const bytes = base64Decode(text.replace(/-/g, '+').replace(/_/g, '/'));
+  if (bytes === undefined) return 'the cursor is not base64url';
+  try {
+    return { value: JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) };
+  } catch {
+    return 'the cursor is not JSON';
+  }
+}

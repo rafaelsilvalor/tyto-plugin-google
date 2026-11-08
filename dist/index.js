@@ -277,6 +277,9 @@ function spreadsheetIdOf(written) {
 function folderIdOf(written) {
   return idOf(written, /\/folders\/([A-Za-z0-9_-]+)/, "drive.google.com");
 }
+function fileIdOf(written) {
+  return idOf(written, /^\/file\/d\/([A-Za-z0-9_-]+)/, "drive.google.com");
+}
 function idOf(written, path, hostname) {
   if (typeof written !== "string") return void 0;
   const trimmed2 = written.trim();
@@ -387,6 +390,21 @@ function retryAfter(header, now) {
 function createGoogleClient(options) {
   const { transport, tokens, clientEmail } = options;
   async function request(method, address, query, body) {
+    const answer = await exchange(method, address, query, body);
+    if (!answer.ok) return answer;
+    const { status, text, label } = answer.value;
+    if (text.trim() === "") return googleOk(null);
+    try {
+      return googleOk(JSON.parse(text));
+    } catch {
+      return googleError(
+        "E_GOOGLE_RESPONSE",
+        `${label} answered ${status} with a body that is not JSON.`,
+        { status }
+      );
+    }
+  }
+  async function exchange(method, address, query, body, accept = "application/json") {
     const url = urlOf(address, query);
     if (!url.ok) return url;
     const label = `${method} ${url.value.host}${url.value.pathname}`;
@@ -401,7 +419,7 @@ function createGoogleClient(options) {
           url: url.value.href,
           label,
           headers: {
-            Accept: "application/json",
+            Accept: accept,
             Authorization: `Bearer ${token.value}`,
             ...body === void 0 ? {} : { "Content-Type": "application/json" }
           },
@@ -419,20 +437,15 @@ function createGoogleClient(options) {
         const failure = classifyFailure(label, status, text, clientEmail);
         return { ok: false, error: { ...failure, message: redact(failure.message) } };
       }
-      if (text.trim() === "") return googleOk(null);
-      try {
-        return googleOk(JSON.parse(text));
-      } catch {
-        return googleError(
-          "E_GOOGLE_RESPONSE",
-          `${label} answered ${status} with a body that is not JSON.`,
-          { status }
-        );
-      }
+      return googleOk({ status, text, label });
     }
   }
   return {
     get: (url, query) => request("GET", url, query, void 0),
+    async getText(url, query) {
+      const answer = await exchange("GET", url, query, void 0, "*/*");
+      return answer.ok ? googleOk(answer.value.text) : answer;
+    },
     post: (url, body, query) => request("POST", url, query, body),
     put: (url, body, query) => request("PUT", url, query, body),
     patch: (url, body, query) => request("PATCH", url, query, body),
@@ -685,6 +698,621 @@ function fingerprint(text) {
   }
   return hash.toString(16).padStart(16, "0");
 }
+function encodeOpaque(value) {
+  return base64Url(new TextEncoder().encode(JSON.stringify(value)));
+}
+function decodeOpaque(text, limit) {
+  if (text.length > limit) return `the cursor is ${text.length} characters long, over ${limit}`;
+  if (!/^[A-Za-z0-9_-]*$/.test(text)) return "the cursor is not base64url";
+  const bytes = base64Decode(text.replace(/-/g, "+").replace(/_/g, "/"));
+  if (bytes === void 0) return "the cursor is not base64url";
+  try {
+    return { value: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) };
+  } catch {
+    return "the cursor is not JSON";
+  }
+}
+
+// src/drive-query.ts
+var FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
+var ITEM_FIELDS = "id, name, mimeType";
+function escapeDriveQueryValue(value) {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+var DRIVE_TYPES = ["folder", "file", "image", "json"];
+var FILE_FIELDS = `${ITEM_FIELDS}, size, createdTime, modifiedTime, webViewLink, parents`;
+var LIST_FIELDS = `nextPageToken, files(${FILE_FIELDS})`;
+var NATIVE_PREFIX = "application/vnd.google-apps.";
+function childrenQuery(folderId, type) {
+  const base = `'${escapeDriveQueryValue(folderId)}' in parents and trashed = false`;
+  switch (type) {
+    case "folder":
+      return `${base} and mimeType = '${FOLDER_MIME_TYPE}'`;
+    case "image":
+      return `${base} and mimeType contains 'image/'`;
+    case "file":
+    case "json":
+      return `${base} and mimeType != '${FOLDER_MIME_TYPE}'`;
+    case void 0:
+      return base;
+  }
+}
+function kindOf(mimeType, name) {
+  if (mimeType === FOLDER_MIME_TYPE) return "folder";
+  if (mimeType.startsWith("image/")) return "image";
+  if (isJson(mimeType, name)) return "json";
+  return "file";
+}
+function isJson(mimeType, name) {
+  return mimeType === "application/json" || name.toLowerCase().endsWith(".json");
+}
+function matchesType(kind, type) {
+  if (type === void 0) return true;
+  if (type === "file") return kind !== "folder";
+  return kind === type;
+}
+
+// src/verb.ts
+var ORIGIN = "google";
+function verbFailed(verb, error) {
+  return {
+    severity: "error",
+    code: "E_RECIPE_VERB",
+    message: `'${verb}' failed: ${withoutFinalStop(describeGoogleError(error))}.`
+  };
+}
+function argumentsProblem(verb, problem5) {
+  return {
+    severity: "error",
+    code: "E_RECIPE_ARGUMENTS",
+    message: `'${verb}' ${withoutFinalStop(problem5)}.`
+  };
+}
+function failed(diagnostic) {
+  return { ok: false, error: [diagnostic] };
+}
+function withoutFinalStop(text) {
+  return text.trim().replace(/\.+$/, "");
+}
+
+// src/drive-files.ts
+var DRIVE_FILES = "https://www.googleapis.com/drive/v3/files";
+var LIST_PAGE_SIZE = 1e3;
+async function listChildren(client, folderId, type, pageToken) {
+  const answer = await client.get(DRIVE_FILES, {
+    q: childrenQuery(folderId, type),
+    fields: LIST_FIELDS,
+    orderBy: "createdTime,name",
+    pageSize: LIST_PAGE_SIZE,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    ...pageToken === void 0 ? {} : { pageToken }
+  });
+  if (!answer.ok) return answer;
+  const record = recordOf2(answer.value);
+  const listed2 = record?.["files"];
+  if (!Array.isArray(listed2)) return malformed("the folder listing", "no files");
+  const files = [];
+  for (const item of listed2) {
+    const file = fileOf(item);
+    if (file === void 0) return malformed("the folder listing", "a file without id or name");
+    files.push(file);
+  }
+  const next = record?.["nextPageToken"];
+  return googleOk({
+    files,
+    ...typeof next === "string" && next !== "" ? { nextPageToken: next } : {}
+  });
+}
+async function getFile(client, fileId) {
+  const answer = await client.get(`${DRIVE_FILES}/${encodeURIComponent(fileId)}`, {
+    fields: FILE_FIELDS,
+    supportsAllDrives: true
+  });
+  if (!answer.ok) return answer;
+  const file = fileOf(answer.value);
+  return file === void 0 ? malformed("the file", "no id or name") : googleOk(file);
+}
+async function downloadFile(client, fileId) {
+  return client.getText(`${DRIVE_FILES}/${encodeURIComponent(fileId)}`, {
+    alt: "media",
+    supportsAllDrives: true
+  });
+}
+function fileOf(value) {
+  const record = recordOf2(value);
+  if (record === void 0) return void 0;
+  const { id, name, mimeType } = record;
+  if (typeof id !== "string" || id === "" || typeof name !== "string") return void 0;
+  const text = (field) => {
+    const found = record[field];
+    return typeof found === "string" && found !== "" ? found : void 0;
+  };
+  const size = Number(record["size"]);
+  const createdTime = text("createdTime");
+  const modifiedTime = text("modifiedTime");
+  const webViewLink = text("webViewLink");
+  const parents = Array.isArray(record["parents"]) ? record["parents"].filter((parent) => typeof parent === "string") : [];
+  return {
+    id,
+    name,
+    mimeType: typeof mimeType === "string" ? mimeType : "",
+    ...record["size"] !== void 0 && Number.isSafeInteger(size) ? { size } : {},
+    ...createdTime === void 0 ? {} : { createdTime },
+    ...modifiedTime === void 0 ? {} : { modifiedTime },
+    ...webViewLink === void 0 ? {} : { webViewLink },
+    parents
+  };
+}
+function malformed(what, why) {
+  return googleError("E_GOOGLE_RESPONSE", `Google answered ${what} with ${why}.`);
+}
+function recordOf2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+function textArgument(values, name) {
+  const value = values[name];
+  if (value === void 0) return void 0;
+  const trimmed2 = String(value).trim();
+  return trimmed2 === "" ? void 0 : trimmed2;
+}
+function folderArgument(verb, values, section) {
+  const written = textArgument(values, "folder");
+  if (written !== void 0) {
+    const id = folderIdOf(written);
+    if (id !== void 0) return id;
+    return argumentsProblem(
+      verb,
+      `folder= holds '${written}', which is neither a Drive folder id nor its address, such as https://drive.google.com/drive/folders/<id>`
+    );
+  }
+  const read = readSection(section);
+  if (!read.ok) return verbFailed(verb, read.error);
+  if (read.value.root === void 0) {
+    return argumentsProblem(
+      verb,
+      "needs folder=, or root in the google section of .tyto/project.json, and was given neither"
+    );
+  }
+  return read.value.root;
+}
+
+// src/drive-list.ts
+var DRIVE_LIST = "google.drive-list";
+var DEFAULT_MAX = 1e5;
+var MAX_MAX = 1e5;
+var CURSOR_LIMIT = 4e3;
+var ARGUMENTS = [
+  { name: "folder", type: "text" },
+  { name: "type", type: "text" },
+  { name: "max", type: "number" }
+];
+var LIST_COLUMNS = [
+  { name: "id", type: "text", origin: ORIGIN },
+  { name: "name", type: "text", origin: ORIGIN },
+  { name: "mime_type", type: "text", origin: ORIGIN },
+  { name: "kind", type: "text", origin: ORIGIN },
+  { name: "size", type: "number", origin: ORIGIN },
+  { name: "created", type: "datetime", origin: ORIGIN },
+  { name: "modified", type: "datetime", origin: ORIGIN },
+  { name: "url", type: "link", origin: ORIGIN },
+  { name: "parent_id", type: "text", origin: ORIGIN }
+];
+function driveListVerb(host) {
+  return {
+    id: DRIVE_LIST,
+    kind: "source",
+    arguments: ARGUMENTS,
+    page: (request) => driveListPage(host, request)
+  };
+}
+var listFailed = (text) => failed({ severity: "error", code: "E_RECIPE_VERB", message: `'${DRIVE_LIST}' failed: ${text}.` });
+async function driveListPage(host, request) {
+  const asked = readListArguments(request.arguments, request.section);
+  if ("severity" in asked) return failed(asked);
+  const print = fingerprint(JSON.stringify([asked.folderId, asked.type ?? null, asked.max]));
+  let cursor;
+  if (request.cursor !== void 0) {
+    const decoded = decodeOpaque(request.cursor, CURSOR_LIMIT);
+    if (typeof decoded === "string") return listFailed(`${decoded}; run again`);
+    if (!isListCursor(decoded.value)) {
+      return listFailed("the cursor is not one this plugin writes; run again");
+    }
+    cursor = decoded.value;
+    if (cursor.f !== print) {
+      return listFailed("the step changed between two pages of one run; run again");
+    }
+  }
+  const connection = await connect(host, request.section);
+  if (!connection.ok) return failed(verbFailed(DRIVE_LIST, connection.error));
+  const page = await listChildren(connection.value.client, asked.folderId, asked.type, cursor?.t);
+  if (!page.ok) return failed(verbFailed(DRIVE_LIST, page.error));
+  const fetchedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const rows = page.value.files.filter((file) => matchesType(kindOf(file.mimeType, file.name), asked.type)).map((file) => rowOf(file, asked.folderId, fetchedAt));
+  const table = { columns: LIST_COLUMNS, rows };
+  const answered = (cursor?.n ?? 0) + rows.length;
+  if (answered > asked.max) return { ok: true, value: { table, truncated: true }, diagnostics: [] };
+  const token = page.value.nextPageToken;
+  if (token === void 0) return { ok: true, value: { table }, diagnostics: [] };
+  const next = { v: 1, t: token, n: answered, f: print };
+  return { ok: true, value: { table, cursor: encodeOpaque(next) }, diagnostics: [] };
+}
+function rowOf(file, folderId, fetchedAt) {
+  return {
+    key: file.id,
+    values: {
+      id: file.id,
+      name: file.name,
+      mime_type: file.mimeType,
+      kind: kindOf(file.mimeType, file.name),
+      size: file.size ?? null,
+      created: file.createdTime ?? null,
+      modified: file.modifiedTime ?? null,
+      url: file.webViewLink ?? null,
+      // The folder asked for: a file Drive lists under it is its child, whatever else holds it.
+      parent_id: folderId
+    },
+    provenance: { source: ORIGIN, id: file.id, fetchedAt }
+  };
+}
+function isListCursor(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value;
+  return record["v"] === 1 && typeof record["t"] === "string" && record["t"] !== "" && Number.isSafeInteger(record["n"]) && record["n"] >= 0 && typeof record["f"] === "string" && /^[0-9a-f]{16}$/.test(record["f"]);
+}
+function readListArguments(values, section) {
+  const folderId = folderArgument(DRIVE_LIST, values, section);
+  if (typeof folderId !== "string") return folderId;
+  const type = textArgument(values, "type")?.toLowerCase();
+  if (type !== void 0 && !DRIVE_TYPES.includes(type)) {
+    return argumentsProblem(
+      DRIVE_LIST,
+      `type= must be one of ${DRIVE_TYPES.join(", ")}, not '${type}'`
+    );
+  }
+  const max = values["max"] ?? DEFAULT_MAX;
+  if (typeof max !== "number" || !Number.isSafeInteger(max) || max < 1 || max > MAX_MAX) {
+    return argumentsProblem(
+      DRIVE_LIST,
+      `max= must be a whole number from 1 to ${MAX_MAX}, not ${String(max)}`
+    );
+  }
+  return {
+    folderId,
+    ...type === void 0 ? {} : { type },
+    max
+  };
+}
+
+// src/drive-json.ts
+var MAX_JSON_COLUMNS = 200;
+var FILE_COLUMNS = ["file_id", "file_name"];
+var VALUE_COLUMN = "value";
+function jsonColumns(columns) {
+  return [
+    ...FILE_COLUMNS.map((name) => ({ name, type: "text", origin: ORIGIN })),
+    ...columns.map(([name, type]) => ({ name, type, origin: ORIGIN }))
+  ];
+}
+function jsonRows(file, text, fetchedAt, carried) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text.replace(/^\uFEFF/, ""));
+  } catch {
+    return `'${file.name}' is not JSON`;
+  }
+  let elements;
+  if (Array.isArray(parsed)) elements = parsed;
+  else if (typeof parsed === "object" && parsed !== null) elements = [parsed];
+  else return `'${file.name}' holds neither a JSON array nor an object`;
+  const records = elements.map((element) => {
+    if (typeof element === "object" && element !== null && !Array.isArray(element)) {
+      return Object.fromEntries(
+        Object.entries(element).map(([key, value]) => [
+          key,
+          cellOf(value)
+        ])
+      );
+    }
+    return { [VALUE_COLUMN]: cellOf(element) };
+  });
+  const names = [];
+  const lowered = /* @__PURE__ */ new Map();
+  for (const record of records) {
+    for (const name of Object.keys(record)) {
+      const lower = name.toLowerCase();
+      const seen = lowered.get(lower);
+      if (seen === name) continue;
+      if (name.trim() === "") return `'${file.name}' has a key with no name`;
+      if (FILE_COLUMNS.includes(lower)) {
+        return `'${file.name}' has the key '${name}', which names the column every row of the file gets`;
+      }
+      if (seen !== void 0) {
+        return `'${file.name}' has the keys '${seen}' and '${name}', which differ only in case`;
+      }
+      lowered.set(lower, name);
+      names.push(name);
+    }
+  }
+  if (names.length > MAX_JSON_COLUMNS) {
+    return `'${file.name}' has ${names.length} keys, over ${MAX_JSON_COLUMNS}`;
+  }
+  const columns = carried ?? names.map((name) => [name, typeOf(records.map((record) => record[name]))]);
+  if (carried !== void 0) {
+    const known = new Set(carried.map(([name]) => name));
+    const extra = names.find((name) => !known.has(name));
+    if (extra !== void 0) {
+      return `'${file.name}' has the key '${extra}', which the folder's first JSON file did not; a folder is read into its first file's columns, so read this file alone with file=`;
+    }
+  }
+  const rows = [];
+  for (const [index, record] of records.entries()) {
+    const key = `${file.id}:${index}`;
+    const values = { file_id: file.id, file_name: file.name };
+    for (const [name, type] of columns) {
+      const value = fit(record[name] ?? null, type);
+      if (value === void 0) {
+        return `'${file.name}' holds ${describe(record[name] ?? null)} under '${name}' in element ${index}, where the folder's first JSON file had a ${type} column`;
+      }
+      values[name] = value;
+    }
+    rows.push({ key, values, provenance: { source: ORIGIN, id: key, fetchedAt } });
+  }
+  return { columns, rows };
+}
+function cellOf(value) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (Array.isArray(value) && value.every(isScalar)) return value;
+  return JSON.stringify(value);
+}
+function isScalar(value) {
+  return value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value);
+}
+function typeOf(values) {
+  const filled = values.filter(
+    (value) => value !== void 0 && value !== null
+  );
+  if (filled.length === 0) return "text";
+  if (filled.every((value) => typeof value === "number")) return "number";
+  if (filled.every((value) => typeof value === "boolean")) return "boolean";
+  if (filled.every((value) => Array.isArray(value))) return "list";
+  return "text";
+}
+function fit(value, type) {
+  if (value === null) return null;
+  switch (type) {
+    case "number":
+      return typeof value === "number" ? value : void 0;
+    case "boolean":
+      return typeof value === "boolean" ? value : void 0;
+    case "list":
+      return Array.isArray(value) ? value : void 0;
+    default:
+      if (typeof value === "string") return value;
+      return Array.isArray(value) ? JSON.stringify(value) : String(value);
+  }
+}
+function describe(value) {
+  if (Array.isArray(value)) return "a list";
+  return typeof value === "string" ? "text" : `the ${typeof value} ${String(value)}`;
+}
+
+// src/drive-read.ts
+var DRIVE_READ = "google.drive-read";
+var MAX_FILE_BYTES = 8 * 1024 * 1024;
+var PAGE_ROWS = 5e3;
+var PAGE_BYTES = 6 * 1024 * 1024;
+var MAX_FILES = 1e3;
+var CURSOR_LIMIT2 = 16e3;
+var ARGUMENTS2 = [
+  { name: "file", type: "text" },
+  { name: "folder", type: "text" },
+  { name: "type", type: "text" }
+];
+var TEXT_COLUMNS = [
+  { name: "file_id", type: "text", origin: ORIGIN },
+  { name: "file_name", type: "text", origin: ORIGIN },
+  { name: "line", type: "number", origin: ORIGIN },
+  { name: "text", type: "text", origin: ORIGIN }
+];
+function driveReadVerb(host) {
+  return {
+    id: DRIVE_READ,
+    kind: "source",
+    arguments: ARGUMENTS2,
+    page: (request) => driveReadPage(host, request)
+  };
+}
+var problem = (text) => argumentsProblem(DRIVE_READ, text);
+var readFailed = (text) => failed({ severity: "error", code: "E_RECIPE_VERB", message: `'${DRIVE_READ}' failed: ${text}.` });
+var changed = (what) => readFailed(`${what} changed while its pages were read; run again`);
+async function driveReadPage(host, request) {
+  const asked = readReadArguments(request.arguments, request.section);
+  if ("severity" in asked) return failed(asked);
+  const print = fingerprint(JSON.stringify(asked));
+  let cursor;
+  if (request.cursor !== void 0) {
+    const decoded = decodeOpaque(request.cursor, CURSOR_LIMIT2);
+    if (typeof decoded === "string") return readFailed(`${decoded}; run again`);
+    if (!isReadCursor(decoded.value)) {
+      return readFailed("the cursor is not one this plugin writes; run again");
+    }
+    cursor = decoded.value;
+    if (cursor.f !== print) {
+      return readFailed("the step changed between two pages of one run; run again");
+    }
+  }
+  const connection = await connect(host, request.section);
+  if (!connection.ok) return failed(verbFailed(DRIVE_READ, connection.error));
+  const { client } = connection.value;
+  let files;
+  let listing = "";
+  if (asked.mode === "file") {
+    const file2 = await getFile(client, asked.fileId);
+    if (!file2.ok) return failed(verbFailed(DRIVE_READ, file2.error));
+    files = [file2.value];
+  } else {
+    const listed2 = await jsonFilesOf(client, asked.folderId);
+    if ("severity" in listed2) return failed(listed2);
+    files = listed2;
+    listing = fingerprint(JSON.stringify(files.map((file2) => file2.id)));
+    if (cursor !== void 0 && cursor.l !== listing) return changed("the folder");
+    if (files.length === 0) {
+      return {
+        ok: true,
+        value: { table: { columns: jsonColumns([]), rows: [] } },
+        diagnostics: []
+      };
+    }
+  }
+  const index = cursor?.i ?? 0;
+  const file = files[index];
+  if (file === void 0 || cursor !== void 0 && cursor.id !== file.id) {
+    return changed("the folder");
+  }
+  const digest = fingerprint(
+    JSON.stringify([file.id, file.size ?? null, file.modifiedTime ?? null])
+  );
+  if (cursor !== void 0 && cursor.o > 0 && cursor.d !== digest) {
+    return changed(`the file '${file.name}'`);
+  }
+  const format = formatOf(file, asked);
+  if (typeof format !== "string") return failed(format);
+  const body = await downloadFile(client, file.id);
+  if (!body.ok) return failed(verbFailed(DRIVE_READ, body.error));
+  const bytes = new TextEncoder().encode(body.value).byteLength;
+  if (bytes > MAX_FILE_BYTES) return failed(tooLarge(file, bytes));
+  const fetchedAt = (/* @__PURE__ */ new Date()).toISOString();
+  let columns;
+  let rows;
+  let carried;
+  if (format === "text") {
+    columns = TEXT_COLUMNS;
+    rows = textRows(file, body.value, fetchedAt);
+  } else {
+    const read = jsonRows(file, body.value, fetchedAt, cursor?.c);
+    if (typeof read === "string") return readFailed(read);
+    columns = jsonColumns(read.columns);
+    rows = read.rows;
+    carried = read.columns;
+  }
+  const start = cursor?.o ?? 0;
+  const page = pageOf(rows, start);
+  const table = { columns, rows: page };
+  const end = start + page.length;
+  const rest = (next) => {
+    const written = {
+      v: 1,
+      ...next,
+      l: listing,
+      ...carried === void 0 ? {} : { c: carried },
+      f: print
+    };
+    return { ok: true, value: { table, cursor: encodeOpaque(written) }, diagnostics: [] };
+  };
+  if (end < rows.length) return rest({ i: index, id: file.id, o: end, d: digest });
+  const following = files[index + 1];
+  if (following === void 0) return { ok: true, value: { table }, diagnostics: [] };
+  return rest({ i: index + 1, id: following.id, o: 0, d: "" });
+}
+async function jsonFilesOf(client, folderId) {
+  const found = [];
+  let token;
+  do {
+    const page = await listChildren(client, folderId, "json", token);
+    if (!page.ok) return verbFailed(DRIVE_READ, page.error);
+    found.push(...page.value.files.filter((file) => isJson(file.mimeType, file.name)));
+    if (found.length > MAX_FILES) {
+      return problem(
+        `reads at most ${MAX_FILES} JSON files of a folder, one per page, and this folder holds more; move some of them to another folder`
+      );
+    }
+    token = page.value.nextPageToken;
+  } while (token !== void 0);
+  return found;
+}
+function formatOf(file, asked) {
+  if (file.mimeType === FOLDER_MIME_TYPE) {
+    return problem(`file= names '${file.name}', which is a folder; read a folder with folder=`);
+  }
+  if (file.mimeType.startsWith(NATIVE_PREFIX)) {
+    return problem(
+      `cannot read '${file.name}', a native Google file (${file.mimeType}), which has no content to download; read a spreadsheet with google.sheet-rows, or save the file as JSON or text in Drive`
+    );
+  }
+  if (file.size !== void 0 && file.size > MAX_FILE_BYTES) return tooLarge(file, file.size);
+  if (asked.mode === "folder") return "json";
+  if (asked.type !== void 0) return asked.type;
+  if (isJson(file.mimeType, file.name)) return "json";
+  if (file.mimeType.startsWith("text/")) return "text";
+  return problem(
+    `cannot tell how to read '${file.name}' (${file.mimeType || "no type"}), which is neither JSON nor text; type=text reads it as lines of text`
+  );
+}
+function tooLarge(file, bytes) {
+  return problem(
+    `reads files of at most ${MAX_FILE_BYTES} bytes (8 MiB), and '${file.name}' has ${bytes}`
+  );
+}
+function textRows(file, text, fetchedAt) {
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
+  if (lines.at(-1) === "") lines.pop();
+  return lines.map((line, at) => {
+    const key = `${file.id}:${at + 1}`;
+    return {
+      key,
+      values: { file_id: file.id, file_name: file.name, line: at + 1, text: line },
+      provenance: { source: ORIGIN, id: key, fetchedAt }
+    };
+  });
+}
+function pageOf(rows, start) {
+  const encoder = new TextEncoder();
+  const page = [];
+  let bytes = 0;
+  for (let index = start; index < rows.length && page.length < PAGE_ROWS; index += 1) {
+    const row = rows[index];
+    if (row === void 0) break;
+    bytes += encoder.encode(JSON.stringify(row)).byteLength;
+    if (page.length > 0 && bytes > PAGE_BYTES) break;
+    page.push(row);
+  }
+  return page;
+}
+function isReadCursor(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value;
+  const columns = record["c"];
+  return record["v"] === 1 && Number.isSafeInteger(record["i"]) && record["i"] >= 0 && typeof record["id"] === "string" && Number.isSafeInteger(record["o"]) && record["o"] >= 0 && typeof record["d"] === "string" && typeof record["l"] === "string" && typeof record["f"] === "string" && (columns === void 0 || Array.isArray(columns) && columns.every(
+    (column) => Array.isArray(column) && column.length === 2 && typeof column[0] === "string" && typeof column[1] === "string"
+  ));
+}
+function readReadArguments(values, section) {
+  const fileWritten = textArgument(values, "file");
+  const type = textArgument(values, "type")?.toLowerCase();
+  if (type !== void 0 && type !== "json" && type !== "text") {
+    return problem(`type= must be json or text, not '${type}'`);
+  }
+  if (fileWritten !== void 0) {
+    if (textArgument(values, "folder") !== void 0) {
+      return problem("takes file= or folder=, not both");
+    }
+    const fileId = fileIdOf(fileWritten);
+    if (fileId === void 0) {
+      return problem(
+        `file= holds '${fileWritten}', which is neither a Drive file id nor its address, such as https://drive.google.com/file/d/<id>/view`
+      );
+    }
+    return { mode: "file", fileId, ...type === void 0 ? {} : { type } };
+  }
+  if (type === "text") {
+    return problem("reads a folder as its JSON files only; type=text needs file=");
+  }
+  const folderId = folderArgument(DRIVE_READ, values, section);
+  if (typeof folderId !== "string") return folderId;
+  return { mode: "folder", folderId };
+}
 
 // src/sheet-cache.ts
 var ENTRY_LIMIT_BYTES = 32 * 1024 * 1024;
@@ -730,8 +1358,8 @@ function entryOf(bytes) {
   } catch {
     return void 0;
   }
-  const entry = recordOf2(parsed);
-  const snapshot = recordOf2(entry?.["snapshot"]);
+  const entry = recordOf3(parsed);
+  const snapshot = recordOf3(entry?.["snapshot"]);
   if (entry?.["v"] !== 1 || typeof entry["version"] !== "string" || typeof entry["fetchedAt"] !== "string" || snapshot === void 0 || typeof snapshot["spreadsheetId"] !== "string" || !Number.isSafeInteger(snapshot["sheetId"]) || typeof snapshot["title"] !== "string" || !isValues(snapshot["values"]) || !isByColumn(snapshot["links"]) || !isByColumn(snapshot["notes"])) {
     return void 0;
   }
@@ -743,37 +1371,14 @@ function isValues(value) {
   );
 }
 function isByColumn(value) {
-  const columns = recordOf2(value);
+  const columns = recordOf3(value);
   return columns !== void 0 && Object.values(columns).every((rows) => {
-    const byRow = recordOf2(rows);
+    const byRow = recordOf3(rows);
     return byRow !== void 0 && Object.values(byRow).every((text) => typeof text === "string");
   });
 }
-function recordOf2(value) {
+function recordOf3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
-}
-
-// src/verb.ts
-var ORIGIN = "google";
-function verbFailed(verb, error) {
-  return {
-    severity: "error",
-    code: "E_RECIPE_VERB",
-    message: `'${verb}' failed: ${withoutFinalStop(describeGoogleError(error))}.`
-  };
-}
-function argumentsProblem(verb, problem4) {
-  return {
-    severity: "error",
-    code: "E_RECIPE_ARGUMENTS",
-    message: `'${verb}' ${withoutFinalStop(problem4)}.`
-  };
-}
-function failed(diagnostic) {
-  return { ok: false, error: [diagnostic] };
-}
-function withoutFinalStop(text) {
-  return text.trim().replace(/\.+$/, "");
 }
 
 // src/sheet-grid.ts
@@ -826,7 +1431,7 @@ function inferType(values, column) {
   if (filled > 0 && booleans === filled) return "boolean";
   return "text";
 }
-function cellOf(cell, type) {
+function cellOf2(cell, type) {
   if (cell === void 0 || cell === "") return null;
   if (type !== "text") return cell;
   if (typeof cell === "boolean") return cell ? "TRUE" : "FALSE";
@@ -863,7 +1468,7 @@ function gridOf(snapshot, names, plan, fetchedAt) {
     const values = {};
     let empty = true;
     names.forEach((name, column) => {
-      const value = cellOf(cells[column], types[column] ?? "text");
+      const value = cellOf2(cells[column], types[column] ?? "text");
       if (value !== null) empty = false;
       values[name] = value;
     });
@@ -907,7 +1512,7 @@ function gridOf(snapshot, names, plan, fetchedAt) {
 
 // src/sheet-snapshot.ts
 var SHEETS = "https://sheets.googleapis.com/v4/spreadsheets";
-var DRIVE_FILES = "https://www.googleapis.com/drive/v3/files";
+var DRIVE_FILES2 = "https://www.googleapis.com/drive/v3/files";
 var LINK_FIELDS = [
   "hyperlink",
   "textFormatRuns(format(link(uri)))",
@@ -918,15 +1523,15 @@ async function readTabs(client, spreadsheetId) {
     fields: "sheets.properties(sheetId,title)"
   });
   if (!answer.ok) return answer;
-  const sheets = recordOf3(answer.value)?.["sheets"];
-  if (!Array.isArray(sheets)) return malformed("the spreadsheet", "no sheets");
+  const sheets = recordOf4(answer.value)?.["sheets"];
+  if (!Array.isArray(sheets)) return malformed2("the spreadsheet", "no sheets");
   const tabs = [];
   for (const sheet of sheets) {
-    const properties = recordOf3(recordOf3(sheet)?.["properties"]);
+    const properties = recordOf4(recordOf4(sheet)?.["properties"]);
     const sheetId = properties?.["sheetId"] ?? 0;
     const title = properties?.["title"];
     if (!Number.isSafeInteger(sheetId) || typeof title !== "string") {
-      return malformed("the spreadsheet", "a tab with no id or title");
+      return malformed2("the spreadsheet", "a tab with no id or title");
     }
     tabs.push({ sheetId, title });
   }
@@ -950,17 +1555,17 @@ async function readGridSpreadsheet(client, spreadsheetId) {
     fields: "properties.locale,sheets.properties(sheetId,title,gridProperties(rowCount,columnCount))"
   });
   if (!answer.ok) return answer;
-  const locale = recordOf3(recordOf3(answer.value)?.["properties"])?.["locale"];
-  const sheets = recordOf3(answer.value)?.["sheets"];
-  if (!Array.isArray(sheets)) return malformed("the spreadsheet", "no sheets");
+  const locale = recordOf4(recordOf4(answer.value)?.["properties"])?.["locale"];
+  const sheets = recordOf4(answer.value)?.["sheets"];
+  if (!Array.isArray(sheets)) return malformed2("the spreadsheet", "no sheets");
   const tabs = [];
   for (const sheet of sheets) {
-    const properties = recordOf3(recordOf3(sheet)?.["properties"]);
+    const properties = recordOf4(recordOf4(sheet)?.["properties"]);
     const sheetId = properties?.["sheetId"] ?? 0;
     const title = properties?.["title"];
-    const grid = recordOf3(properties?.["gridProperties"]);
+    const grid = recordOf4(properties?.["gridProperties"]);
     if (!Number.isSafeInteger(sheetId) || typeof title !== "string") {
-      return malformed("the spreadsheet", "a tab with no id or title");
+      return malformed2("the spreadsheet", "a tab with no id or title");
     }
     tabs.push({
       sheetId,
@@ -978,8 +1583,8 @@ async function filledRows(client, spreadsheetId, tab, from, to) {
     { majorDimension: "ROWS", valueRenderOption: "FORMULA" }
   );
   if (!answer.ok) return answer;
-  const rows = recordOf3(answer.value)?.["values"] ?? [];
-  if (!Array.isArray(rows)) return malformed(`the tab '${tab.title}'`, "values that are no list");
+  const rows = recordOf4(answer.value)?.["values"] ?? [];
+  if (!Array.isArray(rows)) return malformed2(`the tab '${tab.title}'`, "values that are no list");
   const filled = /* @__PURE__ */ new Set();
   rows.forEach((row, offset) => {
     if (Array.isArray(row) && row.some((cell) => cell !== null && cell !== "")) {
@@ -1002,19 +1607,19 @@ async function readValues(client, spreadsheetId, tab) {
     }
   );
   if (!answer.ok) return answer;
-  const body = recordOf3(answer.value);
-  if (body === void 0) return malformed(`the tab '${tab.title}'`, "no values object");
+  const body = recordOf4(answer.value);
+  if (body === void 0) return malformed2(`the tab '${tab.title}'`, "no values object");
   const rows = body["values"] ?? [];
-  if (!Array.isArray(rows)) return malformed(`the tab '${tab.title}'`, "values that are no list");
+  if (!Array.isArray(rows)) return malformed2(`the tab '${tab.title}'`, "values that are no list");
   const values = [];
   for (const row of rows) {
-    if (!Array.isArray(row)) return malformed(`the tab '${tab.title}'`, "a row that is no list");
+    if (!Array.isArray(row)) return malformed2(`the tab '${tab.title}'`, "a row that is no list");
     const cells = [];
     for (const cell of row) {
       if (typeof cell === "string" || typeof cell === "boolean") cells.push(cell);
       else if (typeof cell === "number" && Number.isFinite(cell)) cells.push(cell);
       else if (cell === null) cells.push("");
-      else return malformed(`the tab '${tab.title}'`, "a cell that is no value");
+      else return malformed2(`the tab '${tab.title}'`, "a cell that is no value");
     }
     values.push(cells);
   }
@@ -1039,14 +1644,14 @@ async function readCellExtras(client, spreadsheetId, tab, asked, lastRow) {
     fields: `sheets(data(startRow,startColumn,rowData(values(${fields.join(",")}))))`
   });
   if (!answer.ok) return answer;
-  const sheet = recordOf3(listOf2(recordOf3(answer.value)?.["sheets"])[0]);
+  const sheet = recordOf4(listOf2(recordOf4(answer.value)?.["sheets"])[0]);
   const data = listOf2(sheet?.["data"]);
   for (const block of data) {
-    const range = recordOf3(block);
+    const range = recordOf4(block);
     const startRow = numberOr(range?.["startRow"], 0);
     const column = String(numberOr(range?.["startColumn"], 0));
     listOf2(range?.["rowData"]).forEach((rowData, offset) => {
-      const cell = recordOf3(listOf2(recordOf3(rowData)?.["values"])[0]);
+      const cell = recordOf4(listOf2(recordOf4(rowData)?.["values"])[0]);
       if (cell === void 0) return;
       const row = String(startRow + offset + 1);
       const link = linkOf(cell);
@@ -1065,29 +1670,29 @@ function linkOf(cell) {
   const hyperlink = cell["hyperlink"];
   if (typeof hyperlink === "string" && hyperlink !== "") return hyperlink;
   for (const run of listOf2(cell["textFormatRuns"])) {
-    const uri2 = recordOf3(recordOf3(recordOf3(run)?.["format"])?.["link"])?.["uri"];
+    const uri2 = recordOf4(recordOf4(recordOf4(run)?.["format"])?.["link"])?.["uri"];
     if (typeof uri2 === "string" && uri2 !== "") return uri2;
   }
-  const format = recordOf3(recordOf3(cell["effectiveFormat"])?.["textFormat"]);
-  const uri = recordOf3(format?.["link"])?.["uri"];
+  const format = recordOf4(recordOf4(cell["effectiveFormat"])?.["textFormat"]);
+  const uri = recordOf4(format?.["link"])?.["uri"];
   return typeof uri === "string" && uri !== "" ? uri : void 0;
 }
 async function readVersion(client, spreadsheetId) {
-  const answer = await client.get(`${DRIVE_FILES}/${encodeURIComponent(spreadsheetId)}`, {
+  const answer = await client.get(`${DRIVE_FILES2}/${encodeURIComponent(spreadsheetId)}`, {
     fields: "version",
     supportsAllDrives: true
   });
   if (!answer.ok) return answer;
-  const version = recordOf3(answer.value)?.["version"];
+  const version = recordOf4(answer.value)?.["version"];
   if (typeof version === "string" && /^\d+$/.test(version)) return googleOk(version);
   if (typeof version === "number" && Number.isSafeInteger(version))
     return googleOk(String(version));
-  return malformed("the Drive file", "no version");
+  return malformed2("the Drive file", "no version");
 }
-function malformed(what, why) {
+function malformed2(what, why) {
   return googleError("E_GOOGLE_RESPONSE", `Google answered ${what} with ${why}.`);
 }
-function recordOf3(value) {
+function recordOf4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 function listOf2(value) {
@@ -1099,11 +1704,11 @@ function numberOr(value, fallback) {
 
 // src/sheet-rows.ts
 var SHEET_ROWS = "google.sheet-rows";
-var PAGE_ROWS = 5e3;
-var PAGE_BYTES = 6 * 1024 * 1024;
-var DEFAULT_MAX = 1e5;
-var MAX_MAX = 1e5;
-var ARGUMENTS = [
+var PAGE_ROWS2 = 5e3;
+var PAGE_BYTES2 = 6 * 1024 * 1024;
+var DEFAULT_MAX2 = 1e5;
+var MAX_MAX2 = 1e5;
+var ARGUMENTS3 = [
   { name: "spreadsheet", type: "text" },
   { name: "tab", type: "text" },
   { name: "key", type: "text" },
@@ -1115,11 +1720,11 @@ function sheetRowsVerb(host) {
   return {
     id: SHEET_ROWS,
     kind: "source",
-    arguments: ARGUMENTS,
+    arguments: ARGUMENTS3,
     page: (request) => sheetRowsPage(host, request)
   };
 }
-var problem = (text) => argumentsProblem(SHEET_ROWS, text);
+var problem2 = (text) => argumentsProblem(SHEET_ROWS, text);
 var sheetFailed = (text) => failed({ severity: "error", code: "E_RECIPE_VERB", message: `'${SHEET_ROWS}' failed: ${text}.` });
 async function sheetRowsPage(host, request) {
   const asked = readArguments(request.arguments, request.section);
@@ -1153,7 +1758,7 @@ async function sheetRowsPage(host, request) {
   if (typeof grid === "string") return sheetFailed(grid);
   const { columns, rows } = grid;
   const start = cursor?.o ?? 0;
-  const page = pageOf(rows, start);
+  const page = pageOf2(rows, start);
   const table = { columns, rows: page };
   if (rows.length > asked.max)
     return { ok: true, value: { table, truncated: true }, diagnostics: [] };
@@ -1162,15 +1767,15 @@ async function sheetRowsPage(host, request) {
   const next = encodeCursor({ v: 1, o: end, d: read.digest, s: snapshot.sheetId, f: print });
   return { ok: true, value: { table, cursor: next }, diagnostics: [] };
 }
-function pageOf(rows, start) {
+function pageOf2(rows, start) {
   const encoder = new TextEncoder();
   const page = [];
   let bytes = 0;
-  for (let index = start; index < rows.length && page.length < PAGE_ROWS; index += 1) {
+  for (let index = start; index < rows.length && page.length < PAGE_ROWS2; index += 1) {
     const row = rows[index];
     if (row === void 0) break;
     bytes += encoder.encode(JSON.stringify(row)).byteLength;
-    if (page.length > 0 && bytes > PAGE_BYTES) break;
+    if (page.length > 0 && bytes > PAGE_BYTES2) break;
     page.push(row);
   }
   return page;
@@ -1179,7 +1784,7 @@ async function firstSnapshot(host, client, asked, refresh) {
   const tabs = await readTabs(client, asked.spreadsheetId);
   if (!tabs.ok) return verbFailed(SHEET_ROWS, tabs.error);
   const tab = pickTab(tabs.value, asked.tab);
-  if (typeof tab === "string") return problem(tab);
+  if (typeof tab === "string") return problem2(tab);
   const version = await readVersion(client, asked.spreadsheetId);
   if (!version.ok) {
     host.log.warn(
@@ -1207,7 +1812,7 @@ async function firstSnapshot(host, client, asked, refresh) {
   return live;
 }
 async function laterSnapshot(host, client, asked, cursor) {
-  const changed = {
+  const changed2 = {
     severity: "error",
     code: "E_RECIPE_VERB",
     message: `'${SHEET_ROWS}' failed: the tab changed while its pages were read; run again.`
@@ -1222,10 +1827,10 @@ async function laterSnapshot(host, client, asked, cursor) {
   const tabs = await readTabs(client, asked.spreadsheetId);
   if (!tabs.ok) return verbFailed(SHEET_ROWS, tabs.error);
   const tab = tabs.value.find((each) => each.sheetId === cursor.s);
-  if (tab === void 0) return changed;
+  if (tab === void 0) return changed2;
   const live = await liveSnapshot(client, asked, tab);
   if ("severity" in live) return live;
-  return live.digest === cursor.d ? live : changed;
+  return live.digest === cursor.d ? live : changed2;
 }
 async function liveSnapshot(client, asked, tab) {
   const values = await readValues(client, asked.spreadsheetId, tab);
@@ -1264,7 +1869,7 @@ function readOf(snapshot, asked, fetchedAt) {
     const index = columnIndexOf(names, written);
     if (index !== void 0) return index;
     const listed2 = names.slice(0, 20).map((name) => `'${name}'`).join(", ");
-    return problem(
+    return problem2(
       `${argument}= names '${written}', which is not a column of the tab '${snapshot.title}'; its columns are ${listed2}${names.length > 20 ? ", \u2026" : ""}`
     );
   };
@@ -1315,7 +1920,7 @@ function readArguments(values, section) {
   if (written !== void 0) {
     spreadsheetId = spreadsheetIdOf(written);
     if (spreadsheetId === void 0) {
-      return problem(
+      return problem2(
         `spreadsheet= holds '${written}', which is neither a spreadsheet id nor its address, such as https://docs.google.com/spreadsheets/d/<id>/edit`
       );
     }
@@ -1324,14 +1929,14 @@ function readArguments(values, section) {
     if (!read.ok) return verbFailed(SHEET_ROWS, read.error);
     spreadsheetId = read.value.spreadsheet;
     if (spreadsheetId === void 0) {
-      return problem(
+      return problem2(
         "needs spreadsheet=, or spreadsheet in the google section of .tyto/project.json, and was given neither"
       );
     }
   }
-  const max = values["max"] ?? DEFAULT_MAX;
-  if (typeof max !== "number" || !Number.isSafeInteger(max) || max < 1 || max > MAX_MAX) {
-    return problem(`max= must be a whole number from 1 to ${MAX_MAX}, not ${String(max)}`);
+  const max = values["max"] ?? DEFAULT_MAX2;
+  if (typeof max !== "number" || !Number.isSafeInteger(max) || max < 1 || max > MAX_MAX2) {
+    return problem2(`max= must be a whole number from 1 to ${MAX_MAX2}, not ${String(max)}`);
   }
   const list = (name) => [...new Set((text(name) ?? "").split(",").map((item) => item.trim()))].filter(
     (item) => item !== ""
@@ -1552,40 +2157,40 @@ async function readTabFormat(client, spreadsheetId, tab, width) {
     fields: "sheets(properties(sheetId),tables(tableId,range,columnProperties),bandedRanges(bandedRangeId),data(rowData(values(userEnteredFormat(backgroundColor),dataValidation))))"
   });
   if (!answer.ok) return answer;
-  const sheets = listOf3(recordOf4(answer.value)?.["sheets"]);
-  const sheet = sheets.map(recordOf4).find((each) => {
-    return recordOf4(each?.["properties"])?.["sheetId"] === tab.sheetId;
-  }) ?? recordOf4(sheets[0]);
+  const sheets = listOf3(recordOf5(answer.value)?.["sheets"]);
+  const sheet = sheets.map(recordOf5).find((each) => {
+    return recordOf5(each?.["properties"])?.["sheetId"] === tab.sheetId;
+  }) ?? recordOf5(sheets[0]);
   if (sheet === void 0) {
     return googleError(
       "E_GOOGLE_RESPONSE",
       `Google answered the tab '${tab.title}' with no sheet.`
     );
   }
-  const first = recordOf4(listOf3(sheet["tables"])[0]);
+  const first = recordOf5(listOf3(sheet["tables"])[0]);
   const tableId = first?.["tableId"];
-  const rows = listOf3(recordOf4(listOf3(sheet["data"])[0])?.["rowData"]).map(
-    (row) => listOf3(recordOf4(row)?.["values"]).map(recordOf4)
+  const rows = listOf3(recordOf5(listOf3(sheet["data"])[0])?.["rowData"]).map(
+    (row) => listOf3(recordOf5(row)?.["values"]).map(recordOf5)
   );
   return googleOk({
     ...typeof tableId === "string" ? {
       table: {
         tableId,
-        range: recordOf4(first?.["range"]) ?? {},
+        range: recordOf5(first?.["range"]) ?? {},
         columnProperties: listOf3(first?.["columnProperties"]).flatMap((each) => {
-          const property = recordOf4(each);
+          const property = recordOf5(each);
           return property === void 0 ? [] : [property];
         })
       }
     } : {},
     banded: listOf3(sheet["bandedRanges"]).flatMap((each) => {
-      const id = recordOf4(each)?.["bandedRangeId"];
+      const id = recordOf5(each)?.["bandedRangeId"];
       return typeof id === "number" ? [id] : [];
     }),
     header: (rows[0] ?? []).map(
-      (cell) => hexOf(recordOf4(recordOf4(cell?.["userEnteredFormat"])?.["backgroundColor"]))
+      (cell) => hexOf(recordOf5(recordOf5(cell?.["userEnteredFormat"])?.["backgroundColor"]))
     ),
-    validation: (rows[1] ?? []).map((cell) => listValues(recordOf4(cell?.["dataValidation"])))
+    validation: (rows[1] ?? []).map((cell) => listValues(recordOf5(cell?.["dataValidation"])))
   });
 }
 function formatRequests(sheetId, want, now, lastRow) {
@@ -1679,10 +2284,10 @@ function formatRequests(sheetId, want, now, lastRow) {
   }
   return { requests, said };
 }
-function mergedProperties(table, want, changed) {
+function mergedProperties(table, want, changed2) {
   const start = table.range.startColumnIndex ?? 0;
   const properties = table.columnProperties.map((each) => ({ ...each }));
-  for (const [at, values] of changed) {
+  for (const [at, values] of changed2) {
     const index = at - start;
     const property = dropdownProperty(index, want.c[at] ?? "", values);
     const found = properties.findIndex((each) => (each["columnIndex"] ?? 0) === index);
@@ -1706,13 +2311,13 @@ function tableValues(table, at) {
   const index = at - (table.range.startColumnIndex ?? 0);
   const property = table.columnProperties.find((each) => (each["columnIndex"] ?? 0) === index);
   if (property?.["columnType"] !== "DROPDOWN") return void 0;
-  return listValues(recordOf4(property["dataValidationRule"]));
+  return listValues(recordOf5(property["dataValidationRule"]));
 }
 function listValues(rule) {
-  const condition = recordOf4(rule?.["condition"]);
+  const condition = recordOf5(rule?.["condition"]);
   if (condition?.["type"] !== "ONE_OF_LIST") return void 0;
   return listOf3(condition["values"]).map(
-    (each) => String(recordOf4(each)?.["userEnteredValue"] ?? "")
+    (each) => String(recordOf5(each)?.["userEnteredValue"] ?? "")
   );
 }
 function sameList(a, b) {
@@ -1731,7 +2336,7 @@ function colourOf(hex) {
   const channel = (at) => parseInt(hex.slice(at, at + 2), 16) / 255;
   return { red: channel(1), green: channel(3), blue: channel(5) };
 }
-function recordOf4(value) {
+function recordOf5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 function listOf3(value) {
@@ -1947,7 +2552,7 @@ function requestsOf(tab, operations) {
   return requests;
 }
 async function decodeOperation(host, write, payload) {
-  const object = recordOf5(payload);
+  const object = recordOf6(payload);
   if (object === void 0) return UNREADABLE;
   const planned = object["x"];
   if (typeof planned === "string") return planned;
@@ -1961,12 +2566,12 @@ async function decodeOperation(host, write, payload) {
   if (typeof ck === "string" && typeof cd === "string") {
     const kept = await spilled(host, ck, cd);
     if (typeof kept === "string") return kept;
-    const row = rowOf(kept);
+    const row = rowOf2(kept);
     return row === void 0 ? UNREADABLE : { ...row, ck };
   }
-  return rowOf(object) ?? UNREADABLE;
+  return rowOf2(object) ?? UNREADABLE;
 }
-function rowOf(object) {
+function rowOf2(object) {
   const { k, h, s, m, c } = object;
   if (typeof k !== "number" || !Number.isSafeInteger(k) || k < 1 || !isDigest(h) || !isSheet(s) || m !== "r" && m !== "a" || !Array.isArray(c)) {
     return void 0;
@@ -1994,7 +2599,7 @@ async function spilled(host, key, digest) {
     return `E_GOOGLE_PLAN: the plugin's cache holds other cells for this row than the plan kept; ${PLAN_AGAIN}`;
   }
   try {
-    return recordOf5(JSON.parse(text)) ?? UNREADABLE;
+    return recordOf6(JSON.parse(text)) ?? UNREADABLE;
   } catch {
     return UNREADABLE;
   }
@@ -2046,7 +2651,7 @@ function isDigest(value) {
 function isSheet(value) {
   return typeof value === "string" && /^[A-Za-z0-9_-]+\/\d+$/.test(value);
 }
-function recordOf5(value) {
+function recordOf6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 var wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -2184,7 +2789,7 @@ async function applySheetSync(host, request, clock = systemClock) {
     if (!extras.ok) return refusedOr(digested, failedWith(extras.error));
     links = extras.value.links;
   }
-  const rowOf2 = /* @__PURE__ */ new Map();
+  const rowOf3 = /* @__PURE__ */ new Map();
   for (const index of pending()) {
     const each = at(index);
     if (each.kind === "add-tab" || each.kind === "format-tab") continue;
@@ -2205,7 +2810,7 @@ async function applySheetSync(host, request, clock = systemClock) {
       settle([index], failed2("E_GOOGLE_CHANGED", `${each.k} (row ${number}): ${CHANGED}`));
       continue;
     }
-    rowOf2.set(index, number);
+    rowOf3.set(index, number);
   }
   const sheetIdOf = new Map(tabs.value.map((each) => [each.title, each.sheetId]));
   let nextId = Math.max(0, ...tabs.value.map((each) => each.sheetId)) + 1;
@@ -2299,7 +2904,7 @@ async function applySheetSync(host, request, clock = systemClock) {
   if (budget.expired()) return done();
   const rows = rowRequests(
     tab,
-    pending().map((index) => [at(index), rowOf2.get(index)]),
+    pending().map((index) => [at(index), rowOf3.get(index)]),
     newTabs,
     sheetIdOf,
     destinations
@@ -2446,7 +3051,7 @@ function cellsRequest(sheetId, row, column, cells) {
   };
 }
 async function decodeOperation2(host, write, payload) {
-  let object = recordOf5(payload);
+  let object = recordOf6(payload);
   if (object === void 0) return UNREADABLE;
   const planned = object["x"];
   if (typeof planned === "string") return planned;
@@ -2545,7 +3150,7 @@ var MAX_OPERATIONS = 1e4;
 var MAX_DESCRIPTION_LENGTH = 500;
 var SPILL_BYTES = 1800;
 var PLAN_ENTRY_DAYS = 7;
-var ARGUMENTS2 = [
+var ARGUMENTS4 = [
   { name: "spreadsheet", type: "text" },
   { name: "tab", type: "text" },
   { name: "mode", type: "text", required: true, values: ["replace", "append"] },
@@ -2555,13 +3160,13 @@ function sheetWriteVerb(host, clock = systemClock) {
   return {
     id: SHEET_WRITE,
     kind: "sink",
-    arguments: ARGUMENTS2,
+    arguments: ARGUMENTS4,
     writes: [CLEAR_WRITE, ROW_WRITE],
     plan: (request) => planSheetWrite(host, request),
     apply: (request) => applySheetWrites(host, request, clock)
   };
 }
-var problem2 = (text) => argumentsProblem(SHEET_WRITE, text);
+var problem3 = (text) => argumentsProblem(SHEET_WRITE, text);
 var refused2 = (diagnostic) => ({ ok: false, error: [diagnostic] });
 async function planSheetWrite(host, request) {
   const { table } = request;
@@ -2585,7 +3190,7 @@ async function planSheetWrite(host, request) {
     spreadsheet.value.tabs,
     typeof written === "string" ? written.trim() || void 0 : void 0
   );
-  if (typeof tab === "string") return refused2(problem2(tab));
+  if (typeof tab === "string") return refused2(problem3(tab));
   let positions;
   let header;
   let start;
@@ -2602,7 +3207,7 @@ async function planSheetWrite(host, request) {
       start = 2;
     } else {
       const names = headerOf2(values.value, tab.title);
-      if (typeof names === "string") return refused2(problem2(names));
+      if (typeof names === "string") return refused2(problem3(names));
       const found = placed(columns, names, tab.title);
       if (!Array.isArray(found)) return refused2(found);
       positions = found;
@@ -2612,7 +3217,7 @@ async function planSheetWrite(host, request) {
   const fixed = (mode === "replace" ? 1 : 0) + (header === void 0 ? 0 : 1);
   if (fixed + table.rows.length > MAX_OPERATIONS) {
     return refused2(
-      problem2(
+      problem3(
         `would write ${table.rows.length.toLocaleString("en-US")} rows, over the ${(MAX_OPERATIONS - fixed).toLocaleString("en-US")} one plan holds; split the table`
       )
     );
@@ -2749,7 +3354,7 @@ function writeColumns(table, formulas) {
   for (const name of asked) {
     const column = byName.get(name.toLowerCase());
     if (column === void 0 || linkColumns.has(column.name)) {
-      return problem2(
+      return problem3(
         `formulas= names '${name}', which is not a column the table writes; its columns are ` + listed(table.columns.map((each) => each.name).filter((each) => !linkColumns.has(each)))
       );
     }
@@ -2774,7 +3379,7 @@ function placed(columns, names, title) {
     positions.push(index);
   }
   if (missing.length > 0) {
-    return problem2(
+    return problem3(
       `cannot append ${listed(missing)}: the tab '${title}' has no column of that name in row 1. Its columns are ${listed(names)}; rename the table's columns, or add them to the tab`
     );
   }
@@ -2814,7 +3419,7 @@ function utf8Bytes(text) {
 // src/sheet-sync.ts
 var SHEET_SYNC = "google.sheet-sync";
 var SYNC_WRITES = ["add-tab", "update", "move", "delete", "add", "format-tab"];
-var ARGUMENTS3 = [
+var ARGUMENTS5 = [
   { name: "spreadsheet", type: "text" },
   { name: "tab", type: "text", required: true },
   { name: "key", type: "text", required: true },
@@ -2826,13 +3431,13 @@ function sheetSyncVerb(host, clock = systemClock) {
   return {
     id: SHEET_SYNC,
     kind: "sink",
-    arguments: ARGUMENTS3,
+    arguments: ARGUMENTS5,
     writes: SYNC_WRITES,
     plan: (request) => planSheetSync(host, request),
     apply: (request) => applySheetSync(host, request, clock)
   };
 }
-var problem3 = (text) => argumentsProblem(SHEET_SYNC, text);
+var problem4 = (text) => argumentsProblem(SHEET_SYNC, text);
 var refused3 = (diagnostic) => ({ ok: false, error: [diagnostic] });
 var warning = (message) => ({
   severity: "warning",
@@ -2856,12 +3461,12 @@ async function planSheetSync(host, request) {
   const tableColumn = (name) => columns.find((column) => column.name.toLowerCase() === name.toLowerCase());
   const keyColumn = tableColumn(text("key"));
   if (keyColumn === void 0) {
-    return refused3(problem3(`key= names '${text("key")}', which is not a column of the table`));
+    return refused3(problem4(`key= names '${text("key")}', which is not a column of the table`));
   }
   const moveName = text("move");
   const moveColumn = moveName === "" ? void 0 : tableColumn(moveName);
   if (moveName !== "" && moveColumn === void 0) {
-    return refused3(problem3(`move= names '${moveName}', which is not a column of the table`));
+    return refused3(problem4(`move= names '${moveName}', which is not a column of the table`));
   }
   const connection = await connect(host, request.section);
   if (!connection.ok) return refused3(verbFailed(SHEET_SYNC, connection.error));
@@ -2869,20 +3474,20 @@ async function planSheetSync(host, request) {
   const tabs = await readGridTabs(client, spreadsheetId);
   if (!tabs.ok) return refused3(verbFailed(SHEET_SYNC, tabs.error));
   const tab = pickTab(tabs.value, text("tab"));
-  if (typeof tab === "string") return refused3(problem3(tab));
+  if (typeof tab === "string") return refused3(problem4(tab));
   const values = await readValues(client, spreadsheetId, tab);
   if (!values.ok) return refused3(verbFailed(SHEET_SYNC, values.error));
   const names = headerOf2(values.value, tab.title);
-  if (typeof names === "string") return refused3(problem3(names));
+  if (typeof names === "string") return refused3(problem4(names));
   const kc = columnIndexOf(names, keyColumn.name);
   if (kc === void 0) {
-    return refused3(problem3(`the tab '${tab.title}' has no column '${keyColumn.name}' in row 1`));
+    return refused3(problem4(`the tab '${tab.title}' has no column '${keyColumn.name}' in row 1`));
   }
   const keep = listOf4(text("keep")).map((name) => [name, columnIndexOf(names, name)]);
   const unknownKeep = keep.filter(([, index]) => index === void 0).map(([name]) => name);
   if (unknownKeep.length > 0) {
     return refused3(
-      problem3(`keep= names ${listed(unknownKeep)}, which the tab '${tab.title}' has no column for`)
+      problem4(`keep= names ${listed(unknownKeep)}, which the tab '${tab.title}' has no column for`)
     );
   }
   const keepIndexes = new Set(keep.map(([, index]) => index));
@@ -2898,7 +3503,7 @@ async function planSheetSync(host, request) {
   }
   if (unplaced.length > 0) {
     return refused3(
-      problem3(
+      problem4(
         `cannot write ${listed(unplaced)}: the tab '${tab.title}' has no column of that name in row 1. Its columns are ${listed(names)}`
       )
     );
@@ -2916,7 +3521,7 @@ async function planSheetSync(host, request) {
     const before = inTab.get(key);
     if (before !== void 0) {
       return refused3(
-        problem3(
+        problem4(
           `rows ${before.number} and ${number} of the tab '${tab.title}' both hold '${key}' in ${names[kc] ?? ""}; a key must be unique, and the sync does not guess which row is it`
         )
       );
@@ -2938,7 +3543,7 @@ async function planSheetSync(host, request) {
     }
     if (inTable.has(key)) {
       return refused3(
-        problem3(`the table holds '${key}' in ${keyColumn.name} twice; a key must be unique`)
+        problem4(`the table holds '${key}' in ${keyColumn.name} twice; a key must be unique`)
       );
     }
     inTable.set(key, row);
@@ -2964,11 +3569,11 @@ async function planSheetSync(host, request) {
     tabsRead.set(found.title, read.value);
     if (read.value.length === 0) continue;
     const archivedNames = headerOf2(read.value, found.title);
-    if (typeof archivedNames === "string") return refused3(problem3(archivedNames));
+    if (typeof archivedNames === "string") return refused3(problem4(archivedNames));
     const at = columnIndexOf(archivedNames, keyColumn.name);
     if (at === void 0) {
       return refused3(
-        problem3(`archived= names '${found.title}', which has no column '${keyColumn.name}'`)
+        problem4(`archived= names '${found.title}', which has no column '${keyColumn.name}'`)
       );
     }
     for (const row of read.value.slice(1)) {
@@ -3005,19 +3610,19 @@ async function planSheetSync(host, request) {
   const linkAt = (at, number) => extras.value.links[String(at)]?.[String(number)];
   const digestOf2 = (row) => rowDigest(row.cells, rowLinks(extras.value.links, row.number));
   const changedOf = (cells, row) => {
-    const changed = [];
+    const changed2 = [];
     for (const [at, cell] of cells) {
       const read = linked.some((each) => each.at === at);
       if (!sameCell(cell, row.cells[at], read ? linkAt(at, row.number) : void 0)) {
-        changed.push([at, cell]);
+        changed2.push([at, cell]);
       }
     }
-    return changed;
+    return changed2;
   };
   const s = `${spreadsheetId}/${tab.sheetId}`;
   const hd = headerDigest(names);
   const anchor = (key) => ({ s, kc, hd, k: key });
-  const shownChanges = (changed, row) => changed.map(([at, cell]) => `${names[at] ?? ""}: ${shownRaw(row.cells[at])} \u2192 ${shownCell(cell)}`).join("; ");
+  const shownChanges = (changed2, row) => changed2.map(([at, cell]) => `${names[at] ?? ""}: ${shownRaw(row.cells[at])} \u2192 ${shownCell(cell)}`).join("; ");
   const preserved = [];
   let unchanged = 0;
   const moves = [];
@@ -3052,12 +3657,12 @@ async function planSheetSync(host, request) {
       moves.push({ key, row, destination, cells });
       continue;
     }
-    const changed = changedOf(cells, row);
-    if (changed.length === 0) {
+    const changed2 = changedOf(cells, row);
+    if (changed2.length === 0) {
       unchanged += 1;
       continue;
     }
-    const shown = shownChanges(changed, row);
+    const shown = shownChanges(changed2, row);
     drafts.push({
       write: "update",
       rowKey: input.key,
@@ -3065,7 +3670,7 @@ async function planSheetSync(host, request) {
       payload: {
         ...anchor(key),
         d: digestOf2(row),
-        u: changed.map(([at, cell]) => [at, cell])
+        u: changed2.map(([at, cell]) => [at, cell])
       }
     });
   }
@@ -3102,11 +3707,11 @@ async function planSheetSync(host, request) {
   }
   const moveDrafts = moves.map(({ key, row, destination, cells }) => {
     const header = destinations.get(destination) ?? names;
-    const changed = changedOf(cells, row);
+    const changed2 = changedOf(cells, row);
     const base = {
       write: "move",
       rowKey: inTable.get(key)?.key ?? key,
-      description: `move ${key} (row ${row.number}) to the tab '${destination}'` + (changed.length === 0 ? "" : `, writing ${shownChanges(changed, row)}`)
+      description: `move ${key} (row ${row.number}) to the tab '${destination}'` + (changed2.length === 0 ? "" : `, writing ${shownChanges(changed2, row)}`)
     };
     if (typeof header === "string") return { ...base, failure: `E_GOOGLE_PLAN: ${header}` };
     const filled = (at) => {
@@ -3136,7 +3741,7 @@ async function planSheetSync(host, request) {
         t: typeof title === "string" ? destination : title.title,
         dh: headerDigest(header),
         m: pairs,
-        ...changed.length === 0 ? {} : { u: changed.map(([at, cell]) => [at, cell]) }
+        ...changed2.length === 0 ? {} : { u: changed2.map(([at, cell]) => [at, cell]) }
       }
     };
   });
@@ -3230,7 +3835,7 @@ async function planSheetSync(host, request) {
   ];
   if (ordered.length > MAX_OPERATIONS) {
     return refused3(
-      problem3(
+      problem4(
         `would plan ${ordered.length.toLocaleString("en-US")} operations, over the ${MAX_OPERATIONS.toLocaleString("en-US")} one plan holds; split the table`
       )
     );
@@ -3333,7 +3938,9 @@ function activate(host) {
   const registered = [
     host.registerRecipeVerb(sheetRowsVerb(host)),
     host.registerRecipeVerb(sheetWriteVerb(host)),
-    host.registerRecipeVerb(sheetSyncVerb(host))
+    host.registerRecipeVerb(sheetSyncVerb(host)),
+    host.registerRecipeVerb(driveListVerb(host)),
+    host.registerRecipeVerb(driveReadVerb(host))
   ];
   return {
     dispose() {

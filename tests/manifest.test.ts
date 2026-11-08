@@ -78,13 +78,15 @@ describe('tyto-plugin.json', () => {
 });
 
 describe('activate', () => {
-  it('registers no setting, the google.sheet-rows source and the two sheet sinks', async () => {
+  it('registers no setting, the three sources and the two sheet sinks', async () => {
     const plugin = await harness();
     expect(plugin.host.registry.configurations()).toEqual([]);
     expect(plugin.host.registry.recipeVerbs().map((verb) => `${verb.id}:${verb.kind}`)).toEqual([
       'google.sheet-rows:source',
       'google.sheet-write:sink',
       'google.sheet-sync:sink',
+      'google.drive-list:source',
+      'google.drive-read:source',
     ]);
     await plugin.close();
   });

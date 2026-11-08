@@ -183,6 +183,8 @@ export type Query = Readonly<Record<string, string | number | boolean | readonly
 
 export interface GoogleClient {
   get(url: string, query?: Query): Promise<GoogleResult<unknown>>;
+  /** A GET whose 2xx body is the file itself (Drive's `alt=media`), handed back as text. */
+  getText(url: string, query?: Query): Promise<GoogleResult<string>>;
   post(url: string, body: unknown, query?: Query): Promise<GoogleResult<unknown>>;
   put(url: string, body: unknown, query?: Query): Promise<GoogleResult<unknown>>;
   patch(url: string, body: unknown, query?: Query): Promise<GoogleResult<unknown>>;
@@ -210,6 +212,31 @@ export function createGoogleClient(options: GoogleClientOptions): GoogleClient {
     query: Query | undefined,
     body: unknown,
   ): Promise<GoogleResult<unknown>> {
+    const answer = await exchange(method, address, query, body);
+    if (!answer.ok) return answer;
+    const { status, text, label } = answer.value;
+    if (text.trim() === '') return googleOk(null);
+    try {
+      return googleOk(JSON.parse(text) as unknown);
+    } catch {
+      return googleError(
+        'E_GOOGLE_RESPONSE',
+        `${label} answered ${status} with a body that is not JSON.`,
+        { status },
+      );
+    }
+  }
+
+  /** One request until a 2xx, with its body as Google sent it; a failure is classified. */
+  async function exchange(
+    method: Method,
+    address: string,
+    query: Query | undefined,
+    body: unknown,
+    accept = 'application/json',
+  ): Promise<
+    GoogleResult<{ readonly status: number; readonly text: string; readonly label: string }>
+  > {
     const url = urlOf(address, query);
     if (!url.ok) return url;
     const label = `${method} ${url.value.host}${url.value.pathname}`;
@@ -225,7 +252,7 @@ export function createGoogleClient(options: GoogleClientOptions): GoogleClient {
           url: url.value.href,
           label,
           headers: {
-            Accept: 'application/json',
+            Accept: accept,
             Authorization: `Bearer ${token.value}`,
             ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
           },
@@ -243,21 +270,16 @@ export function createGoogleClient(options: GoogleClientOptions): GoogleClient {
         const failure = classifyFailure(label, status, text, clientEmail);
         return { ok: false, error: { ...failure, message: redact(failure.message) } };
       }
-      if (text.trim() === '') return googleOk(null);
-      try {
-        return googleOk(JSON.parse(text) as unknown);
-      } catch {
-        return googleError(
-          'E_GOOGLE_RESPONSE',
-          `${label} answered ${status} with a body that is not JSON.`,
-          { status },
-        );
-      }
+      return googleOk({ status, text, label });
     }
   }
 
   return {
     get: (url, query) => request('GET', url, query, undefined),
+    async getText(url, query) {
+      const answer = await exchange('GET', url, query, undefined, '*/*');
+      return answer.ok ? googleOk(answer.value.text) : answer;
+    },
     post: (url, body, query) => request('POST', url, query, body),
     put: (url, body, query) => request('PUT', url, query, body),
     patch: (url, body, query) => request('PATCH', url, query, body),

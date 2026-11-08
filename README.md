@@ -5,10 +5,10 @@ Google Drive from a recipe. Tyto knows no provider (Tyto ADR 0011, ADR 0127): ev
 Google-specific lives here, in its own repository, and reaches Tyto only through the plugin API.
 This repository is public and unlicensed.
 
-**Work in progress.** This version reads a spreadsheet tab with `google.sheet-rows` and writes
-one with `google.sheet-write`. The other verbs arrive one pull request at a time, all in the
-`google` namespace: `google.sheet-sync`, `google.drive-list`, `google.drive-read`,
-`google.drive-move` and `google.drive-count`.
+**Work in progress.** This version reads a spreadsheet tab with `google.sheet-rows`, writes one
+with `google.sheet-write` and `google.sheet-sync`, and lists and reads Drive folders with
+`google.drive-list` and `google.drive-read`. `google.drive-move` and `google.drive-count`
+arrive next, in the same `google` namespace.
 
 ## Install
 
@@ -242,6 +242,62 @@ with `E_GOOGLE_CHANGED` "the row changed since the plan", as does an `add` whose
 the tab, or a move whose new tab's header changed, and the others are written. A refused or
 lost batch reads as for `google.sheet-write`, and so do the 20 s budget and the rows kept in
 the cache.
+
+## `google.drive-list`
+
+A source: a folder's children, one row per file or folder, oldest first.
+
+```
+google.drive-list type=json
+```
+
+| Argument  | What it does                                                                           |
+| --------- | -------------------------------------------------------------------------------------- |
+| `folder=` | The folder, as its id or its address; the section's `root` by default.                 |
+| `type=`   | `folder`, `file` (anything but a folder), `image`, or `json`; every child by default.  |
+| `max=`    | The most items the folder may have, 100,000 by default; more is an error, never a cut. |
+
+- **Columns**: `id`, `name`, `mime_type`, `kind` (`folder`, `image`, `json` or `file`), `size`
+  (bytes; empty for a folder or a native Google file), `created` and `modified` (date and
+  time), `url` (the item's page in Drive, a link) and `parent_id` (the folder listed). Each
+  row's key and provenance is the item's Drive id.
+- **What is listed**: the folder's direct children, never its trash. A JSON file is one whose
+  type is `application/json` or whose name ends in `.json`, as a routine's inbox writes them.
+- **Shared drives** are read as well as My Drive: every request carries `supportsAllDrives`
+  and `includeItemsFromAllDrives`, without which a folder in a shared drive reads as empty.
+- **Paging**: each page is one Drive listing of up to 1,000 items; the cursor carries Drive's
+  own page token.
+
+## `google.drive-read`
+
+A source: what a JSON or text file holds, as rows.
+
+```
+google.drive-read
+google.drive-read file=https://drive.google.com/file/d/<id>/view
+```
+
+| Argument  | What it does                                                                                    |
+| --------- | ----------------------------------------------------------------------------------------------- |
+| `file=`   | One file, as its id or its address.                                                             |
+| `folder=` | Every JSON file directly in the folder, oldest first; the section's `root` when neither is set. |
+| `type=`   | `json` or `text`, how `file=` is read; by default its type or name decides. A folder is JSON.   |
+
+- **JSON**: an array gives one row per element, keyed `<file id>:<index>` from 0; an object
+  gives one row, `<file id>:0`. An element's keys are its columns, after `file_id` and
+  `file_name`; an element that is not an object goes into `value`. A column is a number, a
+  boolean or a list only when every filled value in it is one, otherwise text; a nested object
+  is kept as its JSON text.
+- **Text**: one row per line, keyed `<file id>:<line>` from 1, with `file_id`, `file_name`,
+  `line` and `text`.
+- **A folder** is read one file per page, so each call downloads one file. Every file is read
+  into the first file's columns: a later file's missing key is empty, a key the first file did
+  not have is refused, and so is a value its column cannot hold. A folder or a file that
+  changes between two pages of one run is refused; run again.
+- **Refused**: a native Google file (Docs, Sheets, Slides), which has no content to download
+  (read a spreadsheet with `google.sheet-rows`); a folder named as `file=`; a file over 8 MiB,
+  by Drive's size before the download and by its bytes after; a folder of more than 1,000 JSON
+  files.
 
 ## Retries
 
