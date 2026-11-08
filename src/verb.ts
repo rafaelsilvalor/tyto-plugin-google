@@ -19,6 +19,11 @@ export type Diagnostic = Extract<PageAnswer, { readonly ok: false }>['error'][nu
 export type ArgumentSpec = RecipeVerbContribution['arguments'][number];
 export type ArgumentValues = PageRequest['arguments'];
 
+/** What a transform is handed and answers: the whole table, at once. */
+type TransformFunction = NonNullable<RecipeVerbContribution['transform']>;
+export type TransformRequest = Parameters<TransformFunction>[0];
+export type TransformAnswer = Awaited<ReturnType<TransformFunction>>;
+
 /** What a sink plans (Tyto ADR 0129) and Apply hands back (ADR 0170), off the same contract. */
 type PlanFunction = NonNullable<RecipeVerbContribution['plan']>;
 export type PlanRequest = Parameters<PlanFunction>[0];

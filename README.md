@@ -5,10 +5,20 @@ Google Drive from a recipe. Tyto knows no provider (Tyto ADR 0011, ADR 0127): ev
 Google-specific lives here, in its own repository, and reaches Tyto only through the plugin API.
 This repository is public and unlicensed.
 
-**Work in progress.** This version reads a spreadsheet tab with `google.sheet-rows`, writes one
-with `google.sheet-write` and `google.sheet-sync`, and lists and reads Drive folders with
-`google.drive-list` and `google.drive-read`. `google.drive-move` and `google.drive-count`
-arrive next, in the same `google` namespace.
+Seven recipe verbs, all in the `google` namespace:
+
+| Verb                 | Kind      | What it does                                                     |
+| -------------------- | --------- | ---------------------------------------------------------------- |
+| `google.sheet-rows`  | source    | One tab of a spreadsheet as a table.                             |
+| `google.sheet-write` | sink      | Writes the table into a tab, replacing it or under its last row. |
+| `google.sheet-sync`  | sink      | Makes a tab hold the table's rows, matched by a key column.      |
+| `google.drive-list`  | source    | A Drive folder's children, one row per file or folder.           |
+| `google.drive-read`  | source    | What a JSON or text file in Drive holds, as rows.                |
+| `google.drive-move`  | action    | Moves each row's file or folder into a folder under the root.    |
+| `google.drive-count` | transform | Adds the number of PNG and JPEG files in each row's folder.      |
+
+A sink or an action plans: it shows what it would write, and nothing is written until you
+apply the plan.
 
 ## Install
 
@@ -37,8 +47,10 @@ version.
 
 The plugin signs in as a Google Cloud service account, with the account's JSON key. Create
 one in Google Cloud (IAM, Service accounts, Keys, **Add key**, JSON), enable the Sheets and
-Drive APIs in its project, and share each spreadsheet or folder with the account's email,
-such as `tyto@example-project.iam.gserviceaccount.com`.
+Drive APIs in its project, and share each spreadsheet or folder with the account's email, the
+key's `client_email`, such as `tyto@example-project.iam.gserviceaccount.com`: as an editor for
+anything a sink or an action writes, as a viewer for what is only read. A file the account
+cannot see answers as missing, and the error names the email to share it with.
 
 | Where        | The whole JSON key, from `{` to `}`          |
 | ------------ | -------------------------------------------- |
@@ -299,6 +311,62 @@ google.drive-read file=https://drive.google.com/file/d/<id>/view
   by Drive's size before the download and by its bytes after; a folder of more than 1,000 JSON
   files.
 
+## `google.drive-move`
+
+An action: moves each row's Drive file or folder into one folder, as a plan you read and then
+apply. Nothing moves until you apply it.
+
+```
+google.drive-list folder=https://drive.google.com/drive/folders/<inbox id> type=json
+google.drive-move to=processed
+```
+
+| Argument | What it does                                                                         |
+| -------- | ------------------------------------------------------------------------------------ |
+| `to=`    | The folder the files move into: its address, its name, or its id; required.          |
+| `file=`  | The column holding each file's id or address; `id`, as `google.drive-list` names it. |
+
+- **The destination by name** is a folder of that name directly in the folder the row was
+  listed from: the row's `parent_id`, as `google.drive-list` writes it, or the section's `root`
+  when the table has no such column. Two folders of that name are refused; name one by its
+  id. When no folder has the name and `to=` looks like a Drive id, it is read as one.
+- **Everything stays under `root`.** The section's `root` is required, and the plan reads each
+  file's folders upwards, at most six levels, to find it: a file outside it, deeper than six
+  folders, or whose folders loop is shown as one that will fail, and is never moved. A
+  destination outside it stops the plan. Folders the files share are read once per plan.
+- **A missing destination stops the plan**: this version never creates a folder.
+- A file already in the destination is left out, with a warning naming it. The root itself and
+  the destination itself are planned failures.
+- Each `move` keeps the folders the file was in when planned. Each plan is checked within one
+  call's time; a table too large for it is refused, and asks for fewer rows.
+
+### Applying a move
+
+Each file's folders are read again first. A file that moved since the plan fails alone with
+`E_GOOGLE_CHANGED` and stays where it is; the others move. A move is one Drive `files.update`
+that adds the destination and removes exactly the folders the plan saw, in shared drives too.
+One batch spends at most 20 s; what it did not reach is `skipped`, and applying again picks it
+up.
+
+## `google.drive-count`
+
+A transform: adds `<column>_images`, the number of PNG and JPEG files directly in the folder
+each row names.
+
+```
+google.drive-count folder=Folder
+```
+
+| Argument  | What it does                                                          |
+| --------- | --------------------------------------------------------------------- |
+| `folder=` | The column holding each row's folder, as its id or address; required. |
+| `type=`   | `image`, the only kind counted so far, and the default.               |
+
+- Only the folder's direct children count, never a subfolder's, and never the trash.
+- A blank cell gets an empty count; a cell that is not a folder id or address is refused.
+- Each distinct folder is counted once. More than 100 distinct folders in one table is refused
+  before any request: narrow the table first.
+
 ## Retries
 
 A 429, and Drive's `rateLimitExceeded` and `userRateLimitExceeded` 403s, are retried on any
@@ -319,7 +387,7 @@ have been done. Each retry waits Google's `Retry-After`, or 10 s and then 20 s, 
 | `E_GOOGLE_NETWORK`  | No answer: Tyto refused the request, or the network failed.                                        |
 | `E_GOOGLE_RESPONSE` | A 2xx that is not the JSON Google promises.                                                        |
 | `E_GOOGLE_PLAN`     | A planned row that cannot be written as planned: run the cell again for a new plan.                |
-| `E_GOOGLE_CHANGED`  | The tab changed since the plan where a row would land: run the cell again for a new plan.          |
+| `E_GOOGLE_CHANGED`  | The tab or the file changed since the plan: run the cell again for a new plan.                     |
 
 No message carries the token, the signed assertion or the key, even when Google echoes them.
 
@@ -342,6 +410,21 @@ NODE_AUTH_TOKEN=$(gh auth token) pnpm install
 The plugin imports only types from it, so the bundle does not change. The tests run the
 committed `dist/index.js` through the contract's own harness, `@tyto/plugin-api/testing` (Tyto
 ADR 0150): build before you test.
+
+### The live suite
+
+`tests/live.test.ts` runs the plugin against the real Google, read-only: it buys a token, reads
+one sheet with `google.sheet-rows` and lists one folder with `google.drive-list`, asserts only
+the shape of what came back, and prints only counts. It is skipped unless all three variables
+are set, so CI skips it:
+
+```sh
+pnpm build
+GOOGLE_LIVE_SA_FILE=<path to the service account's JSON key> GOOGLE_LIVE_SHEET=<spreadsheet id or address> GOOGLE_LIVE_FOLDER=<folder id or address> pnpm test:live
+```
+
+Share the sheet and the folder with the key's `client_email` first. Keep the key outside this
+repository.
 
 The `contract` workflow runs every day, and on demand, against the newest published contract
 rather than the range in `package.json`: a red run there is a Tyto release this plugin does not

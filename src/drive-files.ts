@@ -1,7 +1,13 @@
 import { readSection, folderIdOf } from './config.js';
 import { googleError, googleOk, type GoogleResult } from './errors.js';
 import type { GoogleClient } from './http.js';
-import { FILE_FIELDS, LIST_FIELDS, childrenQuery, type DriveType } from './drive-query.js';
+import {
+  FILE_FIELDS,
+  LIST_FIELDS,
+  childByNameQuery,
+  childrenQuery,
+  type DriveType,
+} from './drive-query.js';
 import { argumentsProblem, verbFailed, type ArgumentValues, type Diagnostic } from './verb.js';
 
 /** Drive v3's files endpoint, on the host the manifest names as `net:www.googleapis.com`. */
@@ -63,6 +69,34 @@ export async function listChildren(
     files,
     ...(typeof next === 'string' && next !== '' ? { nextPageToken: next } : {}),
   });
+}
+
+/**
+ * The items directly in a folder that carry exactly this name, not in the trash, by the query
+ * ported from Jacurutu ({@link childByNameQuery}). Drive allows two of one name, so a list.
+ */
+export async function childrenNamed(
+  client: GoogleClient,
+  parentId: string,
+  name: string,
+): Promise<GoogleResult<readonly DriveFile[]>> {
+  const answer = await client.get(DRIVE_FILES, {
+    q: childByNameQuery(parentId, name),
+    fields: LIST_FIELDS,
+    pageSize: LIST_PAGE_SIZE,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+  });
+  if (!answer.ok) return answer;
+  const listed = recordOf(answer.value)?.['files'];
+  if (!Array.isArray(listed)) return malformed('the folder listing', 'no files');
+  const files: DriveFile[] = [];
+  for (const item of listed) {
+    const file = fileOf(item);
+    if (file === undefined) return malformed('the folder listing', 'a file without id or name');
+    files.push(file);
+  }
+  return googleOk(files);
 }
 
 /** One file's description. */

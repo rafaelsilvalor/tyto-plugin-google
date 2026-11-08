@@ -59,10 +59,10 @@ describe('tyto-plugin.json', () => {
       'add',
       'format-tab',
     ]);
-    const declared = plugin.host.registry
-      .recipeVerbs()
-      .flatMap((verb) => verb.writes ?? [])
-      .sort();
+    // `move` is both a sync's (a row to another tab) and `google.drive-move`'s.
+    const declared = [
+      ...new Set(plugin.host.registry.recipeVerbs().flatMap((verb) => verb.writes ?? [])),
+    ].sort();
     expect(declared).toEqual([...(plugin.manifest.writes ?? [])].sort());
     await plugin.close();
   });
@@ -78,7 +78,7 @@ describe('tyto-plugin.json', () => {
 });
 
 describe('activate', () => {
-  it('registers no setting, the three sources and the two sheet sinks', async () => {
+  it('registers no setting, the three sources, the two sheet sinks, the action and the transform', async () => {
     const plugin = await harness();
     expect(plugin.host.registry.configurations()).toEqual([]);
     expect(plugin.host.registry.recipeVerbs().map((verb) => `${verb.id}:${verb.kind}`)).toEqual([
@@ -87,6 +87,8 @@ describe('activate', () => {
       'google.sheet-sync:sink',
       'google.drive-list:source',
       'google.drive-read:source',
+      'google.drive-move:action',
+      'google.drive-count:transform',
     ]);
     await plugin.close();
   });
