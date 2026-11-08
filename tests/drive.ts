@@ -94,6 +94,13 @@ function answerOf(drive: FakeDrive, call: DriveCall): FetchedResponse {
   if (item === undefined) {
     return response(404, { error: { code: 404, message: 'File not found.', status: 'NOT_FOUND' } });
   }
+  if (call.method === 'PATCH') {
+    // Drive's files.update: the folders to add and remove, comma-separated, as Drive reads them.
+    const removed = (call.query['removeParents'] ?? '').split(',').filter((id) => id !== '');
+    const added = (call.query['addParents'] ?? '').split(',').filter((id) => id !== '');
+    item.parents = [...item.parents.filter((id) => !removed.includes(id)), ...added];
+    return response(200, { id: item.id, parents: item.parents });
+  }
   if (call.query['alt'] === 'media') {
     if (item.content === undefined) {
       return response(403, {
@@ -112,12 +119,41 @@ function answerOf(drive: FakeDrive, call: DriveCall): FetchedResponse {
 /** `files.list`, reading the one query shape the plugin writes, as Drive pages it. */
 function listOf(drive: FakeDrive, query: Readonly<Record<string, string>>): FetchedResponse {
   const q = query['q'] ?? '';
+  const named =
+    /^'((?:[^'\\]|\\.)*)' in parents and name = '((?:[^'\\]|\\.)*)' and trashed = false$/.exec(q);
+  if (named !== null) {
+    const [parent, name] = [unescaped(named[1]), unescaped(named[2])];
+    const files = drive.items
+      .filter(
+        (item) => item.parents.includes(parent) && item.name === name && item.trashed !== true,
+      )
+      .map(described);
+    return response(200, { files });
+  }
+  const images =
+    /^'((?:[^'\\]|\\.)*)' in parents and trashed = false and \(mimeType = 'image\/png' or mimeType = 'image\/jpeg'\)$/.exec(
+      q,
+    );
+  if (images !== null) {
+    const parent = unescaped(images[1]);
+    const chosen = drive.items.filter(
+      (item) =>
+        item.parents.includes(parent) &&
+        item.trashed !== true &&
+        (item.mimeType === 'image/png' || item.mimeType === 'image/jpeg'),
+    );
+    return paged(
+      drive,
+      query,
+      chosen.map((item) => ({ id: item.id })),
+    );
+  }
   const match =
     /^'((?:[^'\\]|\\.)*)' in parents and trashed = false(?: and mimeType (=|!=|contains) '([^']*)')?$/.exec(
       q,
     );
   if (match === null) throw new Error(`a query the fake does not read: ${q}`);
-  const parent = (match[1] ?? '').replace(/\\(.)/g, '$1');
+  const parent = unescaped(match[1]);
   const [operator, mime = ''] = [match[2], match[3]];
   const chosen = drive.items
     .filter((item) => item.parents.includes(parent) && item.trashed !== true)
@@ -128,11 +164,24 @@ function listOf(drive: FakeDrive, query: Readonly<Record<string, string>>): Fetc
       return true;
     })
     .sort((a, b) => a.createdTime.localeCompare(b.createdTime) || a.name.localeCompare(b.name));
+  return paged(drive, query, chosen.map(described));
+}
+
+/** One page of a listing, as Drive pages it: `pageSize` items and a token for the next. */
+function paged(
+  drive: FakeDrive,
+  query: Readonly<Record<string, string>>,
+  all: readonly Record<string, unknown>[],
+): FetchedResponse {
   const size = Math.min(Number(query['pageSize'] ?? 100), drive.pageSize ?? 1000);
   const offset = Number((query['pageToken'] ?? 'page-0').slice('page-'.length));
-  const files = chosen.slice(offset, offset + size).map(described);
-  const next = offset + size < chosen.length ? `page-${offset + size}` : undefined;
+  const files = all.slice(offset, offset + size);
+  const next = offset + size < all.length ? `page-${offset + size}` : undefined;
   return response(200, { files, ...(next === undefined ? {} : { nextPageToken: next }) });
+}
+
+function unescaped(text: string | undefined): string {
+  return (text ?? '').replace(/\\(.)/g, '$1');
 }
 
 function described(item: FakeItem): Record<string, unknown> {

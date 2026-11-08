@@ -86,3 +86,12 @@ export function matchesType(kind: DriveType, type: DriveType | undefined): boole
   if (type === 'file') return kind !== 'folder';
   return kind === type;
 }
+
+/** The image types `google.drive-count type=image` counts, as Buraqueira's `contar_imagens`. */
+export const COUNTED_IMAGE_TYPES: readonly string[] = ['image/png', 'image/jpeg'];
+
+/** A folder's direct PNG and JPEG children, not in the trash: what `drive-count` counts. */
+export function imageCountQuery(folderId: string): string {
+  const types = COUNTED_IMAGE_TYPES.map((type) => `mimeType = '${type}'`).join(' or ');
+  return `'${escapeDriveQueryValue(folderId)}' in parents and trashed = false and (${types})`;
+}
