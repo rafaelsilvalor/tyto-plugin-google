@@ -5,8 +5,15 @@ import { connect } from './connect.js';
 import { fingerprint } from './cursor.js';
 import { messageOf } from './errors.js';
 import { headerOf } from './sheet-grid.js';
-import { shownCell, writeCellOf, type WriteCell, type WriteColumn } from './sheet-cells.js';
-import { pickTab, readGridTabs, readValues } from './sheet-snapshot.js';
+import {
+  formulaSeparator,
+  localFormula,
+  shownCell,
+  writeCellOf,
+  type WriteCell,
+  type WriteColumn,
+} from './sheet-cells.js';
+import { pickTab, readGridSpreadsheet, readValues } from './sheet-snapshot.js';
 import { applySheetWrites, spillKey, systemClock, type WriteClock } from './sheet-write-apply.js';
 import {
   argumentsProblem,
@@ -108,11 +115,12 @@ export async function planSheetWrite(
   const connection = await connect(host, request.section);
   if (!connection.ok) return refused(verbFailed(SHEET_WRITE, connection.error));
   const { client } = connection.value;
-  const tabs = await readGridTabs(client, spreadsheetId);
-  if (!tabs.ok) return refused(verbFailed(SHEET_WRITE, tabs.error));
+  const spreadsheet = await readGridSpreadsheet(client, spreadsheetId);
+  if (!spreadsheet.ok) return refused(verbFailed(SHEET_WRITE, spreadsheet.error));
+  const separator = formulaSeparator(spreadsheet.value.locale);
   const written = request.arguments['tab'];
   const tab = pickTab(
-    tabs.value,
+    spreadsheet.value.tabs,
     typeof written === 'string' ? written.trim() || undefined : undefined,
   );
   if (typeof tab === 'string') return refused(problem(tab));
@@ -161,7 +169,10 @@ export async function planSheetWrite(
         column.link === undefined ? undefined : row.values[column.link],
       );
       if (cell !== null && typeof cell === 'object' && 'problem' in cell) return cell.problem;
-      cells[positions[index] ?? index] = cell;
+      cells[positions[index] ?? index] =
+        cell !== null && typeof cell === 'object' && 'f' in cell
+          ? { f: localFormula(cell.f, separator) }
+          : cell;
     }
     return trimmed(Array.from(cells, (cell) => cell ?? null));
   });

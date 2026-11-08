@@ -138,6 +138,48 @@ export function cellData(cell: WriteCell): Readonly<Record<string, unknown>> {
   };
 }
 
+/**
+ * Locales whose formulas separate arguments with `;`, because `,` is their decimal mark: the
+ * list Buraqueira's `detect_formula_separator` measured against real sheets (2026-08).
+ */
+const SEMICOLON_LOCALES = ['pt', 'es', 'fr', 'it', 'de', 'nl', 'pl', 'ru', 'tr'];
+
+/** The argument separator a spreadsheet in `locale` (such as `pt_BR`) parses formulas with. */
+export function formulaSeparator(locale: string): ',' | ';' {
+  const lowered = locale.toLowerCase();
+  return SEMICOLON_LOCALES.some((prefix) => lowered.startsWith(prefix)) ? ';' : ',';
+}
+
+/**
+ * A formula written the English way, `=IF(A2>0,"yes","no")`, in the separator of the sheet it
+ * is written to: Sheets parses `formulaValue` in the spreadsheet's locale, so a `pt_BR` sheet
+ * refuses `,` between arguments. Only a `,` outside text, a quoted tab name and `{…}` changes:
+ * an array literal's `,` means a column there, not an argument, and is left as written.
+ */
+export function localFormula(formula: string, separator: ',' | ';'): string {
+  if (separator === ',') return formula;
+  let quote: '"' | "'" | undefined;
+  let braces = 0;
+  let out = '';
+  for (const character of formula) {
+    if (quote !== undefined) {
+      // A doubled quote inside text closes and reopens it, which comes out the same.
+      if (character === quote) quote = undefined;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === '{') {
+      braces += 1;
+    } else if (character === '}') {
+      braces = Math.max(0, braces - 1);
+    } else if (character === ',' && braces === 0) {
+      out += ';';
+      continue;
+    }
+    out += character;
+  }
+  return out;
+}
+
 /** One line for a person: the cell as the sheet will show it. */
 export function shownCell(cell: WriteCell): string {
   if (cell === null) return '';

@@ -1,6 +1,7 @@
 import type { TestRecipeOptions } from '@tyto/plugin-api/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { tabSettingsOf } from '../src/sheet-format.js';
 import {
   fakeGoogle,
   memoryCache,
@@ -20,10 +21,14 @@ import {
 type InputTable = NonNullable<TestRecipeOptions['input']>;
 
 let open: FakeGoogle | undefined;
-async function google(sheet: FakeSpreadsheet, cache = memoryCache()): Promise<FakeGoogle> {
+async function google(
+  sheet: FakeSpreadsheet,
+  cache = memoryCache(),
+  tabs?: Record<string, unknown>,
+): Promise<FakeGoogle> {
   await open?.plugin.close();
   open = await fakeGoogle(sheet, {
-    section: { spreadsheet: SPREADSHEET_URL },
+    section: { spreadsheet: SPREADSHEET_URL, ...(tabs === undefined ? {} : { tabs }) },
     capabilities: cache.capabilities,
   });
   return open;
@@ -124,6 +129,14 @@ function batches(sheet: FakeGoogle): string[][] {
             return `cells ${range['sheetId']}:${(range['startRowIndex'] ?? 0) + 1}:${range['startColumnIndex']}`;
           }
           if (kind === 'appendCells') return `append ${String(detail['sheetId'])}`;
+          if (kind === 'copyPaste') {
+            const from = detail['source'] as Record<string, number>;
+            const to = detail['destination'] as Record<string, number>;
+            return (
+              `copy ${(from['startRowIndex'] ?? 0) + 1} to ` +
+              `${to['sheetId']}:${(to['startRowIndex'] ?? 0) + 1}`
+            );
+          }
           if (kind === 'addSheet') return 'add tab';
           return kind;
         },
@@ -176,7 +189,7 @@ describe('google.sheet-sync decisions', () => {
         'add tab',
         'cells 10:1:0',
         'cells 5:2:1',
-        'append 10',
+        'copy 6 to 10:2',
         'delete row 7',
         'delete row 6',
         'delete row 4',
@@ -340,7 +353,7 @@ describe('google.sheet-sync apply', () => {
     });
     const answer = await planAndApply(sheet, STEP, everyBranch());
     expect(sheet.calls.filter((call) => call.path === BATCH)).toHaveLength(1);
-    expect(batches(sheet)[0]).toEqual(expect.arrayContaining(['append 10', 'delete row 6']));
+    expect(batches(sheet)[0]).toEqual(expect.arrayContaining(['copy 6 to 10:2', 'delete row 6']));
     expect(answer.applied?.[2]?.reason).toMatch(/None of this batch was written/);
     expect(tabNamed(sheet, 'Queue')?.values).toEqual(queue().values);
     expect(tabNamed(sheet, 'Shipped')).toBeUndefined();
@@ -515,5 +528,370 @@ describe('google.sheet-sync apply, after a person', () => {
       ),
     );
     expect(tabNamed(sheet, 'Queue')?.values.slice(1)).toEqual(queue().values.slice(1));
+  });
+});
+
+describe('google.sheet-sync tab formatting', () => {
+  const MOVE_STEP = 'google.sheet-sync tab=Queue key=ID move=Filed keep=Notes';
+  const sameRows = () =>
+    input(
+      queue()
+        .values.slice(1)
+        .map((row) => [String(row[0]), String(row[1]), String(row[2]), ''] as const),
+    );
+  const formats = (plan: { operations: readonly { write: string; description: string }[] }) =>
+    plan.operations.filter((each) => each.write === 'format-tab').map((each) => each.description);
+  const tableOf = (range: number, columnProperties?: Record<string, unknown>[]) => ({
+    tableId: 'tq',
+    name: 'QueueTable',
+    range: {
+      sheetId: 5,
+      startRowIndex: 0,
+      endRowIndex: range,
+      startColumnIndex: 0,
+      endColumnIndex: 4,
+    },
+    ...(columnProperties === undefined ? {} : { columnProperties }),
+  });
+  const ownerDropdown = (values: string[]) => ({
+    columnIndex: 2,
+    columnName: 'Owner',
+    columnType: 'DROPDOWN',
+    dataValidationRule: {
+      condition: {
+        type: 'ONE_OF_LIST',
+        values: values.map((userEnteredValue) => ({ userEnteredValue })),
+      },
+    },
+  });
+  const lastBatch = (sheet: FakeGoogle) =>
+    (
+      sheet.calls.filter((call) => call.path === BATCH).at(-1)?.body as {
+        requests: Record<string, Record<string, unknown>>[];
+      }
+    ).requests;
+
+  it('adds a native table only after removing the alternating colours, then leaves it be', async () => {
+    const settings = {
+      Queue: {
+        table: 'QueueTable',
+        header: '#D9EAD3',
+        dropdowns: { Owner: ['Ana', 'Bruno', 'Dora', 'Gil'] },
+      },
+      Shipped: { table: true },
+    };
+    const banded: FakeTab = { ...queue(), banded: [42] };
+    const sheet = await google(
+      { tabs: [banded, archive()], version: '1' },
+      memoryCache(),
+      settings,
+    );
+    const answer = await planAndApply(sheet, STEP, everyBranch());
+    expect(answer.plan === undefined ? [] : formats(answer.plan)).toEqual([
+      "format the tab 'Queue': remove its 1 alternating colours; add the table 'QueueTable' " +
+        'over rows 1 to 5; the dropdown of Owner: Ana, Bruno, Dora, Gil; colour its header #D9EAD3',
+      "format the tab 'Shipped': add the table 'Table_Shipped' over rows 1 to 2",
+    ]);
+    expect(answer.applied?.every((each) => each.status === 'applied')).toBe(true);
+    expect(batches(sheet)).toHaveLength(1);
+    expect(batches(sheet)[0]?.slice(-4)).toEqual([
+      'deleteBanding',
+      'addTable',
+      'repeatCell',
+      'addTable',
+    ]);
+    const queueTab = tabNamed(sheet, 'Queue');
+    expect(queueTab?.banded).toEqual([]);
+    expect(queueTab?.tables?.map((each) => [each.name, each.range['endRowIndex']])).toEqual([
+      ['QueueTable', 5],
+    ]);
+    expect(queueTab?.tables?.[0]?.columnProperties).toEqual([
+      ownerDropdown(['Ana', 'Bruno', 'Dora', 'Gil']),
+    ]);
+    expect(tabNamed(sheet, 'Shipped')?.tables?.map((each) => each.name)).toEqual(['Table_Shipped']);
+
+    // Run again over what Apply left: nothing differs, so nothing is planned.
+    const again = await planAndApply(sheet, STEP, everyBranch());
+    expect(again.plan?.operations).toEqual([]);
+  });
+
+  it('stretches the table the tab has with updateTable, never adding a second', async () => {
+    const tabbed: FakeTab = { ...queue(), banded: [42], tables: [tableOf(7)] };
+    const sheet = await google({ tabs: [tabbed, archive()], version: '1' }, memoryCache(), {
+      Queue: { table: 'QueueTable' },
+    });
+    const answer = await planAndApply(sheet, STEP, everyBranch());
+    expect(answer.plan === undefined ? [] : formats(answer.plan)).toEqual([
+      "format the tab 'Queue': stretch its table over rows 1 to 5",
+    ]);
+    const kinds = batches(sheet)[0] ?? [];
+    expect(kinds.at(-1)).toBe('updateTable');
+    expect(kinds).not.toContain('addTable');
+    expect(kinds).not.toContain('deleteBanding');
+    expect(lastBatch(sheet).at(-1)?.['updateTable']?.['fields']).toBe('range');
+    expect(tabNamed(sheet, 'Queue')?.tables?.map((each) => each.range['endRowIndex'])).toEqual([5]);
+  });
+
+  it("leaves a table column's dropdown untouched while its values are the same", async () => {
+    const title = { columnIndex: 1, columnName: 'Title', columnType: 'TEXT' };
+    const tabbed: FakeTab = {
+      ...queue(),
+      tables: [tableOf(7, [title, ownerDropdown(['Ana', 'Bruno'])])],
+    };
+    const same = await planAndApply(
+      await google({ tabs: [tabbed], version: '1' }, memoryCache(), {
+        Queue: { table: 'QueueTable', dropdowns: { Owner: ['Ana', 'Bruno'] } },
+      }),
+      MOVE_STEP,
+      sameRows(),
+    );
+    expect(same.plan?.operations).toEqual([]);
+
+    const sheet = await google({ tabs: [tabbed], version: '1' }, memoryCache(), {
+      Queue: { table: 'QueueTable', dropdowns: { Owner: ['Ana', 'Bruno', 'Clara'] } },
+    });
+    const changed = await planAndApply(sheet, MOVE_STEP, sameRows());
+    expect(changed.plan === undefined ? [] : formats(changed.plan)).toEqual([
+      "format the tab 'Queue': the dropdown of Owner: Ana, Bruno, Clara",
+    ]);
+    expect(lastBatch(sheet).map((each) => Object.keys(each)[0])).toEqual(['updateTable']);
+    expect(lastBatch(sheet)[0]?.['updateTable']?.['fields']).toBe('columnProperties');
+    // fields: columnProperties replaces the list, so the other column goes back as it was.
+    expect(tabNamed(sheet, 'Queue')?.tables?.[0]?.columnProperties).toEqual([
+      title,
+      ownerDropdown(['Ana', 'Bruno', 'Clara']),
+    ]);
+  });
+
+  it('leaves a cell dropdown untouched while its values are the same, outside a table', async () => {
+    const ruled: FakeTab = { ...queue(), validation: { 2: ['Ana', 'Bruno'] } };
+    const same = await planAndApply(
+      await google({ tabs: [ruled], version: '1' }, memoryCache(), {
+        Queue: { dropdowns: { Owner: ['Ana', 'Bruno'] } },
+      }),
+      MOVE_STEP,
+      sameRows(),
+    );
+    expect(same.plan?.operations).toEqual([]);
+
+    const sheet = await google({ tabs: [ruled], version: '1' }, memoryCache(), {
+      Queue: { dropdowns: { Owner: ['Bruno', 'Ana'] } },
+    });
+    await planAndApply(sheet, MOVE_STEP, sameRows());
+    expect(batches(sheet)).toEqual([['setDataValidation']]);
+    expect(tabNamed(sheet, 'Queue')?.validation?.[2]).toEqual(['Bruno', 'Ana']);
+  });
+
+  it('shows settings naming a column the tab lacks as a format that will fail', async () => {
+    const sheet = await google({ tabs: [queue()], version: '1' }, memoryCache(), {
+      queue: { dropdowns: { Status: ['Open'] } },
+    });
+    const answer = await planAndApply(sheet, MOVE_STEP, sameRows());
+    expect(answer.plan?.operations.map((each) => [each.write, each.payload])).toEqual([
+      [
+        'format-tab',
+        {
+          x:
+            "E_GOOGLE_CONFIG: the settings give 'Status' a dropdown, and the tab has no such " +
+            'column',
+        },
+      ],
+    ]);
+    expect(batches(sheet)).toEqual([]);
+  });
+});
+
+describe('google.sheet-sync moves by copyPaste', () => {
+  const step = 'google.sheet-sync tab=Queue key=ID move=Filed keep=Notes';
+
+  it("carries a formula and a link that is not a web one, in the move's one batchUpdate", async () => {
+    const tab: FakeTab = {
+      ...queue(),
+      formulas: { C6: '=PROPER("enzo")' },
+      links: { B6: { uri: 'ftp://files.example.com/ship', place: 'run' } },
+    };
+    const sheet = await google({ tabs: [tab], version: '1' });
+    const answer = await planAndApply(sheet, step, input([['EX-5', 'Ship', 'Enzo', 'Shipped']]));
+    const move = answer.plan?.operations.find((each) => each.write === 'move');
+    expect(move?.payload).toMatchObject({
+      t: 'Shipped',
+      m: [
+        [0, 0],
+        [1, 1],
+        [2, 2],
+        [3, 3],
+      ],
+    });
+    expect(move?.payload).not.toHaveProperty('u');
+    expect(answer.applied?.every((each) => each.status === 'applied')).toBe(true);
+    expect(batches(sheet)).toEqual([
+      [
+        'add tab',
+        'cells 6:1:0',
+        'copy 6 to 6:2',
+        'delete row 7',
+        'delete row 6',
+        'delete row 4',
+        'delete row 3',
+        'delete row 2',
+      ],
+    ]);
+    const shipped = tabNamed(sheet, 'Shipped');
+    expect(shipped?.values[1]).toEqual(['EX-5', 'Ship', 'Enzo', 'draft ok']);
+    expect(shipped?.formulas).toEqual({ C2: '=PROPER("enzo")' });
+    expect(shipped?.links?.['B2']?.uri).toBe('ftp://files.example.com/ship');
+  });
+
+  it('writes the cells the table changes over the row before copying it', async () => {
+    const sheet = await google({ tabs: [queue()], version: '1' });
+    const answer = await planAndApply(
+      sheet,
+      step,
+      input([['EX-5', 'Shipped it', 'Enzo', 'Shipped']]),
+    );
+    expect(answer.plan?.operations.find((each) => each.write === 'move')?.description).toBe(
+      "move EX-5 (row 6) to the tab 'Shipped', writing Title: Ship → Shipped it",
+    );
+    expect(batches(sheet)[0]?.slice(0, 4)).toEqual([
+      'add tab',
+      'cells 6:1:0',
+      'cells 5:6:1',
+      'copy 6 to 6:2',
+    ]);
+    expect(tabNamed(sheet, 'Shipped')?.values[1]).toEqual([
+      'EX-5',
+      'Shipped it',
+      'Enzo',
+      'draft ok',
+    ]);
+  });
+
+  it('grows a full tab before copying into it, and stretches its table over the copy', async () => {
+    // copyPaste never grows a grid: a tab with no free row needs one added first.
+    const shipped: FakeTab = {
+      sheetId: 11,
+      title: 'Shipped',
+      values: [
+        ['ID', 'Title', 'Owner', 'Notes'],
+        ['EX-0', 'Earlier', 'Zoe', ''],
+      ],
+      rowCount: 2,
+      tables: [
+        {
+          tableId: 'ts',
+          name: 'ShippedTable',
+          range: {
+            sheetId: 11,
+            startRowIndex: 0,
+            endRowIndex: 2,
+            startColumnIndex: 0,
+            endColumnIndex: 4,
+          },
+        },
+      ],
+    };
+    const sheet = await google({ tabs: [queue(), shipped], version: '1' }, memoryCache(), {
+      Shipped: { table: 'ShippedTable' },
+    });
+    const answer = await planAndApply(sheet, step, input([['EX-5', 'Ship', 'Enzo', 'Shipped']]));
+    expect(answer.plan?.operations.at(-1)?.description).toBe(
+      "format the tab 'Shipped': stretch its table over rows 1 to 3",
+    );
+    expect(answer.applied?.every((each) => each.status === 'applied')).toBe(true);
+    const kinds = batches(sheet)[0] ?? [];
+    expect(kinds.indexOf('appendDimension')).toBeLessThan(kinds.indexOf('copy 6 to 11:3'));
+    expect(tabNamed(sheet, 'Shipped')?.values[2]).toEqual(['EX-5', 'Ship', 'Enzo', 'draft ok']);
+    expect(tabNamed(sheet, 'Shipped')?.tables?.[0]?.range['endRowIndex']).toBe(3);
+  });
+
+  it("fails a move when its tab's header changed since the plan, and copies nothing", async () => {
+    const shipped: FakeTab = {
+      sheetId: 11,
+      title: 'Shipped',
+      values: [['ID', 'Title', 'Owner', 'Notes']],
+    };
+    const sheet = await google({ tabs: [queue(), shipped], version: '1' });
+    const answer = await planAndApply(
+      sheet,
+      step,
+      input([['EX-5', 'Ship', 'Enzo', 'Shipped']]),
+      () => {
+        // A person swaps two columns: the plan's places would put the title under Owner.
+        const header = tabNamed(sheet, 'Shipped')?.values[0];
+        if (header !== undefined) [header[1], header[2]] = ['Owner', 'Title'];
+      },
+    );
+    const move = answer.plan?.operations.findIndex((each) => each.write === 'move') ?? -1;
+    expect(answer.applied?.[move]).toEqual({
+      status: 'failed',
+      reason:
+        "E_GOOGLE_CHANGED: the header of the tab 'Shipped' changed since the plan; run the " +
+        'cell again for a new plan',
+    });
+    expect(batches(sheet)[0]?.some((kind) => kind.startsWith('copy'))).toBe(false);
+    expect(tabNamed(sheet, 'Queue')?.values.map((row) => row[0])).toContain('EX-5');
+  });
+});
+
+describe('google.sheet-sync tab settings', () => {
+  const where = 'tabs.Queue in the google section of .tyto/project.json';
+  it.each([
+    ['not an object', ['Status'], `${where} is not an object`],
+    ['an unknown key', { colour: '#FFFFFF' }, `${where} holds colour, which is none of`],
+    ['a table name with -', { table: 'Queue-2026' }, "the table name 'Queue-2026' may hold"],
+    ['a header that is no colour', { header: 'green' }, 'header is not a colour such as'],
+    ['an empty dropdown', { dropdowns: { Status: [] } }, 'dropdowns.Status is not a list'],
+    ['a repeated value', { dropdowns: { Status: ['a', 'a'] } }, 'dropdowns.Status is not a'],
+  ])('refuses %s', (_, settings, words) => {
+    expect(tabSettingsOf({ tabs: { Queue: settings } }, 'Queue')).toEqual(
+      expect.stringContaining(words),
+    );
+  });
+
+  it('reads a tab by its name ignoring case, and names a table from the tab', () => {
+    expect(
+      tabSettingsOf({ tabs: { 'queue 2026': { table: true, header: '#d9ead3' } } }, 'Queue 2026'),
+    ).toEqual({
+      table: 'Table_Queue_2026',
+      header: '#D9EAD3',
+      dropdowns: [],
+    });
+    expect(tabSettingsOf({ tabs: { Other: {} } }, 'Queue')).toBeUndefined();
+    expect(tabSettingsOf(undefined, 'Queue')).toBeUndefined();
+  });
+});
+
+describe('google.sheet-sync link drift', () => {
+  it('fails a row whose link changed between the plan and Apply', async () => {
+    const linked = (): FakeTab => ({
+      ...queue(),
+      links: { B2: { uri: 'https://tasks.example.com/1', place: 'run' } },
+    });
+    const step = 'google.sheet-sync tab=Queue key=ID move=Filed keep=Notes';
+    const table = () =>
+      input([
+        ['EX-1', 'Old title', 'Zoe', ''],
+        ['EX-2', 'Same', 'Bruno', ''],
+        ['EX-4', 'Kept', 'Dora', ''],
+        ['EX-5', 'Ship', 'Enzo', ''],
+      ]);
+
+    // Control: the same plan with the link left alone is written.
+    const control = await google({ tabs: [linked()], version: '1' });
+    const untouched = await planAndApply(control, step, table());
+    expect(untouched.applied?.every((each) => each.status === 'applied')).toBe(true);
+
+    const sheet = await google({ tabs: [linked()], version: '1' });
+    const answer = await planAndApply(sheet, step, table(), () => {
+      const tab = tabNamed(sheet, 'Queue');
+      if (tab?.links !== undefined) tab.links['B2'] = { uri: 'https://elsewhere.example.com/1' };
+    });
+    expect(answer.applied?.[0]).toEqual({
+      status: 'failed',
+      reason:
+        'E_GOOGLE_CHANGED: EX-1 (row 2): the row changed since the plan; run the cell again ' +
+        'for a new plan',
+    });
+    expect(tabNamed(sheet, 'Queue')?.values[1]?.[2]).toBe('Ana');
   });
 });

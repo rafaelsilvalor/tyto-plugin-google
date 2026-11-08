@@ -57,6 +57,7 @@ describe('tyto-plugin.json', () => {
       'move',
       'delete',
       'add',
+      'format-tab',
     ]);
     const declared = plugin.host.registry
       .recipeVerbs()

@@ -30,10 +30,29 @@ export interface FakeTab {
   /** The grid's size, 1,000 by 26 when left out, as a new tab's. */
   rowCount?: number;
   columnCount?: number;
+  /** By A1 cell, the formula a cell holds; `values` holds what it shows. */
+  formulas?: Record<string, string>;
+  /** Native tables, as `spreadsheets.get` answers `tables`. */
+  tables?: FakeTable[];
+  /** Ids of the tab's alternating colours. */
+  banded?: number[];
+  /** By column, row 1's background. */
+  headerColours?: Record<number, { red?: number; green?: number; blue?: number }>;
+  /** By column, the values of the dropdown rule set on the column from row 2. */
+  validation?: Record<number, string[]>;
+}
+
+export interface FakeTable {
+  tableId: string;
+  name: string;
+  range: Record<string, number>;
+  columnProperties?: Record<string, unknown>[];
 }
 
 export interface FakeSpreadsheet {
   tabs: FakeTab[];
+  /** The spreadsheet's locale, `en_US` when left out. */
+  locale?: string;
   /** Drive's `version`; a string, as Drive answers it. */
   version: string;
   /** Drive's answer to the version, when a test wants it to fail. */
@@ -118,6 +137,9 @@ function answerOf(sheet: FakeSpreadsheet, call: SheetCall): FetchedResponse {
   }
   if (call.path === base && String(call.query['fields']).includes('gridProperties')) {
     return response(200, {
+      ...(String(call.query['fields']).includes('properties.locale')
+        ? { properties: { locale: sheet.locale ?? 'en_US' } }
+        : {}),
       sheets: sheet.tabs.map((tab) => ({
         properties: {
           sheetId: tab.sheetId,
@@ -142,6 +164,9 @@ function answerOf(sheet: FakeSpreadsheet, call: SheetCall): FetchedResponse {
     }
     const tab = tabOf(sheet, range);
     return response(200, { range: tab.title, majorDimension: 'ROWS', values: tab.values });
+  }
+  if (call.path === base && String(call.query['fields']).includes('tables(')) {
+    return response(200, formatOf(sheet, call));
   }
   if (call.path === base && call.query['ranges'] !== undefined) {
     return response(200, extrasOf(sheet, call));
@@ -211,6 +236,18 @@ function batchUpdate(sheet: FakeSpreadsheet, body: unknown): FetchedResponse {
       const tab = copyOf(range.sheetId);
       tab.values.splice(range.startIndex, range.endIndex - range.startIndex);
       tab.rowCount = rowsOf(tab) - (range.endIndex - range.startIndex);
+      tab.links = shifted(tab.links, range.startIndex, range.endIndex);
+      tab.formulas = shifted(tab.formulas, range.startIndex, range.endIndex);
+      continue;
+    }
+    if (kind === 'copyPaste' && detail !== undefined) {
+      const failure = copyPaste(copyOf, detail);
+      if (failure !== undefined) return failure;
+      continue;
+    }
+    if (kind !== undefined && detail !== undefined && kind in FORMAT_REQUESTS) {
+      const failure = FORMAT_REQUESTS[kind]?.(detail, [...sheet.tabs, ...created], copyOf);
+      if (failure !== undefined) return failure;
       continue;
     }
     if (kind === 'appendCells' && detail !== undefined) {
@@ -274,15 +311,170 @@ function writeRows(
         entered['formulaValue'] ??
         '';
       const run = (cell['textFormatRuns'] as { format: { link?: { uri: string } } }[])?.[0];
-      const a1 = `${String.fromCharCode(65 + column)}${top + offset + 1}`;
+      const at = a1(column, top + offset + 1);
       tab.links ??= {};
       if (run?.format.link !== undefined)
-        tab.links[a1] = { uri: run.format.link.uri, place: 'run' };
-      else delete tab.links[a1];
+        tab.links[at] = { uri: run.format.link.uri, place: 'run' };
+      else delete tab.links[at];
+      const formula = entered['formulaValue'];
+      if (typeof formula === 'string') (tab.formulas ??= {})[at] = formula;
+      else delete tab.formulas?.[at];
     });
     while (values.length > 0 && values.at(-1) === '') values.pop();
     tab.values[top + offset] = values;
   });
+}
+
+/** `B2`: the fake reads one-letter columns only. */
+function a1(column: number, row: number): string {
+  return `${String.fromCharCode(65 + column)}${row}`;
+}
+
+/** A1-keyed cells once rows `start` to `end` (from 0, `end` excluded) are deleted. */
+function shifted<T>(
+  cells: Record<string, T> | undefined,
+  start: number,
+  end: number,
+): Record<string, T> {
+  const kept: Record<string, T> = {};
+  for (const [at, value] of Object.entries(cells ?? {})) {
+    const letter = at.replace(/[0-9]+$/, '');
+    const row = Number(at.slice(letter.length)) - 1;
+    if (row >= start && row < end) continue;
+    kept[`${letter}${row >= end ? row - (end - start) + 1 : row + 1}`] = value;
+  }
+  return kept;
+}
+
+const exceeds = (): FetchedResponse =>
+  response(400, {
+    error: { code: 400, message: 'Range exceeds grid limits.', status: 'INVALID_ARGUMENT' },
+  });
+
+/** `copyPaste` of one row's cells, values, links and formulas, as `PASTE_NORMAL` copies them. */
+function copyPaste(
+  copyOf: (sheetId: unknown) => FakeTab,
+  detail: Record<string, unknown>,
+): FetchedResponse | undefined {
+  const from = detail['source'] as Record<string, number>;
+  const to = detail['destination'] as Record<string, number>;
+  const source = copyOf(from['sheetId']);
+  const target = copyOf(to['sheetId']);
+  // copyPaste does not grow the grid (Buraqueira, 2026-08).
+  if ((to['endRowIndex'] ?? 0) > rowsOf(target)) return exceeds();
+  const row = from['startRowIndex'] ?? 0;
+  const top = to['startRowIndex'] ?? 0;
+  while (target.values.length <= top) target.values.push([]);
+  const values = target.values[top] ?? [];
+  const width = (from['endColumnIndex'] ?? 0) - (from['startColumnIndex'] ?? 0);
+  for (let offset = 0; offset < width; offset += 1) {
+    const column = (from['startColumnIndex'] ?? 0) + offset;
+    const into = (to['startColumnIndex'] ?? 0) + offset;
+    while (values.length < into) values.push('');
+    values[into] = source.values[row]?.[column] ?? '';
+    const link = source.links?.[a1(column, row + 1)];
+    if (link === undefined) delete target.links?.[a1(into, top + 1)];
+    else (target.links ??= {})[a1(into, top + 1)] = link;
+    const formula = source.formulas?.[a1(column, row + 1)];
+    if (formula === undefined) delete target.formulas?.[a1(into, top + 1)];
+    else (target.formulas ??= {})[a1(into, top + 1)] = formula;
+  }
+  while (values.length > 0 && values.at(-1) === '') values.pop();
+  target.values[top] = values;
+  return undefined;
+}
+
+type FormatRequest = (
+  detail: Record<string, unknown>,
+  tabs: readonly FakeTab[],
+  copyOf: (sheetId: unknown) => FakeTab,
+) => FetchedResponse | undefined;
+
+/** The requests that change how a tab looks, as Google runs them. */
+const FORMAT_REQUESTS: Readonly<Record<string, FormatRequest>> = {
+  deleteBanding(detail, tabs, copyOf) {
+    const id = Number(detail['bandedRangeId']);
+    const owner = tabs.find((tab) => tab.banded?.includes(id));
+    if (owner === undefined) throw new Error(`no banded range ${id}`);
+    const tab = copyOf(owner.sheetId);
+    tab.banded = (tab.banded ?? []).filter((each) => each !== id);
+    return undefined;
+  },
+  addTable(detail, _tabs, copyOf) {
+    const table = detail['table'] as Omit<FakeTable, 'tableId'>;
+    const tab = copyOf(table.range['sheetId']);
+    // Google refuses a table over a range with alternating colours (Buraqueira, 2026-08).
+    if ((tab.banded ?? []).length > 0) {
+      return response(400, {
+        error: { code: 400, message: 'Table overlaps banding.', status: 'INVALID_ARGUMENT' },
+      });
+    }
+    tab.tables = [...(tab.tables ?? []), { ...table, tableId: `table-${tab.sheetId}` }];
+    return undefined;
+  },
+  updateTable(detail, tabs, copyOf) {
+    const table = detail['table'] as Partial<FakeTable>;
+    const owner = tabs.find((tab) => tab.tables?.some((each) => each.tableId === table.tableId));
+    if (owner === undefined) throw new Error(`no table ${String(table.tableId)}`);
+    const found = copyOf(owner.sheetId).tables?.find((each) => each.tableId === table.tableId);
+    if (found === undefined) return undefined;
+    for (const field of String(detail['fields']).split(',')) {
+      if (field === 'range' && table.range !== undefined) found.range = table.range;
+      if (field === 'columnProperties') found.columnProperties = table.columnProperties ?? [];
+    }
+    return undefined;
+  },
+  setDataValidation(detail, _tabs, copyOf) {
+    const range = detail['range'] as Record<string, number>;
+    const rule = detail['rule'] as { condition: { values: { userEnteredValue: string }[] } };
+    const tab = copyOf(range['sheetId']);
+    tab.validation = {
+      ...tab.validation,
+      [range['startColumnIndex'] ?? 0]: rule.condition.values.map((each) => each.userEnteredValue),
+    };
+    return undefined;
+  },
+  repeatCell(detail, _tabs, copyOf) {
+    const range = detail['range'] as Record<string, number>;
+    const cell = detail['cell'] as { userEnteredFormat: { backgroundColor: object } };
+    const tab = copyOf(range['sheetId']);
+    tab.headerColours ??= {};
+    for (let at = range['startColumnIndex'] ?? 0; at < (range['endColumnIndex'] ?? 0); at += 1) {
+      tab.headerColours[at] = cell.userEnteredFormat.backgroundColor;
+    }
+    return undefined;
+  },
+};
+
+/** `spreadsheets.get` for a tab's look: its tables, banding, row 1's colours, row 2's rules. */
+function formatOf(sheet: FakeSpreadsheet, call: SheetCall): unknown {
+  const [range = ''] = ([] as string[]).concat(call.query['ranges'] ?? []);
+  const match = /^(.*)!A1:([A-Z])2$/.exec(range);
+  if (match === null) throw new Error(`a format range the fake does not read: ${range}`);
+  const tab = tabOf(sheet, match[1] ?? '');
+  const columns = Array.from({ length: (match[2] ?? 'A').charCodeAt(0) - 64 }, (_, at) => at);
+  const header = columns.map((at) => {
+    const colour = tab.headerColours?.[at];
+    return colour === undefined ? {} : { userEnteredFormat: { backgroundColor: colour } };
+  });
+  const rules = columns.map((at) => {
+    const values = tab.validation?.[at];
+    if (values === undefined) return {};
+    const listed = values.map((userEnteredValue) => ({ userEnteredValue }));
+    return { dataValidation: { condition: { type: 'ONE_OF_LIST', values: listed } } };
+  });
+  return {
+    sheets: [
+      {
+        properties: { sheetId: tab.sheetId },
+        ...(tab.tables === undefined ? {} : { tables: tab.tables }),
+        ...(tab.banded === undefined
+          ? {}
+          : { bandedRanges: tab.banded.map((bandedRangeId) => ({ bandedRangeId })) }),
+        data: [{ rowData: [{ values: header }, { values: rules }] }],
+      },
+    ],
+  };
 }
 
 function tabOf(sheet: FakeSpreadsheet, quoted: string): FakeTab {

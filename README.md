@@ -56,7 +56,15 @@ file or in Tyto's cache, and is renewed a minute before it expires.
 {
   "google": {
     "spreadsheet": "https://docs.google.com/spreadsheets/d/<id>/edit",
-    "root": "https://drive.google.com/drive/folders/<id>"
+    "root": "https://drive.google.com/drive/folders/<id>",
+    "tabs": {
+      "Queue": {
+        "table": "QueueTable",
+        "header": "#D9EAD3",
+        "dropdowns": { "Status": ["To do", "Doing", "Done"] }
+      },
+      "Shipped": { "table": true }
+    }
   }
 }
 ```
@@ -64,7 +72,12 @@ file or in Tyto's cache, and is renewed a minute before it expires.
 - `spreadsheet`: the spreadsheet the Sheets verbs read and write unless a step names another,
   as its id or its address.
 - `root`: the Drive folder the Drive verbs stay under, as its id or its address.
-- `tabs`: settings per tab, by the tab's name, for the verbs that format a tab.
+- `tabs`: how a tab looks, by the tab's name (case is ignored), for `google.sheet-sync`:
+  - `table`: a native table (Format › Convert to table) over the header and every row, by this
+    name, or `true` for `Table_<tab>`. A name holds letters, digits and `_` only, and is unique
+    in the spreadsheet.
+  - `header`: row 1's background colour, as `#RRGGBB`.
+  - `dropdowns`: per column, the values its dropdown offers.
 
 ## `google.sheet-rows`
 
@@ -127,6 +140,11 @@ google.sheet-write tab=Report mode=replace formulas=Total
 - **Text is never a formula.** A cell that starts with `=` is written as text unless its column
   is in `formulas=`, so a recipe cannot be made to write a formula it read from a web page or a
   ticket. Numbers and booleans keep their type; a list is written as its items joined by `, `.
+- **Formulas are written the English way and land in the sheet's.** Write `=SUM(A2,B2)`: in a
+  spreadsheet whose locale separates arguments with `;` (`pt`, `es`, `fr`, `it`, `de`, `nl`,
+  `pl`, `ru`, `tr`), the plan writes `=SUM(A2;B2)`, because Sheets reads a formula in its
+  locale. Only a `,` outside text, a quoted tab name and `{…}` changes; decimals such as `1.5`
+  are left as written.
 - **Links** are written as a linked run of text, the link Ctrl+K makes, never as
   `=HYPERLINK`. A `<name>_url` link column beside a `<name>` column links that column's text
   and is not written as a column of its own, which is how `google.sheet-rows links=` reads it
@@ -192,20 +210,38 @@ google.sheet-sync tab=Queue key=ID move=Filed keep=Notes archived=Archive
 - Every table column must be a column of the tab, except `move=`'s; `keep=` columns are written
   only by `add`. Cells are written as `google.sheet-write` writes them: text is never a
   formula, and a `<name>_url` column links its column.
-- A **moved** row takes the tab's cells, the table's over them, to its new tab under each
-  column of the same name; a column the new tab lacks, where the row holds something, fails
-  that move in the plan. A new tab gets this tab's header. A moved cell keeps its web link, but
-  it is written as its value: a formula or a date's format does not travel.
+- A **moved** row travels by `copyPaste`, so its formulas, date formats, colours and links,
+  web or not, go with it. The cells the table changes are written over the row first, and the
+  plan names them. Each cell lands under the column of the same name in the new tab; a column
+  the new tab lacks, where the row holds something, fails that move in the plan. A new tab gets
+  this tab's header.
+
+### Formatting a tab
+
+With `tabs.<tab>` in the section, the sync plans a `format-tab` for the synced tab, and for
+each tab rows move to, **only when the tab does not look as the settings ask** once the plan's
+rows are written:
+
+- **A table is added** over row 1 to the last row, after the tab's alternating colours are
+  removed (Sheets refuses a table over them). A tab that has a table only has its range
+  stretched to the rows it ends with; a second table is never added.
+- **A dropdown is rewritten only when its values change**, because rewriting it drops the
+  colours a person gave its options. In a table it is the column's type; elsewhere, a rule on
+  the column from row 2, which warns on other values rather than refusing them.
+- **The header colour** is set when any cell of row 1 has another.
+- Settings that name a column the tab lacks show the `format-tab` as one that will fail.
 
 ### Applying a sync
 
-Each batch of 100 is **one `spreadsheets.batchUpdate`**: new tabs, cell updates, moved rows
-copied, rows removed from the bottom up, then new rows appended. A move's copy and its removal
-land together or not at all. Before it writes, the batch reads the tab once and finds each row
-by its key, not by the number it had when planned: a row whose cells changed since the plan
-fails alone with `E_GOOGLE_CHANGED` "the row changed since the plan", as does an `add` whose
-key reached the tab, and the others are written. A refused or lost batch reads as for
-`google.sheet-write`, and so do the 20 s budget and the rows kept in the cache.
+Each batch of 100 is **one `spreadsheets.batchUpdate`**: new tabs, cell updates (a moved row's
+included), moved rows copied, rows removed from the bottom up, new rows appended, then each
+tab's format over the rows it ends with. A move's copy and its removal land together or not at
+all. Before it writes, the batch reads the tab once and finds each row by its key, not by the
+number it had when planned: a row whose cells **or links** changed since the plan fails alone
+with `E_GOOGLE_CHANGED` "the row changed since the plan", as does an `add` whose key reached
+the tab, or a move whose new tab's header changed, and the others are written. A refused or
+lost batch reads as for `google.sheet-write`, and so do the 20 s budget and the rows kept in
+the cache.
 
 ## Retries
 
