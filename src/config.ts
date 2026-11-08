@@ -193,6 +193,11 @@ export function folderIdOf(written: unknown): string | undefined {
   return idOf(written, /\/folders\/([A-Za-z0-9_-]+)/, 'drive.google.com');
 }
 
+/** The id of a Drive file written as its id or as its address (`/file/d/<id>/view`). */
+export function fileIdOf(written: unknown): string | undefined {
+  return idOf(written, /^\/file\/d\/([A-Za-z0-9_-]+)/, 'drive.google.com');
+}
+
 function idOf(written: unknown, path: RegExp, hostname: string): string | undefined {
   if (typeof written !== 'string') return undefined;
   const trimmed = written.trim();
