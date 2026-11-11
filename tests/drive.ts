@@ -30,18 +30,29 @@ export interface FakeItem {
   createdTime: string;
   modifiedTime?: string;
   trashed?: boolean;
+  /** The people the item is shared with, as `permissions.create` added them. */
+  permissions?: { email: string; role: string; notified: boolean }[];
 }
 
 export interface FakeDrive {
   items: FakeItem[];
   /** Drive's page size, smaller than the asked 1,000 when a test wants several pages. */
   pageSize?: number;
+  /** The ids `files.generateIds` hands out next, in order; invented ones when it runs out. */
+  ids?: string[];
+  /** Emails whose domain Drive refuses to share with, as a domain's sharing settings do. */
+  refusedDomain?: string;
+  /** Item names whose create Drive refuses, with a body echoing the request's token. */
+  refusedNames?: string[];
 }
 
 export interface DriveCall {
   readonly method: string;
   readonly path: string;
   readonly query: Readonly<Record<string, string>>;
+  /** The request's `Authorization` header: whose token signed it. */
+  readonly authorization: string;
+  readonly body?: unknown;
 }
 
 export interface FakeGoogleDrive {
@@ -54,7 +65,10 @@ let key: TestKey | undefined;
 
 export async function fakeDrive(
   drive: FakeDrive,
-  options: { readonly section?: unknown } = {},
+  options: {
+    readonly section?: unknown;
+    readonly signins?: Readonly<Record<string, string>>;
+  } = {},
 ): Promise<FakeGoogleDrive> {
   key ??= await testKey();
   const endpoint = tokenEndpoint(key.publicKey, testClock(Date.now()));
@@ -63,6 +77,7 @@ export async function fakeDrive(
     manifest,
     load: () => import(entry),
     secrets: { 'service-account': key.json },
+    ...(options.signins === undefined ? {} : { signins: options.signins }),
     ...(options.section === undefined ? {} : { section: options.section }),
     async fetch(url: string, init: HostFetchInit) {
       const parsed = new URL(url);
@@ -74,6 +89,8 @@ export async function fakeDrive(
         method: init.method ?? 'GET',
         path: decodeURIComponent(parsed.pathname),
         query: Object.fromEntries(parsed.searchParams),
+        authorization: String(init.headers?.['Authorization'] ?? ''),
+        ...(init.body === undefined ? {} : { body: JSON.parse(String(init.body)) as unknown }),
       };
       calls.push(call);
       return answerOf(drive, call);
@@ -87,13 +104,26 @@ export async function fakeDrive(
 
 const FILES = '/drive/v3/files';
 
+let generated = 0;
+
 function answerOf(drive: FakeDrive, call: DriveCall): FetchedResponse {
+  if (call.path === FILES && call.method === 'POST') return created(drive, call);
   if (call.path === FILES) return listOf(drive, call.query);
+  if (call.path === `${FILES}/generateIds`) {
+    const count = Number(call.query['count']);
+    const ids = Array.from({ length: count }, () => {
+      generated += 1;
+      return drive.ids?.shift() ?? `gen${String(generated).padStart(12, '0')}`;
+    });
+    return response(200, { kind: 'drive#generatedIds', space: 'drive', ids });
+  }
   if (!call.path.startsWith(`${FILES}/`)) throw new Error(`no fake answers ${call.path}`);
-  const item = drive.items.find((each) => each.id === call.path.slice(FILES.length + 1));
+  const [id, sub] = call.path.slice(FILES.length + 1).split('/');
+  const item = drive.items.find((each) => each.id === id);
   if (item === undefined) {
     return response(404, { error: { code: 404, message: 'File not found.', status: 'NOT_FOUND' } });
   }
+  if (sub === 'permissions' && call.method === 'POST') return shared(drive, item, call);
   if (call.method === 'PATCH') {
     // Drive's files.update: the folders to add and remove, comma-separated, as Drive reads them.
     const removed = (call.query['removeParents'] ?? '').split(',').filter((id) => id !== '');
@@ -116,9 +146,76 @@ function answerOf(drive: FakeDrive, call: DriveCall): FetchedResponse {
   return response(200, described(item));
 }
 
+/** `files.create` with a generated id: a second create of one id is Drive's 409. */
+function created(drive: FakeDrive, call: DriveCall): FetchedResponse {
+  const body = call.body as { id: string; name: string; mimeType: string; parents: string[] };
+  if (drive.refusedNames?.includes(body.name)) {
+    return response(403, {
+      error: {
+        code: 403,
+        message: `The user does not have sufficient permissions (${call.authorization}).`,
+        errors: [{ reason: 'insufficientFilePermissions' }],
+      },
+    });
+  }
+  if (drive.items.some((each) => each.id === body.id)) {
+    return response(409, {
+      error: { code: 409, message: 'A file already exists with the provided ID.' },
+    });
+  }
+  drive.items.push({
+    id: body.id,
+    name: body.name,
+    mimeType: body.mimeType,
+    parents: [...body.parents],
+    createdTime: '2026-11-11T09:00:00.000Z',
+  });
+  return response(200, { id: body.id });
+}
+
+/** `permissions.create` for a user; a refused domain answers as a domain's settings do. */
+function shared(drive: FakeDrive, item: FakeItem, call: DriveCall): FetchedResponse {
+  const body = call.body as { type: string; role: string; emailAddress: string };
+  if (drive.refusedDomain !== undefined && body.emailAddress.endsWith(`@${drive.refusedDomain}`)) {
+    return response(400, {
+      error: {
+        code: 400,
+        message: 'Bad Request. User message: "ACL change not allowed."',
+        errors: [{ reason: 'invalidSharingRequest' }],
+      },
+    });
+  }
+  item.permissions = [
+    ...(item.permissions ?? []),
+    {
+      email: body.emailAddress,
+      role: body.role,
+      notified: call.query['sendNotificationEmail'] === 'true',
+    },
+  ];
+  return response(200, { id: `perm-${item.permissions.length}` });
+}
+
 /** `files.list`, reading the one query shape the plugin writes, as Drive pages it. */
 function listOf(drive: FakeDrive, query: Readonly<Record<string, string>>): FetchedResponse {
   const q = query['q'] ?? '';
+  const typed =
+    /^name = '((?:[^'\\]|\\.)*)' and '((?:[^'\\]|\\.)*)' in parents and mimeType = '((?:[^'\\]|\\.)*)' and trashed = false$/.exec(
+      q,
+    );
+  if (typed !== null) {
+    const [name, parent, mime] = [unescaped(typed[1]), unescaped(typed[2]), unescaped(typed[3])];
+    const files = drive.items
+      .filter(
+        (item) =>
+          item.parents.includes(parent) &&
+          item.name === name &&
+          item.mimeType === mime &&
+          item.trashed !== true,
+      )
+      .map(described);
+    return response(200, { files });
+  }
   const named =
     /^'((?:[^'\\]|\\.)*)' in parents and name = '((?:[^'\\]|\\.)*)' and trashed = false$/.exec(q);
   if (named !== null) {

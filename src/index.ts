@@ -1,6 +1,7 @@
 import type { Disposable, PluginHost } from '@tyto/plugin-api';
 
 import { driveCountVerb } from './drive-count.js';
+import { driveFolderVerb } from './drive-folder.js';
 import { driveListVerb } from './drive-list.js';
 import { driveMoveVerb } from './drive-move.js';
 import { driveReadVerb } from './drive-read.js';
@@ -12,8 +13,8 @@ import { sheetWriteVerb } from './sheet-write.js';
 /**
  * The plugin's entry point: registers the recipe verbs: the `google.sheet-rows`,
  * `google.drive-list` and `google.drive-read` sources, the `google.sheet-write` and
- * `google.sheet-sync` sinks, the `google.drive-move` action, and the `google.drive-count` and
- * `google.sheet-lookup` transforms.
+ * `google.sheet-sync` sinks, the `google.drive-move` and `google.drive-folder` actions, and the
+ * `google.drive-count` and `google.sheet-lookup` transforms.
  *
  * Nothing is read at activation: the service account and the project's `google`
  * section are resolved on every call of a verb, so a credential or a folder changed between two
@@ -27,6 +28,7 @@ export function activate(host: PluginHost): Disposable {
     host.registerRecipeVerb(driveListVerb(host)),
     host.registerRecipeVerb(driveReadVerb(host)),
     host.registerRecipeVerb(driveMoveVerb(host)),
+    host.registerRecipeVerb(driveFolderVerb(host)),
     host.registerRecipeVerb(driveCountVerb(host)),
     host.registerRecipeVerb(sheetLookupVerb(host)),
   ];

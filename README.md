@@ -5,18 +5,19 @@ Google Drive from a recipe. Tyto knows no provider (Tyto ADR 0011, ADR 0127): ev
 Google-specific lives here, in its own repository, and reaches Tyto only through the plugin API.
 This repository is public and unlicensed.
 
-Eight recipe verbs, all in the `google` namespace:
+Nine recipe verbs, all in the `google` namespace:
 
-| Verb                  | Kind      | What it does                                                     |
-| --------------------- | --------- | ---------------------------------------------------------------- |
-| `google.sheet-rows`   | source    | One tab of a spreadsheet as a table.                             |
-| `google.sheet-write`  | sink      | Writes the table into a tab, replacing it or under its last row. |
-| `google.sheet-sync`   | sink      | Makes a tab hold the table's rows, matched by a key column.      |
-| `google.drive-list`   | source    | A Drive folder's children, one row per file or folder.           |
-| `google.drive-read`   | source    | What a JSON or text file in Drive holds, as rows.                |
-| `google.drive-move`   | action    | Moves each row's file or folder into a folder under the root.    |
-| `google.drive-count`  | transform | Adds the number of PNG and JPEG files in each row's folder.      |
-| `google.sheet-lookup` | transform | Adds a tab's columns to each row, found by a key column.         |
+| Verb                  | Kind      | What it does                                                       |
+| --------------------- | --------- | ------------------------------------------------------------------ |
+| `google.sheet-rows`   | source    | One tab of a spreadsheet as a table.                               |
+| `google.sheet-write`  | sink      | Writes the table into a tab, replacing it or under its last row.   |
+| `google.sheet-sync`   | sink      | Makes a tab hold the table's rows, matched by a key column.        |
+| `google.drive-list`   | source    | A Drive folder's children, one row per file or folder.             |
+| `google.drive-read`   | source    | What a JSON or text file in Drive holds, as rows.                  |
+| `google.drive-move`   | action    | Moves each row's file or folder into a folder under the root.      |
+| `google.drive-folder` | action    | Creates a folder per row as you, and shares it with listed people. |
+| `google.drive-count`  | transform | Adds the number of PNG and JPEG files in each row's folder.        |
+| `google.sheet-lookup` | transform | Adds a tab's columns to each row, found by a key column.           |
 
 A sink or an action plans: it shows what it would write, and nothing is written until you
 apply the plan.
@@ -42,8 +43,9 @@ the permissions below and asks for your approval.
 | `credentials:service-account` | The service account's JSON key, kept by Tyto, never in a file. |
 | `signin:google`               | Your own Google sign-in, run by Tyto in your browser.          |
 
-The verbs of this version read and write as the service account. The sign-in is declared now so
-that the verbs which create spreadsheets and folders in your own Drive can act as you; see
+The verbs that read, write and move act as the service account. `google.drive-folder`, which
+creates, acts only as you, with your own sign-in, and shares only with the people its table
+lists: the service account is never given access to what it creates. See
 [Signing in as yourself](#signing-in-as-yourself).
 
 ## Credentials
@@ -379,6 +381,47 @@ Each file's folders are read again first. A file that moved since the plan fails
 that adds the destination and removes exactly the folders the plan saw, in shared drives too.
 One batch spends at most 20 s; what it did not reach is `skipped`, and applying again picks it
 up.
+
+## `google.drive-folder`
+
+An action: creates one Drive folder per row, as the signed-in person, and shares it with the
+people the row lists, as a plan you read and then apply. Nothing is created until you apply it.
+
+```
+google.drive-folder name=Client parent=Clients share=Access
+```
+
+| Argument  | What it does                                                                                                             |
+| --------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `name=`   | The column holding each folder's name; `name` by default.                                                                |
+| `parent=` | The folder they go in: a folder directly in the root by its name, or its id or address. The section's `root` by default. |
+| `share=`  | The column naming who gets access: `email:role; email:role`, each role `reader`, `commenter` or `writer`.                |
+| `notify=` | `yes` emails each person Drive's sharing notice; `no`, the default, does not.                                            |
+
+- **As you, and shared only with whom the row lists.** Every request of the plan and of its
+  Apply is signed with your sign-in; nobody signed in is `E_GOOGLE_SIGNIN`. The service account
+  is not used and is shared nothing: a recipe that reads the new folder as it needs the folder
+  shared with it by hand, or a `share=` entry naming it.
+- **The parent stays under `root`**, which is required: a parent outside it, missing, or
+  ambiguous stops the plan. This version creates no parent.
+- **A second run creates nothing twice.** The plan asks Drive for a folder of the row's name
+  directly in the parent, not in the trash; one found is left out, with a warning naming it,
+  and so are its shares. Several found stop the plan. Two rows of one name fail the second.
+- **The link is known before the folder exists.** The plan asks Drive for new ids
+  (`files.generateIds`), so each `create` shows the folder's address and each `share` names it.
+- A row with a blank name, a name over 500 characters, or a `share=` cell that is not
+  `email:role` with one of the three roles fails in the plan, shares included: a folder half
+  shared is worse than none. A blank `share=` cell shares with nobody.
+
+### Applying a creation
+
+Each `create` first asks for the name in the parent again: the folder the plan's id made (an
+Apply run twice) counts as `applied`, and another folder of the name, made since the plan, fails
+with `E_GOOGLE_CHANGED`. A create Drive refuses, or whose answer is lost, is checked by reading
+its id: if the folder is there, it was made. A `share` whose `create` failed in the same batch
+fails with that reason and sends nothing; a share Drive refuses, such as an address outside a
+domain that forbids it, fails alone. One batch spends at most 20 s; what it did not reach is
+`skipped`, and applying again picks it up.
 
 ## `google.drive-count`
 
