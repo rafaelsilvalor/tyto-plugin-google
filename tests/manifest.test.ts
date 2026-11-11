@@ -15,8 +15,8 @@ const manifest = readFileSync(new URL('../tyto-plugin.json', import.meta.url), '
 const entry = new URL('../dist/index.js', import.meta.url).href;
 const load = (): Promise<unknown> => import(entry);
 
-async function harness() {
-  const loaded = await testPlugin({ manifest, load });
+async function harness(signins: Readonly<Record<string, string>> = {}) {
+  const loaded = await testPlugin({ manifest, load, signins });
   if (!loaded.ok) {
     throw new Error(loaded.error.map((item) => `${item.code}: ${item.message}`).join('\n'));
   }
@@ -32,7 +32,7 @@ describe('tyto-plugin.json', () => {
     if (loaded.ok) await loaded.value.close();
   });
 
-  it('reaches only the three Google API hosts, and holds only the service account', async () => {
+  it('reaches only the three Google API hosts, and holds the service account and a sign-in', async () => {
     const plugin = await harness();
     expect(plugin.manifest.name).toBe('google');
     expect(plugin.manifest.namespace).toBe('google');
@@ -43,7 +43,26 @@ describe('tyto-plugin.json', () => {
       'net:sheets.googleapis.com',
       'net:www.googleapis.com',
       'credentials:service-account',
+      'signin:google',
     ]);
+    await plugin.close();
+  });
+
+  it('declares the Google sign-in with no client, which the person supplies (Tyto ADR 0192)', async () => {
+    const plugin = await harness({ google: 'person-token' });
+    expect(plugin.manifest.engine).toBe('>=0.20');
+    expect(plugin.manifest.signin).toEqual({
+      google: {
+        authorize:
+          'https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent',
+        token: 'https://oauth2.googleapis.com/token',
+        scopes: ['openid', 'email', 'https://www.googleapis.com/auth/drive'],
+      },
+    });
+    // Read from the text too: an organisation's client never enters this public repository.
+    expect(manifest).not.toMatch(/client(Id|Secret)/u);
+    expect(plugin.signOut('google')).toBe(true);
+    expect(plugin.signOut('google')).toBe(false);
     await plugin.close();
   });
 

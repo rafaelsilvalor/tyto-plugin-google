@@ -40,9 +40,11 @@ the permissions below and asks for your approval.
 | `net:sheets.googleapis.com`   | The Sheets API: reading and writing a spreadsheet.             |
 | `net:www.googleapis.com`      | The Drive API: listing, reading and moving files.              |
 | `credentials:service-account` | The service account's JSON key, kept by Tyto, never in a file. |
+| `signin:google`               | Your own Google sign-in, run by Tyto in your browser.          |
 
-The plugin signs in as a Google Cloud service account only. Signing in as a person is a later
-version.
+The verbs of this version read and write as the service account. The sign-in is declared now so
+that the verbs which create spreadsheets and folders in your own Drive can act as you; see
+[Signing in as yourself](#signing-in-as-yourself).
 
 ## Credentials
 
@@ -62,6 +64,35 @@ The key must be a `service_account` key with a PKCS#8 `private_key`. Its asserti
 `https://oauth2.googleapis.com/token`, whatever the key's `token_uri` says; a key naming another
 endpoint is refused. The access token it buys is kept in the plugin's memory only, never in a
 file or in Tyto's cache, and is renewed a minute before it expires.
+
+## Signing in as yourself
+
+A service account owns no storage in a person's Drive, so what the plugin creates there it
+creates as you, with your own Google sign-in. Tyto runs that sign-in, not the plugin: the
+browser opens only when you click **Sign in** on the plugins screen, and the plugin receives a
+short-lived access token and never the refresh token, which Tyto keeps in the system keychain
+(Tyto ADR 0174).
+
+The manifest declares Google's endpoints and the scopes it asks for, `openid`, `email` and
+`https://www.googleapis.com/auth/drive`, but **no OAuth client**: this repository is public, and
+a client belongs to whoever registered it. You supply one on the plugins screen (Tyto ADR 0192):
+
+1. In Google Cloud, in a project of your own or your organisation's, open **APIs & Services**,
+   enable the Google Drive API and the Google Sheets API, and set up the OAuth consent screen.
+2. Under **Credentials**, choose **Create credentials**, **OAuth client ID**, application type
+   **Desktop app**. Google shows a client ID and a client secret; a desktop client's secret is
+   not confidential, but it is still the project's to hand out.
+3. In Tyto's desktop app, on the plugins screen, find the `google` sign-in row, type the client
+   ID and the client secret, and choose **Save**. Then choose **Sign in** and finish in the
+   browser.
+
+Saving another client, or clearing it, ends the sign-in made with the previous one. The fields
+are write-only: Tyto keeps the client in the keychain and never shows it again.
+
+When a verb needs your sign-in and nobody is signed in, it fails with `E_GOOGLE_SIGNIN` and says
+to sign in on the plugins screen. The command line has no window to sign in from, so there the
+same verb fails with `E_GOOGLE_SIGNIN` saying the command line cannot sign in; run that step in
+the desktop app. Your access token is redacted from every message, as the service account's is.
 
 ## The `google` section of `.tyto/project.json`
 
