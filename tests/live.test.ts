@@ -117,3 +117,71 @@ describe.skipIf(!configured)('live Google, read-only', () => {
     count('folder items', cell?.table?.rows.length ?? 0);
   }, 60_000);
 });
+
+/**
+ * The creating verbs against the real Google, as a person: one folder with
+ * `google.drive-folder` and one spreadsheet with `google.sheet-create`, in the folder
+ * `GOOGLE_LIVE_PARENT` names, signed with the access token `GOOGLE_LIVE_ACCESS_TOKEN` holds (one
+ * of your own sign-in's, with the Drive scope). Skipped unless both are set. Each item is named
+ * with the run's time, so a run never meets an earlier one's. **It deletes nothing**: remove the
+ * two items by hand afterwards. With `GOOGLE_LIVE_SHARE_EMAIL`, each is shared with that address
+ * as a reader, with no email sent.
+ */
+const ACCESS_TOKEN = process.env['GOOGLE_LIVE_ACCESS_TOKEN'];
+const PARENT = process.env['GOOGLE_LIVE_PARENT'];
+const SHARE_EMAIL = process.env['GOOGLE_LIVE_SHARE_EMAIL'];
+const creating = [ACCESS_TOKEN, PARENT].every((value) => value !== undefined && value !== '');
+
+describe.skipIf(!creating)('live Google, creating as a person', () => {
+  let plugin: PluginHarness | undefined;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+  beforeAll(async () => {
+    const loaded = await testPlugin({
+      manifest,
+      load: () => import(entry),
+      signins: { google: ACCESS_TOKEN ?? '' },
+      section: { root: PARENT },
+      fetch: realFetch,
+      deadlineMs: 30_000,
+    });
+    if (!loaded.ok) throw new Error(loaded.error.map((item) => item.code).join(', '));
+    plugin = loaded.value;
+  });
+  afterAll(async () => {
+    await plugin?.close();
+  });
+
+  for (const verbId of ['google.drive-folder', 'google.sheet-create']) {
+    it(`creates one item with ${verbId}, and a second run plans nothing`, async () => {
+      const share =
+        SHARE_EMAIL === undefined || SHARE_EMAIL === '' ? null : `${SHARE_EMAIL}:reader`;
+      const input = {
+        columns: [
+          { name: 'name', type: 'text' as const, origin: 'live' },
+          { name: 'share', type: 'text' as const, origin: 'live' },
+        ],
+        rows: [
+          {
+            key: 'r1',
+            values: { name: `${stamp} tyto live ${verbId}`, share },
+            provenance: { source: 'live', id: 'r1', fetchedAt: new Date().toISOString() },
+          },
+        ],
+      };
+      const step = `${verbId} share=share`;
+      const planned = await plugin?.runRecipe(step, { input });
+      const plan = planned?.ok ? planned.value.cells.at(-1)?.plan : undefined;
+      expect(plan?.operations.length).toBe(share === null ? 1 : 2);
+      const verb = plugin?.recipes.verbs.get(verbId);
+      const applied = plan === undefined ? undefined : await verb?.apply?.(plan);
+      expect(applied?.ok ? applied.value.operations.map((each) => each.status) : []).toEqual(
+        plan?.operations.map(() => 'applied'),
+      );
+      const again = await plugin?.runRecipe(step, { input });
+      const second = again?.ok ? again.value.cells.at(-1)?.plan : undefined;
+      expect(second?.operations.length).toBe(0);
+      count(`${verbId} operations applied`, plan?.operations.length ?? 0);
+    }, 60_000);
+  }
+});

@@ -5,6 +5,7 @@ import { driveFolderVerb } from './drive-folder.js';
 import { driveListVerb } from './drive-list.js';
 import { driveMoveVerb } from './drive-move.js';
 import { driveReadVerb } from './drive-read.js';
+import { sheetCreateVerb } from './sheet-create.js';
 import { sheetLookupVerb } from './sheet-lookup.js';
 import { sheetRowsVerb } from './sheet-rows.js';
 import { sheetSyncVerb } from './sheet-sync.js';
@@ -13,7 +14,7 @@ import { sheetWriteVerb } from './sheet-write.js';
 /**
  * The plugin's entry point: registers the recipe verbs: the `google.sheet-rows`,
  * `google.drive-list` and `google.drive-read` sources, the `google.sheet-write` and
- * `google.sheet-sync` sinks, the `google.drive-move` and `google.drive-folder` actions, and the
+ * `google.sheet-sync` sinks, the `google.drive-move`, `google.drive-folder` and `google.sheet-create` actions, and the
  * `google.drive-count` and `google.sheet-lookup` transforms.
  *
  * Nothing is read at activation: the service account and the project's `google`
@@ -29,6 +30,7 @@ export function activate(host: PluginHost): Disposable {
     host.registerRecipeVerb(driveReadVerb(host)),
     host.registerRecipeVerb(driveMoveVerb(host)),
     host.registerRecipeVerb(driveFolderVerb(host)),
+    host.registerRecipeVerb(sheetCreateVerb(host)),
     host.registerRecipeVerb(driveCountVerb(host)),
     host.registerRecipeVerb(sheetLookupVerb(host)),
   ];
