@@ -77,6 +77,8 @@ describe('tyto-plugin.json', () => {
       'delete',
       'add',
       'format-tab',
+      'create',
+      'share',
     ]);
     // `move` is both a sync's (a row to another tab) and `google.drive-move`'s.
     const declared = [
@@ -97,7 +99,7 @@ describe('tyto-plugin.json', () => {
 });
 
 describe('activate', () => {
-  it('registers no setting, the three sources, the two sheet sinks, the action and the transforms', async () => {
+  it('registers no setting, the three sources, the two sheet sinks, the two actions and the transforms', async () => {
     const plugin = await harness();
     expect(plugin.host.registry.configurations()).toEqual([]);
     expect(plugin.host.registry.recipeVerbs().map((verb) => `${verb.id}:${verb.kind}`)).toEqual([
@@ -107,6 +109,7 @@ describe('activate', () => {
       'google.drive-list:source',
       'google.drive-read:source',
       'google.drive-move:action',
+      'google.drive-folder:action',
       'google.drive-count:transform',
       'google.sheet-lookup:transform',
     ]);

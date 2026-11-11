@@ -36,6 +36,17 @@ export function childByNameQuery(parentId: string, name: string): string {
 
 // The rest is this plugin's own, built on the ported pieces above.
 
+/**
+ * The items of one type directly in a folder that carry exactly this name, not in the trash:
+ * what a create searches before it plans, so a second run finds the first run's item.
+ */
+export function childByNameAndTypeQuery(parentId: string, name: string, mimeType: string): string {
+  const parent = escapeDriveQueryValue(parentId);
+  const child = escapeDriveQueryValue(name);
+  const type = escapeDriveQueryValue(mimeType);
+  return `name = '${child}' and '${parent}' in parents and mimeType = '${type}' and trashed = false`;
+}
+
 /** What `google.drive-list type=` and `google.drive-read` select. */
 export type DriveType = 'folder' | 'file' | 'image' | 'json';
 export const DRIVE_TYPES: readonly DriveType[] = ['folder', 'file', 'image', 'json'];

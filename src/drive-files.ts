@@ -4,6 +4,7 @@ import type { GoogleClient } from './http.js';
 import {
   FILE_FIELDS,
   LIST_FIELDS,
+  childByNameAndTypeQuery,
   childByNameQuery,
   childrenQuery,
   type DriveType,
@@ -80,8 +81,26 @@ export async function childrenNamed(
   parentId: string,
   name: string,
 ): Promise<GoogleResult<readonly DriveFile[]>> {
+  return listAll(client, childByNameQuery(parentId, name));
+}
+
+/** The items of one type directly in a folder that carry exactly this name, not in the trash. */
+export async function childrenNamedOfType(
+  client: GoogleClient,
+  parentId: string,
+  name: string,
+  mimeType: string,
+): Promise<GoogleResult<readonly DriveFile[]>> {
+  return listAll(client, childByNameAndTypeQuery(parentId, name, mimeType));
+}
+
+/** The first page of a listing, up to 1,000 items: enough to tell none, one and several. */
+async function listAll(
+  client: GoogleClient,
+  query: string,
+): Promise<GoogleResult<readonly DriveFile[]>> {
   const answer = await client.get(DRIVE_FILES, {
-    q: childByNameQuery(parentId, name),
+    q: query,
     fields: LIST_FIELDS,
     pageSize: LIST_PAGE_SIZE,
     supportsAllDrives: true,

@@ -648,6 +648,48 @@ function tokenRefusal(text) {
   return { error: "", description: readErrorBody(text).message ?? "" };
 }
 
+// src/signin.ts
+var SIGNIN_ID = "google";
+var SIGNED_OUT = "Nobody is signed in to Google for this plugin. Sign in to Google on the plugins screen of Tyto's desktop app (set the OAuth client there first if the row asks for one), then run again.";
+var NO_BROWSER = "The command line cannot sign in to Google as a person: it has no window to sign in from. Run this step in the desktop app, after signing in to Google on its plugins screen.";
+function createSigninTokens(host) {
+  let held;
+  const handedOut = /* @__PURE__ */ new Set();
+  return {
+    async token() {
+      if (held === void 0) {
+        const asked = await askHost(host);
+        if (!asked.ok) return asked;
+        held = asked.value;
+      }
+      handedOut.add(held);
+      return googleOk(held);
+    },
+    invalidate() {
+      held = void 0;
+    },
+    secrets: () => [...handedOut]
+  };
+}
+async function askHost(host) {
+  try {
+    return googleOk(await host.signin.accessToken(SIGNIN_ID));
+  } catch (thrown) {
+    const hostCode = hostCodeOf(thrown);
+    if (hostCode === "E_SIGNIN_REQUIRED") {
+      return googleError("E_GOOGLE_SIGNIN", SIGNED_OUT, { hostCode });
+    }
+    if (hostCode === "E_SIGNIN_UNAVAILABLE") {
+      return googleError("E_GOOGLE_SIGNIN", NO_BROWSER, { hostCode });
+    }
+    return googleError(
+      "E_GOOGLE_SIGNIN",
+      `The Google sign-in could not be read: ${messageOf(thrown)}`,
+      hostCode === void 0 ? {} : { hostCode }
+    );
+  }
+}
+
 // src/connect.ts
 async function connect(host, section, through) {
   const config = await resolveGoogleConfig(host, section);
@@ -661,6 +703,11 @@ async function connect(host, section, through) {
   });
   return googleOk({ config: config.value, client });
 }
+var PERSON = "your own Google account, the one signed in on the plugins screen";
+function connectAsPerson(host, through) {
+  const transport = through ?? { fetch: (url, init) => host.fetch(url, init) };
+  return createGoogleClient({ transport, tokens: createSigninTokens(host), clientEmail: PERSON });
+}
 
 // src/drive-query.ts
 var FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
@@ -672,6 +719,12 @@ function childByNameQuery(parentId, name) {
   const parent = escapeDriveQueryValue(parentId);
   const child = escapeDriveQueryValue(name);
   return `'${parent}' in parents and name = '${child}' and trashed = false`;
+}
+function childByNameAndTypeQuery(parentId, name, mimeType) {
+  const parent = escapeDriveQueryValue(parentId);
+  const child = escapeDriveQueryValue(name);
+  const type = escapeDriveQueryValue(mimeType);
+  return `name = '${child}' and '${parent}' in parents and mimeType = '${type}' and trashed = false`;
 }
 var DRIVE_TYPES = ["folder", "file", "image", "json"];
 var FILE_FIELDS = `${ITEM_FIELDS}, size, createdTime, modifiedTime, webViewLink, parents`;
@@ -764,8 +817,14 @@ async function listChildren(client, folderId, type, pageToken) {
   });
 }
 async function childrenNamed(client, parentId, name) {
+  return listAll(client, childByNameQuery(parentId, name));
+}
+async function childrenNamedOfType(client, parentId, name, mimeType) {
+  return listAll(client, childByNameAndTypeQuery(parentId, name, mimeType));
+}
+async function listAll(client, query) {
   const answer = await client.get(DRIVE_FILES, {
-    q: childByNameQuery(parentId, name),
+    q: query,
     fields: LIST_FIELDS,
     pageSize: LIST_PAGE_SIZE,
     supportsAllDrives: true,
@@ -944,16 +1003,16 @@ function columnIndexOf(names, written) {
 function inferType(values, column) {
   let numbers = 0;
   let booleans = 0;
-  let filled = 0;
+  let filled2 = 0;
   for (const row of values.slice(1)) {
     const cell = row[column];
     if (cell === void 0 || cell === "") continue;
-    filled += 1;
+    filled2 += 1;
     if (typeof cell === "number") numbers += 1;
     else if (typeof cell === "boolean") booleans += 1;
   }
-  if (filled > 0 && numbers === filled) return "number";
-  if (filled > 0 && booleans === filled) return "boolean";
+  if (filled2 > 0 && numbers === filled2) return "number";
+  if (filled2 > 0 && booleans === filled2) return "boolean";
   return "text";
 }
 function cellOf(cell, type) {
@@ -1215,13 +1274,13 @@ async function filledRows(client, spreadsheetId, tab, from, to) {
   if (!answer.ok) return answer;
   const rows = recordOf3(answer.value)?.["values"] ?? [];
   if (!Array.isArray(rows)) return malformed2(`the tab '${tab.title}'`, "values that are no list");
-  const filled = /* @__PURE__ */ new Set();
+  const filled2 = /* @__PURE__ */ new Set();
   rows.forEach((row, offset) => {
     if (Array.isArray(row) && row.some((cell) => cell !== null && cell !== "")) {
-      filled.add(from + offset);
+      filled2.add(from + offset);
     }
   });
-  return googleOk(filled);
+  return googleOk(filled2);
 }
 function quotedTitle(title) {
   return `'${title.replace(/'/g, "''")}'`;
@@ -1340,18 +1399,18 @@ var SHEETS2 = "https://sheets.googleapis.com/v4/spreadsheets";
 function budgetedTransport(host, clock) {
   const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
   let outOfTime = false;
-  let refused7 = false;
+  let refused8 = false;
   const expired = () => {
     if (clock.now() > deadline) outOfTime = true;
     return outOfTime;
   };
   return {
     expired,
-    refusedForTime: () => refused7,
+    refusedForTime: () => refused8,
     transport: {
       fetch: (url, init) => {
         if (expired()) {
-          refused7 = true;
+          refused8 = true;
           return Promise.reject(new Error(NOT_REACHED));
         }
         return host.fetch(url, init);
@@ -1452,21 +1511,21 @@ async function applySheetWrites(host, request, clock = systemClock) {
     const rows = rowIndexes();
     const numbers = rows.map((index) => decoded[index].k);
     if (numbers.length > 0) {
-      const filled = await filledRows(
+      const filled2 = await filledRows(
         client,
         spreadsheetId,
         tab,
         Math.min(...numbers),
         Math.max(...numbers)
       );
-      if (!filled.ok) {
+      if (!filled2.ok) {
         if (refusedForTime()) return done();
-        settle(rows, failedWith(filled.error));
+        settle(rows, failedWith(filled2.error));
         return done();
       }
       for (const index of rows) {
         const row = decoded[index];
-        if (filled.value.has(row.k)) {
+        if (filled2.value.has(row.k)) {
           settle(
             [index],
             failed2(
@@ -2025,6 +2084,439 @@ async function countIn(client, folderId) {
   return googleOk(total);
 }
 
+// src/drive-root.ts
+var MAX_LEVELS = 6;
+function rootWalk(client, rootId) {
+  const described = /* @__PURE__ */ new Map();
+  const known = /* @__PURE__ */ new Map();
+  async function describe2(fileId) {
+    const kept = described.get(fileId);
+    if (kept !== void 0) return googleOk(kept);
+    const read = await getFile(client, fileId);
+    if (read.ok) described.set(fileId, read.value);
+    return read;
+  }
+  async function verdict(fileId) {
+    const file = await describe2(fileId);
+    if (!file.ok) return file;
+    const path = [];
+    const seen = /* @__PURE__ */ new Set();
+    let current = fileId;
+    let found;
+    for (let level = 0; found === void 0; level += 1) {
+      if (current === rootId) {
+        found = level;
+        break;
+      }
+      const memo = known.get(current);
+      if (memo !== void 0) {
+        found = typeof memo === "number" ? level + memo : memo;
+        break;
+      }
+      if (seen.has(current)) {
+        found = `its parents loop back to ${current}`;
+        break;
+      }
+      seen.add(current);
+      path.push(current);
+      if (level === MAX_LEVELS) break;
+      const step = await describe2(current);
+      if (!step.ok) return step;
+      const parent = step.value.parents[0];
+      if (parent === void 0) {
+        found = "it is not under the root folder";
+        break;
+      }
+      current = parent;
+    }
+    if (found !== void 0) {
+      for (const [level, each] of path.entries()) {
+        known.set(each, typeof found === "number" ? found - level : found);
+      }
+    }
+    if (typeof found === "number" && found <= MAX_LEVELS) {
+      return googleOk({ under: true, file: file.value });
+    }
+    const why = typeof found === "string" ? found : `the root is not within ${MAX_LEVELS} folders above it`;
+    return googleOk({ under: false, file: file.value, why });
+  }
+  return { client, verdict, describe: describe2 };
+}
+
+// src/drive-create.ts
+var CREATE_WRITE = "create";
+var SHARE_WRITE = "share";
+var CREATE_ARGUMENTS = [
+  { name: "name", type: "text" },
+  { name: "parent", type: "text" },
+  { name: "share", type: "text" },
+  { name: "notify", type: "text", values: ["yes", "no"] }
+];
+var DEFAULT_NAME_COLUMN = "name";
+var MAX_NAME_LENGTH = 500;
+var IDS_PER_CALL = 1e3;
+var SHARE_ROLES = ["reader", "commenter", "writer"];
+var OUT_OF_TIME = "could not check every row in one call's time; narrow the table to fewer rows and run again";
+async function planCreates(host, request, kind, clock = systemClock) {
+  const problem8 = (text) => refused4(argumentsProblem(kind.verb, text));
+  const { table } = request;
+  const nameColumn = columnOf(
+    table,
+    "name",
+    textArgument(request.arguments, "name") ?? DEFAULT_NAME_COLUMN
+  );
+  if (nameColumn.problem !== void 0) return problem8(nameColumn.problem);
+  const shareWritten = textArgument(request.arguments, "share");
+  const shareColumn = shareWritten === void 0 ? void 0 : columnOf(table, "share", shareWritten);
+  if (shareColumn?.problem !== void 0) return problem8(shareColumn.problem);
+  const notify = textArgument(request.arguments, "notify") === "yes";
+  const section = readSection(request.section);
+  if (!section.ok) return refused4(verbFailed(kind.verb, section.error));
+  const rootId = section.value.root;
+  if (rootId === void 0) {
+    return problem8(
+      `needs root in the google section of .tyto/project.json: it creates only under it`
+    );
+  }
+  const budget = budgetedTransport(host, clock);
+  const client = connectAsPerson(host, budget.transport);
+  const walk = rootWalk(client, rootId);
+  const failedFor = (error) => budget.refusedForTime() ? refused4({
+    severity: "error",
+    code: "E_RECIPE_VERB",
+    message: `'${kind.verb}' ${OUT_OF_TIME}.`
+  }) : refused4(verbFailed(kind.verb, error));
+  const parent = await parentOf(walk, rootId, textArgument(request.arguments, "parent"));
+  if (!parent.ok) return "error" in parent ? failedFor(parent.error) : problem8(parent.problem);
+  const parentFolder = parent.folder;
+  const planned = [];
+  const firstRowOf = /* @__PURE__ */ new Map();
+  const alreadyThere = [];
+  for (const row of table.rows) {
+    const written = row.values[nameColumn.name];
+    const name = typeof written === "string" ? written.trim() : "";
+    if (name === "") {
+      planned.push({ row, failure: `${nameColumn.name} holds no name` });
+      continue;
+    }
+    if (name.length > MAX_NAME_LENGTH) {
+      planned.push({
+        row,
+        failure: `the name in ${nameColumn.name} is over ${MAX_NAME_LENGTH} characters`
+      });
+      continue;
+    }
+    const first = firstRowOf.get(name);
+    if (first !== void 0) {
+      planned.push({ row, failure: `'${name}' is the name of row ${first} too` });
+      continue;
+    }
+    firstRowOf.set(name, row.key);
+    const shares = shareColumn === void 0 ? [] : parseShares(row.values[shareColumn.name], shareColumn.name);
+    if (typeof shares === "string") {
+      planned.push({ row, failure: shares });
+      continue;
+    }
+    const existing = await childrenNamedOfType(client, parentFolder.id, name, kind.mimeType);
+    if (!existing.ok) return failedFor(existing.error);
+    if (existing.value.length > 1) {
+      return problem8(
+        `finds ${existing.value.length} items named '${name}' in '${parentFolder.name}' (${parentFolder.id}): ${listed(existing.value.map((each) => each.id))}; keep one, or rename the others, and run again`
+      );
+    }
+    if (existing.value.length === 1) {
+      alreadyThere.push(name);
+      continue;
+    }
+    planned.push({ row, name, shares });
+  }
+  const creating = planned.filter((each) => "name" in each).length;
+  const ids = await generateIds(client, creating);
+  if (!ids.ok) return failedFor(ids.error);
+  const operations = [];
+  let next = 0;
+  for (const each of planned) {
+    if (!("name" in each)) {
+      operations.push(plannedFailure2(each.row, each.failure));
+      continue;
+    }
+    const id = ids.value[next];
+    next += 1;
+    if (id === void 0) return failedFor(malformedIds());
+    const { row, name } = each;
+    const create2 = { c: id, n: name, p: parentFolder.id, m: kind.mimeType };
+    operations.push({
+      write: CREATE_WRITE,
+      rowKey: row.key,
+      description: shortened(
+        `create ${kind.noun} "${name}" in '${parentFolder.name}' (${parentFolder.id}), at ${kind.link(id)}`
+      ),
+      payload: { ...create2 }
+    });
+    for (const share of each.shares) {
+      const payload = { s: id, n: name, e: share.email, r: share.role, notify };
+      operations.push({
+        write: SHARE_WRITE,
+        rowKey: row.key,
+        description: shortened(
+          `share "${name}" with ${share.email} as ${share.role}` + (notify ? ", emailing them" : "")
+        ),
+        payload: { ...payload }
+      });
+    }
+  }
+  if (operations.length > MAX_OPERATIONS) {
+    return problem8(
+      `would plan ${operations.length.toLocaleString("en-US")} operations, over the ${MAX_OPERATIONS.toLocaleString("en-US")} one plan holds; split the table`
+    );
+  }
+  const diagnostics = alreadyThere.length === 0 ? [] : [
+    {
+      severity: "warning",
+      code: "E_RECIPE_VERB",
+      message: shortened(
+        `'${kind.verb}' plans nothing for ${listed(alreadyThere)}: already in '${parentFolder.name}' (${parentFolder.id}).`
+      )
+    }
+  ];
+  return {
+    ok: true,
+    value: {
+      target: `Drive folder '${parentFolder.name}' (${parentFolder.id})`,
+      operations,
+      count: operations.length
+    },
+    diagnostics
+  };
+}
+async function parentOf(walk, rootId, written) {
+  let candidate;
+  if (written === void 0) {
+    const read = await walk.describe(rootId);
+    if (!read.ok) return read;
+    candidate = read.value;
+  } else {
+    if (!/^https:\/\//i.test(written)) {
+      const named = await childrenNamed(walk.client, rootId, written);
+      if (!named.ok) return named;
+      const folders = named.value.filter((each) => each.mimeType === FOLDER_MIME_TYPE);
+      if (folders.length > 1) {
+        return {
+          ok: false,
+          problem: `parent= names '${written}', and ${folders.length} folders of that name are in the root folder: ${listed(folders.map((each) => each.id))}; name one by its id`
+        };
+      }
+      candidate = folders[0];
+    }
+    const id = folderIdOf(written);
+    if (candidate === void 0 && id !== void 0) {
+      const read = await walk.describe(id);
+      if (read.ok) candidate = read.value;
+      else if (read.error.status !== 404) return read;
+    }
+    if (candidate === void 0) {
+      return {
+        ok: false,
+        problem: `parent= names '${written}', which is neither a folder directly in the root folder nor a folder id or address the signed-in account can read; this version creates no parent folder`
+      };
+    }
+  }
+  if (candidate.mimeType !== FOLDER_MIME_TYPE) {
+    return { ok: false, problem: `parent= names '${candidate.name}', which is not a folder` };
+  }
+  const verdict = await walk.verdict(candidate.id);
+  if (!verdict.ok) return verdict;
+  if (!verdict.value.under) {
+    return {
+      ok: false,
+      problem: `parent= names '${candidate.name}', which is not under the root folder ${rootId}: ` + verdict.value.why
+    };
+  }
+  return { ok: true, folder: candidate };
+}
+async function generateIds(client, count) {
+  const ids = [];
+  while (ids.length < count) {
+    const asked = Math.min(IDS_PER_CALL, count - ids.length);
+    const answer = await client.get(`${DRIVE_FILES}/generateIds`, {
+      count: asked,
+      space: "drive",
+      type: "files"
+    });
+    if (!answer.ok) return answer;
+    const record = answer.value;
+    const got = typeof record === "object" && record !== null && !Array.isArray(record) ? record["ids"] : void 0;
+    if (!Array.isArray(got) || got.length !== asked || !got.every((id) => typeof id === "string" && /^[A-Za-z0-9_-]+$/.test(id))) {
+      return { ok: false, error: malformedIds() };
+    }
+    ids.push(...got);
+  }
+  return { ok: true, value: ids };
+}
+function malformedIds() {
+  return {
+    code: "E_GOOGLE_RESPONSE",
+    message: "Google answered files.generateIds without the ids asked for."
+  };
+}
+function parseShares(written, column) {
+  if (written === null || written === void 0) return [];
+  if (typeof written !== "string") return `${column} holds ${String(written)}, not email:role`;
+  const shares = [];
+  for (const part of written.split(";")) {
+    const entry = part.trim();
+    if (entry === "") continue;
+    const colon = entry.lastIndexOf(":");
+    const email = (colon < 0 ? entry : entry.slice(0, colon)).trim();
+    const role = colon < 0 ? "" : entry.slice(colon + 1).trim();
+    if (!/^[^\s@:;,]+@[^\s@:;,]+$/.test(email)) {
+      return `${column} holds '${entry}', which does not start with an email`;
+    }
+    if (!SHARE_ROLES.includes(role)) {
+      return `${column} gives ${email} the role '${role}'; a role is ${SHARE_ROLES.join(", ")}`;
+    }
+    if (shares.some((each) => each.email.toLowerCase() === email.toLowerCase())) {
+      return `${column} names ${email} twice`;
+    }
+    shares.push({ email, role });
+  }
+  return shares;
+}
+async function applyCreates(host, request, clock = systemClock) {
+  const outcomes = request.operations.map(() => void 0);
+  const done = () => ({
+    ok: true,
+    value: {
+      operations: outcomes.map((outcome) => outcome ?? { status: "skipped", reason: NOT_REACHED })
+    },
+    diagnostics: []
+  });
+  const failed3 = (reason) => ({
+    status: "failed",
+    reason: shortened(reason)
+  });
+  const work = [];
+  for (const [index, operation] of request.operations.entries()) {
+    const payload = operation.payload;
+    if (isPlannedFailure(payload)) outcomes[index] = failed3(payload.x);
+    else if (operation.write === CREATE_WRITE && isCreatePayload(payload)) {
+      work.push([index, payload]);
+    } else if (operation.write === SHARE_WRITE && isSharePayload(payload)) {
+      work.push([index, payload]);
+    } else {
+      outcomes[index] = failed3(
+        "E_GOOGLE_PLAN: not a write this plugin planned; run the cell again"
+      );
+    }
+  }
+  if (work.length === 0) return done();
+  const budget = budgetedTransport(host, clock);
+  const client = connectAsPerson(host, budget.transport);
+  const createFailed = /* @__PURE__ */ new Map();
+  for (const [index, payload] of work) {
+    if (budget.expired()) break;
+    if ("c" in payload) {
+      const outcome = await create(client, payload);
+      if (outcome === void 0 || budget.refusedForTime()) break;
+      if (outcome.status === "failed") createFailed.set(payload.c, outcome.reason ?? "failed");
+      outcomes[index] = outcome;
+      continue;
+    }
+    const why = createFailed.get(payload.s);
+    if (why !== void 0) {
+      outcomes[index] = failed3(`creating '${payload.n}' failed, so it is not shared: ${why}`);
+      continue;
+    }
+    const shared = await client.post(
+      `${DRIVE_FILES}/${encodeURIComponent(payload.s)}/permissions`,
+      { type: "user", role: payload.r, emailAddress: payload.e },
+      { sendNotificationEmail: payload.notify, supportsAllDrives: true, fields: "id" }
+    );
+    if (!shared.ok) {
+      if (budget.refusedForTime()) break;
+      outcomes[index] = failed3(describeGoogleError(shared.error));
+      continue;
+    }
+    outcomes[index] = { status: "applied" };
+  }
+  return done();
+}
+async function create(client, payload) {
+  const failed3 = (reason) => ({
+    status: "failed",
+    reason: shortened(reason)
+  });
+  const named = await childrenNamedOfType(client, payload.p, payload.n, payload.m);
+  if (!named.ok) return failed3(describeGoogleError(named.error));
+  if (named.value.some((each) => each.id === payload.c)) return { status: "applied" };
+  if (named.value.length > 0) {
+    return failed3(
+      `E_GOOGLE_CHANGED: '${payload.n}' was created in ${payload.p} since the plan, as ${listed(named.value.map((each) => each.id))}; run the cell again for a new plan`
+    );
+  }
+  const made = await client.post(
+    DRIVE_FILES,
+    { id: payload.c, name: payload.n, mimeType: payload.m, parents: [payload.p] },
+    { supportsAllDrives: true, fields: "id" }
+  );
+  if (made.ok) return { status: "applied" };
+  const there = await getFile(client, payload.c);
+  if (there.ok && there.value.parents.includes(payload.p)) return { status: "applied" };
+  return failed3(describeGoogleError(made.error));
+}
+function isPlannedFailure(value) {
+  return typeof value === "object" && value !== null && typeof value["x"] === "string";
+}
+function recordOf5(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
+}
+var filled = (value) => typeof value === "string" && value !== "";
+function isCreatePayload(value) {
+  const record = recordOf5(value);
+  return record !== void 0 && filled(record["c"]) && filled(record["n"]) && filled(record["p"]) && filled(record["m"]);
+}
+function isSharePayload(value) {
+  const record = recordOf5(value);
+  return record !== void 0 && filled(record["s"]) && filled(record["n"]) && filled(record["e"]) && typeof record["r"] === "string" && SHARE_ROLES.includes(record["r"]) && typeof record["notify"] === "boolean";
+}
+function plannedFailure2(row, reason) {
+  const text = shortened(`E_GOOGLE_PLAN: ${row.key}: ${reason}`);
+  return {
+    write: CREATE_WRITE,
+    rowKey: row.key,
+    description: shortened(`${row.key} (will fail: ${text})`),
+    payload: { x: text }
+  };
+}
+var refused4 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+function columnOf(table, argument, name) {
+  if (table.columns.some((each) => each.name === name)) return { name };
+  const matches = table.columns.filter((each) => each.name.toLowerCase() === name.toLowerCase());
+  if (matches.length === 1 && matches[0] !== void 0) return { name: matches[0].name };
+  return {
+    problem: `${argument}= names the column '${name}', which the table does not have; its columns are ${listed(table.columns.map((each) => each.name))}`
+  };
+}
+
+// src/drive-folder.ts
+var DRIVE_FOLDER = "google.drive-folder";
+var FOLDER_KIND = {
+  verb: DRIVE_FOLDER,
+  noun: "folder",
+  mimeType: FOLDER_MIME_TYPE,
+  link: (id) => `https://drive.google.com/drive/folders/${id}`
+};
+function driveFolderVerb(host, clock = systemClock) {
+  return {
+    id: DRIVE_FOLDER,
+    kind: "action",
+    arguments: CREATE_ARGUMENTS,
+    writes: [CREATE_WRITE, SHARE_WRITE],
+    plan: (request) => planCreates(host, request, FOLDER_KIND, clock),
+    apply: (request) => applyCreates(host, request, clock)
+  };
+}
+
 // src/drive-list.ts
 var DRIVE_LIST = "google.drive-list";
 var DEFAULT_MAX = 1e5;
@@ -2132,65 +2624,6 @@ function readListArguments(values, section) {
   };
 }
 
-// src/drive-root.ts
-var MAX_LEVELS = 6;
-function rootWalk(client, rootId) {
-  const described = /* @__PURE__ */ new Map();
-  const known = /* @__PURE__ */ new Map();
-  async function describe2(fileId) {
-    const kept = described.get(fileId);
-    if (kept !== void 0) return googleOk(kept);
-    const read = await getFile(client, fileId);
-    if (read.ok) described.set(fileId, read.value);
-    return read;
-  }
-  async function verdict(fileId) {
-    const file = await describe2(fileId);
-    if (!file.ok) return file;
-    const path = [];
-    const seen = /* @__PURE__ */ new Set();
-    let current = fileId;
-    let found;
-    for (let level = 0; found === void 0; level += 1) {
-      if (current === rootId) {
-        found = level;
-        break;
-      }
-      const memo = known.get(current);
-      if (memo !== void 0) {
-        found = typeof memo === "number" ? level + memo : memo;
-        break;
-      }
-      if (seen.has(current)) {
-        found = `its parents loop back to ${current}`;
-        break;
-      }
-      seen.add(current);
-      path.push(current);
-      if (level === MAX_LEVELS) break;
-      const step = await describe2(current);
-      if (!step.ok) return step;
-      const parent = step.value.parents[0];
-      if (parent === void 0) {
-        found = "it is not under the root folder";
-        break;
-      }
-      current = parent;
-    }
-    if (found !== void 0) {
-      for (const [level, each] of path.entries()) {
-        known.set(each, typeof found === "number" ? found - level : found);
-      }
-    }
-    if (typeof found === "number" && found <= MAX_LEVELS) {
-      return googleOk({ under: true, file: file.value });
-    }
-    const why = typeof found === "string" ? found : `the root is not within ${MAX_LEVELS} folders above it`;
-    return googleOk({ under: false, file: file.value, why });
-  }
-  return { client, verdict, describe: describe2 };
-}
-
 // src/drive-move.ts
 var DRIVE_MOVE = "google.drive-move";
 var MOVE_WRITE = "move";
@@ -2212,27 +2645,27 @@ function driveMoveVerb(host, clock = systemClock) {
   };
 }
 var problem3 = (text) => argumentsProblem(DRIVE_MOVE, text);
-var refused4 = (diagnostic) => ({ ok: false, error: [diagnostic] });
-var verbRefused = (text) => refused4({ severity: "error", code: "E_RECIPE_VERB", message: `'${DRIVE_MOVE}' ${text}.` });
-var OUT_OF_TIME = "could not check every file in one call's time; narrow the table to fewer rows and run again";
+var refused5 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var verbRefused = (text) => refused5({ severity: "error", code: "E_RECIPE_VERB", message: `'${DRIVE_MOVE}' ${text}.` });
+var OUT_OF_TIME2 = "could not check every file in one call's time; narrow the table to fewer rows and run again";
 async function planDriveMove(host, request, clock = systemClock) {
   const { table } = request;
-  const column = columnOf(table, textArgument(request.arguments, "file") ?? DEFAULT_FILE_COLUMN);
-  if (typeof column !== "string") return refused4(column);
+  const column = columnOf2(table, textArgument(request.arguments, "file") ?? DEFAULT_FILE_COLUMN);
+  if (typeof column !== "string") return refused5(column);
   const to = textArgument(request.arguments, "to");
-  if (to === void 0) return refused4(problem3("needs to=, the folder the files move into"));
+  if (to === void 0) return refused5(problem3("needs to=, the folder the files move into"));
   const section = readSection(request.section);
-  if (!section.ok) return refused4(verbFailed(DRIVE_MOVE, section.error));
+  if (!section.ok) return refused5(verbFailed(DRIVE_MOVE, section.error));
   const rootId = section.value.root;
   if (rootId === void 0) {
-    return refused4(
+    return refused5(
       problem3(
         "needs root in the google section of .tyto/project.json: it moves only files under it"
       )
     );
   }
   if (table.rows.length > MAX_OPERATIONS) {
-    return refused4(
+    return refused5(
       problem3(
         `would move ${table.rows.length.toLocaleString("en-US")} files, over the ${MAX_OPERATIONS.toLocaleString("en-US")} one plan holds; split the table`
       )
@@ -2240,9 +2673,9 @@ async function planDriveMove(host, request, clock = systemClock) {
   }
   const budget = budgetedTransport(host, clock);
   const connection = await connect(host, request.section, budget.transport);
-  if (!connection.ok) return refused4(verbFailed(DRIVE_MOVE, connection.error));
+  if (!connection.ok) return refused5(verbFailed(DRIVE_MOVE, connection.error));
   const walk = rootWalk(connection.value.client, rootId);
-  const failedFor = (error) => budget.refusedForTime() ? verbRefused(OUT_OF_TIME) : refused4(verbFailed(DRIVE_MOVE, error));
+  const failedFor = (error) => budget.refusedForTime() ? verbRefused(OUT_OF_TIME2) : refused5(verbFailed(DRIVE_MOVE, error));
   const hasParentColumn = table.columns.some((each) => each.name === PARENT_COLUMN);
   const destinations = /* @__PURE__ */ new Map();
   const operations = [];
@@ -2253,7 +2686,7 @@ async function planDriveMove(host, request, clock = systemClock) {
     if (destination === void 0) {
       const found = await destinationOf(walk, rootId, parent, to);
       if (!found.ok) {
-        return "error" in found ? failedFor(found.error) : refused4(problem3(found.problem));
+        return "error" in found ? failedFor(found.error) : refused5(problem3(found.problem));
       }
       destination = found.folder;
       destinations.set(parent, destination);
@@ -2262,26 +2695,26 @@ async function planDriveMove(host, request, clock = systemClock) {
     const fileId = typeof written === "string" ? fileIdOf(written) ?? folderIdOf(written) : void 0;
     if (fileId === void 0) {
       operations.push(
-        plannedFailure2(row, `${column} holds ${shown(written)}, not a Drive id or address`)
+        plannedFailure3(row, `${column} holds ${shown(written)}, not a Drive id or address`)
       );
       continue;
     }
     const verdict = await walk.verdict(fileId);
     if (!verdict.ok) {
-      if (budget.refusedForTime()) return verbRefused(OUT_OF_TIME);
-      operations.push(plannedFailure2(row, describeGoogleError(verdict.error)));
+      if (budget.refusedForTime()) return verbRefused(OUT_OF_TIME2);
+      operations.push(plannedFailure3(row, describeGoogleError(verdict.error)));
       continue;
     }
     const { file } = verdict.value;
     if (!verdict.value.under) {
       operations.push(
-        plannedFailure2(row, `'${file.name}' is not under the root folder: ${verdict.value.why}`)
+        plannedFailure3(row, `'${file.name}' is not under the root folder: ${verdict.value.why}`)
       );
       continue;
     }
     if (fileId === rootId || fileId === destination.id) {
       operations.push(
-        plannedFailure2(
+        plannedFailure3(
           row,
           `'${file.name}' is the ${fileId === rootId ? "root folder" : "destination"} itself`
         )
@@ -2382,7 +2815,7 @@ async function applyDriveMoves(host, request, clock = systemClock) {
   const moves = [];
   for (const [index, operation] of request.operations.entries()) {
     const payload = operation.payload;
-    if (isPlannedFailure(payload)) outcomes[index] = failed3(payload.x);
+    if (isPlannedFailure2(payload)) outcomes[index] = failed3(payload.x);
     else if (operation.write !== MOVE_WRITE || !isMovePayload(payload)) {
       outcomes[index] = failed3("E_GOOGLE_PLAN: not a move this plugin planned; run the cell again");
     } else moves.push([index, payload]);
@@ -2434,7 +2867,7 @@ function sameFolders(now, planned) {
   const sorted = [...planned].sort();
   return [...now].sort().every((each, index) => each === sorted[index]);
 }
-function isPlannedFailure(value) {
+function isPlannedFailure2(value) {
   return typeof value === "object" && value !== null && typeof value["x"] === "string";
 }
 function isMovePayload(value) {
@@ -2443,7 +2876,7 @@ function isMovePayload(value) {
   const from = record["from"];
   return typeof record["f"] === "string" && record["f"] !== "" && typeof record["to"] === "string" && record["to"] !== "" && Array.isArray(from) && from.every((each) => typeof each === "string");
 }
-function plannedFailure2(row, reason) {
+function plannedFailure3(row, reason) {
   const text = shortened(`E_GOOGLE_PLAN: ${row.key}: ${reason}`);
   return {
     write: MOVE_WRITE,
@@ -2452,7 +2885,7 @@ function plannedFailure2(row, reason) {
     payload: { x: text }
   };
 }
-function columnOf(table, name) {
+function columnOf2(table, name) {
   if (table.columns.some((each) => each.name === name)) return name;
   const matches = table.columns.filter((each) => each.name.toLowerCase() === name.toLowerCase());
   if (matches.length === 1 && matches[0] !== void 0) return matches[0].name;
@@ -2551,13 +2984,13 @@ function isScalar(value) {
   return value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value);
 }
 function typeOf(values) {
-  const filled = values.filter(
+  const filled2 = values.filter(
     (value) => value !== void 0 && value !== null
   );
-  if (filled.length === 0) return "text";
-  if (filled.every((value) => typeof value === "number")) return "number";
-  if (filled.every((value) => typeof value === "boolean")) return "boolean";
-  if (filled.every((value) => Array.isArray(value))) return "list";
+  if (filled2.length === 0) return "text";
+  if (filled2.every((value) => typeof value === "number")) return "number";
+  if (filled2.every((value) => typeof value === "boolean")) return "boolean";
+  if (filled2.every((value) => Array.isArray(value))) return "list";
   return "text";
 }
 function fit(value, type) {
@@ -2839,8 +3272,8 @@ function entryOf(bytes) {
   } catch {
     return void 0;
   }
-  const entry = recordOf5(parsed);
-  const snapshot = recordOf5(entry?.["snapshot"]);
+  const entry = recordOf6(parsed);
+  const snapshot = recordOf6(entry?.["snapshot"]);
   if (entry?.["v"] !== 1 || typeof entry["version"] !== "string" || typeof entry["fetchedAt"] !== "string" || snapshot === void 0 || typeof snapshot["spreadsheetId"] !== "string" || !Number.isSafeInteger(snapshot["sheetId"]) || typeof snapshot["title"] !== "string" || !isValues(snapshot["values"]) || !isByColumn(snapshot["links"]) || !isByColumn(snapshot["notes"])) {
     return void 0;
   }
@@ -2852,13 +3285,13 @@ function isValues(value) {
   );
 }
 function isByColumn(value) {
-  const columns = recordOf5(value);
+  const columns = recordOf6(value);
   return columns !== void 0 && Object.values(columns).every((rows) => {
-    const byRow = recordOf5(rows);
+    const byRow = recordOf6(rows);
     return byRow !== void 0 && Object.values(byRow).every((text) => typeof text === "string");
   });
 }
-function recordOf5(value) {
+function recordOf6(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 
@@ -3066,40 +3499,40 @@ async function readTabFormat(client, spreadsheetId, tab, width) {
     fields: "sheets(properties(sheetId),tables(tableId,range,columnProperties),bandedRanges(bandedRangeId),data(rowData(values(userEnteredFormat(backgroundColor),dataValidation))))"
   });
   if (!answer.ok) return answer;
-  const sheets = listOf3(recordOf6(answer.value)?.["sheets"]);
-  const sheet = sheets.map(recordOf6).find((each) => {
-    return recordOf6(each?.["properties"])?.["sheetId"] === tab.sheetId;
-  }) ?? recordOf6(sheets[0]);
+  const sheets = listOf3(recordOf7(answer.value)?.["sheets"]);
+  const sheet = sheets.map(recordOf7).find((each) => {
+    return recordOf7(each?.["properties"])?.["sheetId"] === tab.sheetId;
+  }) ?? recordOf7(sheets[0]);
   if (sheet === void 0) {
     return googleError(
       "E_GOOGLE_RESPONSE",
       `Google answered the tab '${tab.title}' with no sheet.`
     );
   }
-  const first = recordOf6(listOf3(sheet["tables"])[0]);
+  const first = recordOf7(listOf3(sheet["tables"])[0]);
   const tableId = first?.["tableId"];
-  const rows = listOf3(recordOf6(listOf3(sheet["data"])[0])?.["rowData"]).map(
-    (row) => listOf3(recordOf6(row)?.["values"]).map(recordOf6)
+  const rows = listOf3(recordOf7(listOf3(sheet["data"])[0])?.["rowData"]).map(
+    (row) => listOf3(recordOf7(row)?.["values"]).map(recordOf7)
   );
   return googleOk({
     ...typeof tableId === "string" ? {
       table: {
         tableId,
-        range: recordOf6(first?.["range"]) ?? {},
+        range: recordOf7(first?.["range"]) ?? {},
         columnProperties: listOf3(first?.["columnProperties"]).flatMap((each) => {
-          const property = recordOf6(each);
+          const property = recordOf7(each);
           return property === void 0 ? [] : [property];
         })
       }
     } : {},
     banded: listOf3(sheet["bandedRanges"]).flatMap((each) => {
-      const id = recordOf6(each)?.["bandedRangeId"];
+      const id = recordOf7(each)?.["bandedRangeId"];
       return typeof id === "number" ? [id] : [];
     }),
     header: (rows[0] ?? []).map(
-      (cell) => hexOf(recordOf6(recordOf6(cell?.["userEnteredFormat"])?.["backgroundColor"]))
+      (cell) => hexOf(recordOf7(recordOf7(cell?.["userEnteredFormat"])?.["backgroundColor"]))
     ),
-    validation: (rows[1] ?? []).map((cell) => listValues(recordOf6(cell?.["dataValidation"])))
+    validation: (rows[1] ?? []).map((cell) => listValues(recordOf7(cell?.["dataValidation"])))
   });
 }
 function formatRequests(sheetId, want, now, lastRow) {
@@ -3220,13 +3653,13 @@ function tableValues(table, at) {
   const index = at - (table.range.startColumnIndex ?? 0);
   const property = table.columnProperties.find((each) => (each["columnIndex"] ?? 0) === index);
   if (property?.["columnType"] !== "DROPDOWN") return void 0;
-  return listValues(recordOf6(property["dataValidationRule"]));
+  return listValues(recordOf7(property["dataValidationRule"]));
 }
 function listValues(rule) {
-  const condition = recordOf6(rule?.["condition"]);
+  const condition = recordOf7(rule?.["condition"]);
   if (condition?.["type"] !== "ONE_OF_LIST") return void 0;
   return listOf3(condition["values"]).map(
-    (each) => String(recordOf6(each)?.["userEnteredValue"] ?? "")
+    (each) => String(recordOf7(each)?.["userEnteredValue"] ?? "")
   );
 }
 function sameList(a, b) {
@@ -3245,7 +3678,7 @@ function colourOf(hex) {
   const channel = (at) => parseInt(hex.slice(at, at + 2), 16) / 255;
   return { red: channel(1), green: channel(3), blue: channel(5) };
 }
-function recordOf6(value) {
+function recordOf7(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value : void 0;
 }
 function listOf3(value) {
@@ -3758,23 +4191,23 @@ function sheetLookupVerb(host) {
     transform: (request) => lookUp(host, request)
   };
 }
-var refused5 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var refused6 = (diagnostic) => ({ ok: false, error: [diagnostic] });
 var problem5 = (text) => argumentsProblem(SHEET_LOOKUP, text);
 var listOf4 = (written) => [...new Set((written ?? "").split(",").map((item) => item.trim()))].filter((item) => item !== "");
 async function lookUp(host, request) {
   const { table } = request;
   const tabName = textArgument(request.arguments, "tab");
-  if (tabName === void 0) return refused5(problem5("needs tab=, the tab to look rows up in"));
+  if (tabName === void 0) return refused6(problem5("needs tab=, the tab to look rows up in"));
   const keyName = textArgument(request.arguments, "key");
-  if (keyName === void 0) return refused5(problem5("needs key=, the column to match rows by"));
+  if (keyName === void 0) return refused6(problem5("needs key=, the column to match rows by"));
   const wanted = listOf4(textArgument(request.arguments, "columns"));
-  if (wanted.length === 0) return refused5(problem5("needs columns=, the tab columns to add"));
+  if (wanted.length === 0) return refused6(problem5("needs columns=, the tab columns to add"));
   const links = listOf4(textArgument(request.arguments, "links"));
   const notes = listOf4(textArgument(request.arguments, "notes"));
   const prefix = request.arguments["prefix"] === void 0 ? DEFAULT_PREFIX : String(request.arguments["prefix"]).trim();
   const keyColumn = table.columns.find((each) => each.name === keyName) ?? table.columns.find((each) => each.name.toLowerCase() === keyName.toLowerCase());
   if (keyColumn === void 0) {
-    return refused5(
+    return refused6(
       problem5(
         `key= names the column '${keyName}', which the table does not have; its columns are ` + listed(table.columns.map((each) => each.name))
       )
@@ -3785,9 +4218,9 @@ async function lookUp(host, request) {
     request.arguments["spreadsheet"],
     request.section
   );
-  if (typeof spreadsheetId !== "string") return refused5(spreadsheetId);
+  if (typeof spreadsheetId !== "string") return refused6(spreadsheetId);
   const connection = await connect(host, request.section);
-  if (!connection.ok) return refused5(verbFailed(SHEET_LOOKUP, connection.error));
+  if (!connection.ok) return refused6(verbFailed(SHEET_LOOKUP, connection.error));
   const read = await firstSnapshot(
     host,
     SHEET_LOOKUP,
@@ -3798,14 +4231,14 @@ async function lookUp(host, request) {
     // current Drive version, which any edit to the spreadsheet raises.
     false
   );
-  if ("severity" in read) return refused5(read);
+  if ("severity" in read) return refused6(read);
   const { snapshot, names, plan } = read;
   const kc = plan.key ?? 0;
   const added = [];
   for (const written of wanted) {
     const at = columnIndexOf(names, written);
     if (at === void 0)
-      return refused5(notInTab(SHEET_LOOKUP, "columns", written, names, snapshot.title));
+      return refused6(notInTab(SHEET_LOOKUP, "columns", written, names, snapshot.title));
     const type = inferType(snapshot.values, at);
     added.push({
       column: { name: `${prefix}${names[at] ?? ""}`, type, origin: ORIGIN },
@@ -3828,7 +4261,7 @@ async function lookUp(host, request) {
   for (const { column } of added) {
     const lowered = column.name.toLowerCase();
     if (taken.has(lowered)) {
-      return refused5(
+      return refused6(
         problem5(
           `would add the column '${column.name}', which the table already has; name another prefix=`
         )
@@ -3843,7 +4276,7 @@ async function lookUp(host, request) {
     const sheetRow = index + 1;
     const before = rowOfKey.get(key);
     if (before !== void 0) {
-      return refused5(
+      return refused6(
         problem5(
           `rows ${before} and ${sheetRow} of the tab '${snapshot.title}' both hold '${key}' in ${names[kc] ?? ""}; a key must be unique, and the lookup does not guess which row is it`
         )
@@ -4036,7 +4469,7 @@ function sheetSyncVerb(host, clock = systemClock) {
   };
 }
 var problem7 = (text) => argumentsProblem(SHEET_SYNC, text);
-var refused6 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var refused7 = (diagnostic) => ({ ok: false, error: [diagnostic] });
 var warning = (message) => ({
   severity: "warning",
   code: "E_RECIPE_VERB",
@@ -4053,38 +4486,38 @@ async function planSheetSync(host, request) {
     request.arguments["spreadsheet"],
     request.section
   );
-  if (typeof spreadsheetId !== "string") return refused6(spreadsheetId);
+  if (typeof spreadsheetId !== "string") return refused7(spreadsheetId);
   const columns = writeColumns(table, "");
-  if (!Array.isArray(columns)) return refused6(columns);
+  if (!Array.isArray(columns)) return refused7(columns);
   const tableColumn = (name) => columns.find((column) => column.name.toLowerCase() === name.toLowerCase());
   const keyColumn = tableColumn(text("key"));
   if (keyColumn === void 0) {
-    return refused6(problem7(`key= names '${text("key")}', which is not a column of the table`));
+    return refused7(problem7(`key= names '${text("key")}', which is not a column of the table`));
   }
   const moveName = text("move");
   const moveColumn = moveName === "" ? void 0 : tableColumn(moveName);
   if (moveName !== "" && moveColumn === void 0) {
-    return refused6(problem7(`move= names '${moveName}', which is not a column of the table`));
+    return refused7(problem7(`move= names '${moveName}', which is not a column of the table`));
   }
   const connection = await connect(host, request.section);
-  if (!connection.ok) return refused6(verbFailed(SHEET_SYNC, connection.error));
+  if (!connection.ok) return refused7(verbFailed(SHEET_SYNC, connection.error));
   const { client } = connection.value;
   const tabs = await readGridTabs(client, spreadsheetId);
-  if (!tabs.ok) return refused6(verbFailed(SHEET_SYNC, tabs.error));
+  if (!tabs.ok) return refused7(verbFailed(SHEET_SYNC, tabs.error));
   const tab = pickTab(tabs.value, text("tab"));
-  if (typeof tab === "string") return refused6(problem7(tab));
+  if (typeof tab === "string") return refused7(problem7(tab));
   const values = await readValues(client, spreadsheetId, tab);
-  if (!values.ok) return refused6(verbFailed(SHEET_SYNC, values.error));
+  if (!values.ok) return refused7(verbFailed(SHEET_SYNC, values.error));
   const names = headerOf2(values.value, tab.title);
-  if (typeof names === "string") return refused6(problem7(names));
+  if (typeof names === "string") return refused7(problem7(names));
   const kc = columnIndexOf(names, keyColumn.name);
   if (kc === void 0) {
-    return refused6(problem7(`the tab '${tab.title}' has no column '${keyColumn.name}' in row 1`));
+    return refused7(problem7(`the tab '${tab.title}' has no column '${keyColumn.name}' in row 1`));
   }
   const keep = listOf5(text("keep")).map((name) => [name, columnIndexOf(names, name)]);
   const unknownKeep = keep.filter(([, index]) => index === void 0).map(([name]) => name);
   if (unknownKeep.length > 0) {
-    return refused6(
+    return refused7(
       problem7(`keep= names ${listed(unknownKeep)}, which the tab '${tab.title}' has no column for`)
     );
   }
@@ -4100,7 +4533,7 @@ async function planSheetSync(host, request) {
     }
   }
   if (unplaced.length > 0) {
-    return refused6(
+    return refused7(
       problem7(
         `cannot write ${listed(unplaced)}: the tab '${tab.title}' has no column of that name in row 1. Its columns are ${listed(names)}`
       )
@@ -4118,7 +4551,7 @@ async function planSheetSync(host, request) {
     }
     const before = inTab.get(key);
     if (before !== void 0) {
-      return refused6(
+      return refused7(
         problem7(
           `rows ${before.number} and ${number} of the tab '${tab.title}' both hold '${key}' in ${names[kc] ?? ""}; a key must be unique, and the sync does not guess which row is it`
         )
@@ -4140,7 +4573,7 @@ async function planSheetSync(host, request) {
       continue;
     }
     if (inTable.has(key)) {
-      return refused6(
+      return refused7(
         problem7(`the table holds '${key}' in ${keyColumn.name} twice; a key must be unique`)
       );
     }
@@ -4163,14 +4596,14 @@ async function planSheetSync(host, request) {
     const found = pickTab(tabs.value, title);
     if (typeof found === "string") continue;
     const read = await readValues(client, spreadsheetId, found);
-    if (!read.ok) return refused6(verbFailed(SHEET_SYNC, read.error));
+    if (!read.ok) return refused7(verbFailed(SHEET_SYNC, read.error));
     tabsRead.set(found.title, read.value);
     if (read.value.length === 0) continue;
     const archivedNames = headerOf2(read.value, found.title);
-    if (typeof archivedNames === "string") return refused6(problem7(archivedNames));
+    if (typeof archivedNames === "string") return refused7(problem7(archivedNames));
     const at = columnIndexOf(archivedNames, keyColumn.name);
     if (at === void 0) {
-      return refused6(
+      return refused7(
         problem7(`archived= names '${found.title}', which has no column '${keyColumn.name}'`)
       );
     }
@@ -4204,7 +4637,7 @@ async function planSheetSync(host, request) {
     { links: names.map((_, index) => index), notes: [] },
     lastRow
   );
-  if (!extras.ok) return refused6(verbFailed(SHEET_SYNC, extras.error));
+  if (!extras.ok) return refused7(verbFailed(SHEET_SYNC, extras.error));
   const linkAt = (at, number) => extras.value.links[String(at)]?.[String(number)];
   const digestOf2 = (row) => rowDigest(row.cells, rowLinks(extras.value.links, row.number));
   const changedOf = (cells, row) => {
@@ -4293,7 +4726,7 @@ async function planSheetSync(host, request) {
     let read = tabsRead.get(found.title);
     if (read === void 0) {
       const answer = await readValues(client, spreadsheetId, found);
-      if (!answer.ok) return refused6(verbFailed(SHEET_SYNC, answer.error));
+      if (!answer.ok) return refused7(verbFailed(SHEET_SYNC, answer.error));
       read = answer.value;
       tabsRead.set(found.title, read);
     }
@@ -4312,7 +4745,7 @@ async function planSheetSync(host, request) {
       description: `move ${key} (row ${row.number}) to the tab '${destination}'` + (changed2.length === 0 ? "" : `, writing ${shownChanges(changed2, row)}`)
     };
     if (typeof header === "string") return { ...base, failure: `E_GOOGLE_PLAN: ${header}` };
-    const filled = (at) => {
+    const filled2 = (at) => {
       const cell = cells.get(at);
       if (cells.has(at)) return cell !== null;
       return (row.cells[at] ?? "") !== "" || linkAt(at, row.number) !== void 0;
@@ -4322,7 +4755,7 @@ async function planSheetSync(host, request) {
     names.forEach((name, at) => {
       const to = columnIndexOf(header, name);
       if (to !== void 0) pairs.push([at, to]);
-      else if (filled(at)) missing.push(name);
+      else if (filled2(at)) missing.push(name);
     });
     if (missing.length > 0) {
       return {
@@ -4407,7 +4840,7 @@ async function planSheetSync(host, request) {
     lastRow - writes(deletes) - writes(moveDrafts) + writes(addDrafts),
     false
   );
-  if (!formatted.ok) return refused6(verbFailed(SHEET_SYNC, formatted.error));
+  if (!formatted.ok) return refused7(verbFailed(SHEET_SYNC, formatted.error));
   for (const [destination, header] of destinations) {
     if (typeof header === "string") continue;
     const into = moveDrafts.filter(
@@ -4421,7 +4854,7 @@ async function planSheetSync(host, request) {
       (tabsRead.get(found.title)?.length ?? 1) + into,
       true
     );
-    if (!done.ok) return refused6(verbFailed(SHEET_SYNC, done.error));
+    if (!done.ok) return refused7(verbFailed(SHEET_SYNC, done.error));
   }
   const ordered = [
     ...tabDrafts,
@@ -4432,7 +4865,7 @@ async function planSheetSync(host, request) {
     ...formatDrafts
   ];
   if (ordered.length > MAX_OPERATIONS) {
-    return refused6(
+    return refused7(
       problem7(
         `would plan ${ordered.length.toLocaleString("en-US")} operations, over the ${MAX_OPERATIONS.toLocaleString("en-US")} one plan holds; split the table`
       )
@@ -4540,6 +4973,7 @@ function activate(host) {
     host.registerRecipeVerb(driveListVerb(host)),
     host.registerRecipeVerb(driveReadVerb(host)),
     host.registerRecipeVerb(driveMoveVerb(host)),
+    host.registerRecipeVerb(driveFolderVerb(host)),
     host.registerRecipeVerb(driveCountVerb(host)),
     host.registerRecipeVerb(sheetLookupVerb(host))
   ];

@@ -18,5 +18,16 @@
       "scopes": ["openid", "email", "https://www.googleapis.com/auth/drive"]
     }
   },
-  "writes": ["clear", "write-row", "add-tab", "update", "move", "delete", "add", "format-tab"]
+  "writes": [
+    "clear",
+    "write-row",
+    "add-tab",
+    "update",
+    "move",
+    "delete",
+    "add",
+    "format-tab",
+    "create",
+    "share"
+  ]
 }
