@@ -5,17 +5,18 @@ Google Drive from a recipe. Tyto knows no provider (Tyto ADR 0011, ADR 0127): ev
 Google-specific lives here, in its own repository, and reaches Tyto only through the plugin API.
 This repository is public and unlicensed.
 
-Seven recipe verbs, all in the `google` namespace:
+Eight recipe verbs, all in the `google` namespace:
 
-| Verb                 | Kind      | What it does                                                     |
-| -------------------- | --------- | ---------------------------------------------------------------- |
-| `google.sheet-rows`  | source    | One tab of a spreadsheet as a table.                             |
-| `google.sheet-write` | sink      | Writes the table into a tab, replacing it or under its last row. |
-| `google.sheet-sync`  | sink      | Makes a tab hold the table's rows, matched by a key column.      |
-| `google.drive-list`  | source    | A Drive folder's children, one row per file or folder.           |
-| `google.drive-read`  | source    | What a JSON or text file in Drive holds, as rows.                |
-| `google.drive-move`  | action    | Moves each row's file or folder into a folder under the root.    |
-| `google.drive-count` | transform | Adds the number of PNG and JPEG files in each row's folder.      |
+| Verb                  | Kind      | What it does                                                     |
+| --------------------- | --------- | ---------------------------------------------------------------- |
+| `google.sheet-rows`   | source    | One tab of a spreadsheet as a table.                             |
+| `google.sheet-write`  | sink      | Writes the table into a tab, replacing it or under its last row. |
+| `google.sheet-sync`   | sink      | Makes a tab hold the table's rows, matched by a key column.      |
+| `google.drive-list`   | source    | A Drive folder's children, one row per file or folder.           |
+| `google.drive-read`   | source    | What a JSON or text file in Drive holds, as rows.                |
+| `google.drive-move`   | action    | Moves each row's file or folder into a folder under the root.    |
+| `google.drive-count`  | transform | Adds the number of PNG and JPEG files in each row's folder.      |
+| `google.sheet-lookup` | transform | Adds a tab's columns to each row, found by a key column.         |
 
 A sink or an action plans: it shows what it would write, and nothing is written until you
 apply the plan.
@@ -366,6 +367,41 @@ google.drive-count folder=Folder
 - A blank cell gets an empty count; a cell that is not a folder id or address is refused.
 - Each distinct folder is counted once. More than 100 distinct folders in one table is refused
   before any request: narrow the table first.
+
+## `google.sheet-lookup`
+
+A transform: adds columns of one tab to each row of the table, found by the row's key. It is how
+a recipe that starts from another source sees what a person typed in a synced sheet, since a
+recipe carries one table and `google.sheet-rows` only starts one.
+
+```
+google.sheet-lookup tab=Tasks key=ID columns=Status,Owner
+```
+
+| Argument       | What it does                                                                       |
+| -------------- | ---------------------------------------------------------------------------------- |
+| `spreadsheet=` | The spreadsheet, as its id or its address; the section's `spreadsheet` by default. |
+| `tab=`         | The tab, by its name, as `google.sheet-rows` finds it; required.                   |
+| `key=`         | The table's column to match by, against the tab's column of the same name.         |
+| `columns=`     | The tab's columns to add, comma-separated; required.                               |
+| `prefix=`      | What each added column's name starts with; `sheet_` by default.                    |
+| `links=`       | Tab columns whose cell links become a `<prefix><column>_url` link column.          |
+| `notes=`       | Tab columns whose cell notes become a `<prefix><column>_note` text column.         |
+
+- **Matching** is by the key's text, trimmed and with its case kept, exactly as
+  `google.sheet-sync` matches rows: a number cell matches its digits. The table's column and the
+  tab's column carry the same name (case ignored); a lookup across two differently named columns
+  is not offered yet.
+- A row whose key the tab lacks, or whose key is blank, gets null in every added column. A tab
+  row with a blank key matches nothing. **A key the tab holds twice is refused**, naming both
+  rows: the lookup never guesses which row is meant.
+- Added columns are typed as `google.sheet-rows` types them, and are named `sheet_<column>` (the
+  tab's header spelling) or with `prefix=`. A name the table already has is refused, never
+  overwritten.
+- **The tab is read as `google.sheet-rows` reads it**: once per step, from the same cache entry
+  while Drive gives the same `version`, which any edit to the spreadsheet raises. Running again
+  without cache does not reach a transform yet (Tyto's plugin API hands it to sources only), so
+  the lookup relies on that version.
 
 ## Retries
 

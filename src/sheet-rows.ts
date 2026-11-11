@@ -3,18 +3,18 @@ import type { PluginHost, RecipeVerbContribution } from '@tyto/plugin-api';
 import { readSection, spreadsheetIdOf } from './config.js';
 import { connect } from './connect.js';
 import { decodeCursor, encodeCursor, fingerprint, type SheetCursor } from './cursor.js';
-import type { GoogleResult } from './errors.js';
 import type { GoogleClient } from './http.js';
-import { readCache, writeCache, type CacheEntry } from './sheet-cache.js';
-import { columnIndexOf, gridOf, headerOf, type ReadPlan, type Snapshot } from './sheet-grid.js';
+import { readCache } from './sheet-cache.js';
+import { gridOf } from './sheet-grid.js';
 import {
-  pickTab,
-  readCellExtras,
-  readTabs,
-  readValues,
-  readVersion,
-  type Tab,
-} from './sheet-snapshot.js';
+  covers,
+  firstSnapshot,
+  liveSnapshot,
+  readOf,
+  type Read,
+  type TabAsk,
+} from './sheet-read.js';
+import { readTabs } from './sheet-snapshot.js';
 import {
   argumentsProblem,
   failed,
@@ -62,12 +62,7 @@ export function sheetRowsVerb(host: SheetRowsHost): RecipeVerbContribution {
   };
 }
 
-interface Asked {
-  readonly spreadsheetId: string;
-  readonly tab?: string;
-  readonly key?: string;
-  readonly links: readonly string[];
-  readonly notes: readonly string[];
+interface Asked extends TabAsk {
   readonly max: number;
 }
 
@@ -107,7 +102,7 @@ export async function sheetRowsPage(
 
   const read =
     cursor === undefined
-      ? await firstSnapshot(host, client, asked, request.refresh === true)
+      ? await firstSnapshot(host, SHEET_ROWS, client, asked, request.refresh === true)
       : await laterSnapshot(host, client, asked, cursor);
   if ('severity' in read) return failed(read);
   const { snapshot, names, plan, fetchedAt } = read;
@@ -144,59 +139,6 @@ function pageOf(rows: readonly Row[], start: number): Row[] {
   return page;
 }
 
-interface Read {
-  readonly snapshot: Snapshot;
-  readonly names: readonly string[];
-  readonly plan: ReadPlan;
-  readonly fetchedAt: string;
-  readonly digest: string;
-}
-
-/**
- * The first page's snapshot: the cached one when Drive's `version` is still the one it was
- * read at and it holds the links and notes asked for, else a live read, which is then cached.
- * `refresh` skips the cache and still fills it.
- */
-async function firstSnapshot(
-  host: SheetRowsHost,
-  client: GoogleClient,
-  asked: Asked,
-  refresh: boolean,
-): Promise<Read | Diagnostic> {
-  const tabs = await readTabs(client, asked.spreadsheetId);
-  if (!tabs.ok) return verbFailed(SHEET_ROWS, tabs.error);
-  const tab = pickTab(tabs.value, asked.tab);
-  if (typeof tab === 'string') return problem(tab);
-
-  const version = await readVersion(client, asked.spreadsheetId);
-  if (!version.ok) {
-    host.log.warn(
-      `${SHEET_ROWS} read the tab without its cache: Drive did not give the file's version ` +
-        `(${version.error.code}: ${version.error.message})`,
-    );
-  }
-  if (version.ok && !refresh) {
-    const entry = await readCache(host, SHEET_ROWS, asked.spreadsheetId, tab.sheetId);
-    if (entry !== undefined && entry.version === version.value) {
-      const cached = readOf(entry.snapshot, asked, entry.fetchedAt);
-      if ('severity' in cached || covers(entry.snapshot, cached.plan)) return cached;
-    }
-  }
-
-  const live = await liveSnapshot(client, asked, tab);
-  if ('severity' in live) return live;
-  if (version.ok) {
-    const entry: CacheEntry = {
-      v: 1,
-      version: version.value,
-      fetchedAt: live.fetchedAt,
-      snapshot: live.snapshot,
-    };
-    await writeCache(host, SHEET_ROWS, entry);
-  }
-  return live;
-}
-
 /**
  * A later page's snapshot: the cached one whose digest the cursor carries, else the tab read
  * again, which must be the same; anything else is the sheet edited between two pages.
@@ -214,7 +156,7 @@ async function laterSnapshot(
   };
   const entry = await readCache(host, SHEET_ROWS, asked.spreadsheetId, cursor.s);
   if (entry !== undefined) {
-    const cached = readOf(entry.snapshot, asked, entry.fetchedAt);
+    const cached = readOf(SHEET_ROWS, entry.snapshot, asked, entry.fetchedAt);
     if (
       !('severity' in cached) &&
       covers(entry.snapshot, cached.plan) &&
@@ -227,105 +169,9 @@ async function laterSnapshot(
   if (!tabs.ok) return verbFailed(SHEET_ROWS, tabs.error);
   const tab = tabs.value.find((each) => each.sheetId === cursor.s);
   if (tab === undefined) return changed;
-  const live = await liveSnapshot(client, asked, tab);
+  const live = await liveSnapshot(SHEET_ROWS, client, asked, tab);
   if ('severity' in live) return live;
   return live.digest === cursor.d ? live : changed;
-}
-
-/** The tab read from Google: its values, then the links and notes asked for. */
-async function liveSnapshot(
-  client: GoogleClient,
-  asked: Asked,
-  tab: Tab,
-): Promise<Read | Diagnostic> {
-  const values = await readValues(client, asked.spreadsheetId, tab);
-  if (!values.ok) return verbFailed(SHEET_ROWS, values.error);
-  const bare: Snapshot = {
-    spreadsheetId: asked.spreadsheetId,
-    sheetId: tab.sheetId,
-    title: tab.title,
-    values: values.value,
-    links: {},
-    notes: {},
-  };
-  const fetchedAt = new Date().toISOString();
-  const resolved = readOf(bare, asked, fetchedAt);
-  if ('severity' in resolved) return resolved;
-  const extras: GoogleResult<Pick<Snapshot, 'links' | 'notes'>> = await readCellExtras(
-    client,
-    asked.spreadsheetId,
-    tab,
-    resolved.plan,
-    values.value.length,
-  );
-  if (!extras.ok) return verbFailed(SHEET_ROWS, extras.error);
-  return readOf({ ...bare, ...extras.value }, asked, fetchedAt) as Read;
-}
-
-/** The snapshot with its header read and the step's columns found in it. */
-function readOf(snapshot: Snapshot, asked: Asked, fetchedAt: string): Read | Diagnostic {
-  const names = headerOf(snapshot.values, snapshot.title);
-  if (typeof names === 'string') {
-    return {
-      severity: 'error',
-      code: 'E_RECIPE_VERB',
-      message: `'${SHEET_ROWS}' failed: ${names}.`,
-    };
-  }
-  const find = (argument: string, written: string): number | Diagnostic => {
-    const index = columnIndexOf(names, written);
-    if (index !== undefined) return index;
-    const listed = names
-      .slice(0, 20)
-      .map((name) => `'${name}'`)
-      .join(', ');
-    return problem(
-      `${argument}= names '${written}', which is not a column of the tab '${snapshot.title}'; ` +
-        `its columns are ${listed}${names.length > 20 ? ', …' : ''}`,
-    );
-  };
-  let key: number | undefined;
-  if (asked.key !== undefined) {
-    const found = find('key', asked.key);
-    if (typeof found !== 'number') return found;
-    key = found;
-  }
-  const links: number[] = [];
-  for (const written of asked.links) {
-    const found = find('links', written);
-    if (typeof found !== 'number') return found;
-    if (!links.includes(found)) links.push(found);
-  }
-  const notes: number[] = [];
-  for (const written of asked.notes) {
-    const found = find('notes', written);
-    if (typeof found !== 'number') return found;
-    if (!notes.includes(found)) notes.push(found);
-  }
-  const plan: ReadPlan = { ...(key === undefined ? {} : { key }), links, notes };
-  return { snapshot, names, plan, fetchedAt, digest: digestOf(snapshot, plan) };
-}
-
-/** Whether the snapshot holds the links and notes of every column the plan asks for. */
-function covers(snapshot: Snapshot, plan: ReadPlan): boolean {
-  return (
-    plan.links.every((column) => snapshot.links[String(column)] !== undefined) &&
-    plan.notes.every((column) => snapshot.notes[String(column)] !== undefined)
-  );
-}
-
-/** What a page is cut from, fingerprinted: the values and the asked columns' links and notes. */
-function digestOf(snapshot: Snapshot, plan: ReadPlan): string {
-  const pick = (byColumn: Snapshot['links'], columns: readonly number[]) =>
-    columns.map((column) => [column, byColumn[String(column)] ?? null]);
-  return fingerprint(
-    JSON.stringify([
-      snapshot.sheetId,
-      snapshot.values,
-      pick(snapshot.links, plan.links),
-      pick(snapshot.notes, plan.notes),
-    ]),
-  );
 }
 
 /** The step's arguments, checked, with the spreadsheet from the section when none is named. */

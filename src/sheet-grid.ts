@@ -105,7 +105,7 @@ export function inferType(values: Snapshot['values'], column: number): ColumnTyp
 }
 
 /** A cell under its column's type: a number or boolean in a text column becomes its text. */
-function cellOf(cell: RawCell | undefined, type: ColumnType): CellValue {
+export function cellOf(cell: RawCell | undefined, type: ColumnType): CellValue {
   if (cell === undefined || cell === '') return null;
   if (type !== 'text') return cell;
   if (typeof cell === 'boolean') return cell ? 'TRUE' : 'FALSE';

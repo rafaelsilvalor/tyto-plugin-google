@@ -78,7 +78,7 @@ describe('tyto-plugin.json', () => {
 });
 
 describe('activate', () => {
-  it('registers no setting, the three sources, the two sheet sinks, the action and the transform', async () => {
+  it('registers no setting, the three sources, the two sheet sinks, the action and the transforms', async () => {
     const plugin = await harness();
     expect(plugin.host.registry.configurations()).toEqual([]);
     expect(plugin.host.registry.recipeVerbs().map((verb) => `${verb.id}:${verb.kind}`)).toEqual([
@@ -89,6 +89,7 @@ describe('activate', () => {
       'google.drive-read:source',
       'google.drive-move:action',
       'google.drive-count:transform',
+      'google.sheet-lookup:transform',
     ]);
     await plugin.close();
   });
