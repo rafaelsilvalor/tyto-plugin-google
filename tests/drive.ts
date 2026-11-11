@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 
 import type { FetchedResponse, HostFetchInit } from '@tyto/plugin-api';
-import { testPlugin, type PluginHarness } from '@tyto/plugin-api/testing';
+import { testPlugin, type PluginHarness, type TestRecipeOptions } from '@tyto/plugin-api/testing';
 
 import { response } from './host.js';
 import { testClock, testKey, tokenEndpoint, type TestKey } from './google.js';
@@ -15,6 +15,9 @@ const manifest = readFileSync(new URL('../tyto-plugin.json', import.meta.url), '
 const entry = new URL('../dist/index.js', import.meta.url).href;
 
 export const FOLDER_MIME = 'application/vnd.google-apps.folder';
+export const SPREADSHEET_MIME = 'application/vnd.google-apps.spreadsheet';
+/** The Google types `files.create` makes with no content; any other `google-apps` type is 400. */
+const CREATABLE_NATIVE = [FOLDER_MIME, SPREADSHEET_MIME];
 export const INBOX_ID = 'inbox0123456789';
 export const INBOX_URL = `https://drive.google.com/drive/folders/${INBOX_ID}`;
 
@@ -32,6 +35,8 @@ export interface FakeItem {
   trashed?: boolean;
   /** The people the item is shared with, as `permissions.create` added them. */
   permissions?: { email: string; role: string; notified: boolean }[];
+  /** `permissions.list` answers 403, as Drive does to a person who may not see the sharing. */
+  permissionsHidden?: boolean;
 }
 
 export interface FakeDrive {
@@ -104,6 +109,8 @@ export async function fakeDrive(
 
 const FILES = '/drive/v3/files';
 
+type InputTable = NonNullable<TestRecipeOptions['input']>;
+
 let generated = 0;
 
 function answerOf(drive: FakeDrive, call: DriveCall): FetchedResponse {
@@ -124,6 +131,8 @@ function answerOf(drive: FakeDrive, call: DriveCall): FetchedResponse {
     return response(404, { error: { code: 404, message: 'File not found.', status: 'NOT_FOUND' } });
   }
   if (sub === 'permissions' && call.method === 'POST') return shared(drive, item, call);
+  if (sub === 'permissions' && call.method === 'GET') return permissionsOf(drive, item, call);
+  if (sub === 'permissions') throw new Error(`the plugin sent ${call.method} to permissions`);
   if (call.method === 'PATCH') {
     // Drive's files.update: the folders to add and remove, comma-separated, as Drive reads them.
     const removed = (call.query['removeParents'] ?? '').split(',').filter((id) => id !== '');
@@ -158,6 +167,14 @@ function created(drive: FakeDrive, call: DriveCall): FetchedResponse {
       },
     });
   }
+  if (
+    body.mimeType.startsWith('application/vnd.google-apps.') &&
+    !CREATABLE_NATIVE.includes(body.mimeType)
+  ) {
+    return response(400, {
+      error: { code: 400, message: `Invalid MIME type provided for the uploaded content.` },
+    });
+  }
   if (drive.items.some((each) => each.id === body.id)) {
     return response(409, {
       error: { code: 409, message: 'A file already exists with the provided ID.' },
@@ -185,8 +202,12 @@ function shared(drive: FakeDrive, item: FakeItem, call: DriveCall): FetchedRespo
       },
     });
   }
+  // A person who already holds a permission gets the new role in its place: the worst case,
+  // where sharing again with a weaker role would lower theirs.
   item.permissions = [
-    ...(item.permissions ?? []),
+    ...(item.permissions ?? []).filter(
+      (each) => each.email.toLowerCase() !== body.emailAddress.toLowerCase(),
+    ),
     {
       email: body.emailAddress,
       role: body.role,
@@ -194,6 +215,30 @@ function shared(drive: FakeDrive, item: FakeItem, call: DriveCall): FetchedRespo
     },
   ];
   return response(200, { id: `perm-${item.permissions.length}` });
+}
+
+/** `permissions.list`, paged by `pageSize` (or the drive's smaller page), as Drive pages it. */
+function permissionsOf(drive: FakeDrive, item: FakeItem, call: DriveCall): FetchedResponse {
+  if (item.permissionsHidden === true) {
+    return response(403, {
+      error: {
+        code: 403,
+        message: 'The user does not have sufficient permissions for this file.',
+        errors: [{ reason: 'insufficientFilePermissions' }],
+      },
+    });
+  }
+  const size = Math.min(Number(call.query['pageSize'] ?? 100), drive.pageSize ?? 100);
+  const offset = Number((call.query['pageToken'] ?? 'perm-page-0').slice('perm-page-'.length));
+  const all = (item.permissions ?? []).map((each) => ({
+    emailAddress: each.email,
+    role: each.role,
+  }));
+  const next = offset + size < all.length ? `perm-page-${offset + size}` : undefined;
+  return response(200, {
+    permissions: all.slice(offset, offset + size),
+    ...(next === undefined ? {} : { nextPageToken: next }),
+  });
 }
 
 /** `files.list`, reading the one query shape the plugin writes, as Drive pages it. */
@@ -326,6 +371,46 @@ export async function run(google: FakeGoogleDrive, step: string) {
     table: cell?.table,
     diagnostics: (cell?.diagnostics ?? []).map(({ code, message }) => ({ code, message })),
   };
+}
+
+/** An input table of text columns, its rows keyed `r1`, `r2`, … */
+export function inputTable(
+  columns: readonly string[],
+  rows: readonly (readonly (string | null)[])[],
+): InputTable {
+  return {
+    columns: columns.map((name) => ({ name, type: 'text', origin: 'test' })),
+    rows: rows.map((cells, index) => ({
+      key: `r${index + 1}`,
+      values: Object.fromEntries(columns.map((name, at) => [name, cells[at] ?? null])),
+      provenance: { source: 'test', id: `r${index + 1}`, fetchedAt: '2026-11-11T00:00:00.000Z' },
+    })),
+  };
+}
+
+/** What an action step planned over a table: its plan, or its diagnostics. */
+export async function planOver(drive: FakeGoogleDrive, step: string, input: InputTable) {
+  const ran = await drive.plugin.runRecipe(step, { input });
+  if (!ran.ok) throw new Error(ran.error.map((item) => item.message).join('\n'));
+  const cell = ran.value.cells.at(-1);
+  return {
+    plan: cell?.plan,
+    diagnostics: (cell?.diagnostics ?? []).map(({ code, message }) => ({ code, message })),
+  };
+}
+
+export type Planned = NonNullable<Awaited<ReturnType<typeof planOver>>['plan']>;
+
+/** A plan applied as the notebook's Apply does: each operation's status and reason. */
+export async function applyWith(drive: FakeGoogleDrive, verbId: string, planned: Planned) {
+  const verb = drive.plugin.recipes.verbs.get(verbId);
+  if (verb?.apply === undefined) throw new Error(`${verbId} has no apply`);
+  const applied = await verb.apply(planned);
+  if (!applied.ok) throw new Error(applied.error.map((item) => item.message).join('\n'));
+  return applied.value.operations.map(({ status, reason }) => ({
+    status,
+    ...(reason === undefined ? {} : { reason }),
+  }));
 }
 
 /** The calls a run made to `files.list`. */

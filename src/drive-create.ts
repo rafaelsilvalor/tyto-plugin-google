@@ -12,7 +12,7 @@ import {
 } from './drive-files.js';
 import { FOLDER_MIME_TYPE } from './drive-query.js';
 import { rootWalk, type RootWalk } from './drive-root.js';
-import { describeGoogleError, type GoogleError, type GoogleResult } from './errors.js';
+import { describeGoogleError, googleOk, type GoogleError, type GoogleResult } from './errors.js';
 import type { GoogleClient } from './http.js';
 import {
   budgetedTransport,
@@ -38,7 +38,7 @@ import {
 
 /**
  * Planning and applying "create an item in Drive, as the person, and share it": shared by
- * `google.drive-folder` and the verbs that create other kinds of item (a spreadsheet next).
+ * `google.drive-folder` and `google.sheet-create`.
  *
  * Everything is created as the signed-in person, never as the service account, which owns no
  * storage in a person's Drive, and is shared only with the people a row lists: the service
@@ -78,6 +78,22 @@ const IDS_PER_CALL = 1000;
 /** The roles `share=` may give, as Drive names them. */
 export const SHARE_ROLES: readonly string[] = ['reader', 'commenter', 'writer'];
 
+/**
+ * Drive's roles from weakest to strongest: a person who holds a role at least as strong as the
+ * one a row gives already has that access, and is not shared with again. Sharing again with a
+ * weaker role could lower theirs, and this plugin never takes access away.
+ */
+const ROLE_STRENGTH: readonly string[] = [
+  'reader',
+  'commenter',
+  'writer',
+  'fileOrganizer',
+  'organizer',
+  'owner',
+];
+/** Drive's ceiling on one `permissions.list` page. */
+const PERMISSIONS_PAGE_SIZE = 100;
+
 /** What a `create` payload holds: the generated id, the name, the parent folder, the type. */
 export interface CreatePayload {
   readonly c: string;
@@ -109,7 +125,9 @@ const OUT_OF_TIME =
  *
  * The parent is `parent=` or the section's `root`, and must be under the root. **A second run
  * creates nothing twice**: a row whose item already exists in the parent (same name, same
- * type, not in the trash) is left out with a warning; two rows of one name fail the second;
+ * type, not in the trash) creates nothing, with a warning, and plans only the shares the item
+ * lacks (Drive's `permissions.list`), so a share that failed before is tried again; two rows
+ * of one name fail the second;
  * several existing items of the name stop the plan, as a move's ambiguous destination does.
  * Each new item's id is generated now (Drive's `files.generateIds`), so the plan shows the
  * link it will have and its shares name it.
@@ -162,10 +180,17 @@ export async function planCreates(
   /** Each row, before ids: a failure the plan already knows, or what to create. */
   const planned: (
     | { readonly row: Row; readonly failure: string }
-    | { readonly row: Row; readonly name: string; readonly shares: readonly Share[] }
+    | {
+        readonly row: Row;
+        readonly name: string;
+        readonly shares: readonly Share[];
+        /** The item of the name already in the parent: only its missing shares are planned. */
+        readonly existingId?: string;
+      }
   )[] = [];
   const firstRowOf = new Map<string, string>();
   const alreadyThere: string[] = [];
+  const sharingOnly: string[] = [];
   for (const row of table.rows) {
     const written = row.values[nameColumn.name];
     const name = typeof written === 'string' ? written.trim() : '';
@@ -201,14 +226,24 @@ export async function planCreates(
           'keep one, or rename the others, and run again',
       );
     }
-    if (existing.value.length === 1) {
-      alreadyThere.push(name);
+    const found = existing.value[0];
+    if (found !== undefined) {
+      // Already there: nothing is created, and only the shares it lacks are planned, so a share
+      // that failed on an earlier run is tried again.
+      const lacking =
+        shares.length === 0 ? googleOk([]) : await missingSharesOf(client, found.id, shares);
+      if (!lacking.ok) return failedFor(lacking.error);
+      if (lacking.value.length === 0) alreadyThere.push(name);
+      else {
+        sharingOnly.push(name);
+        planned.push({ row, name, shares: lacking.value, existingId: found.id });
+      }
       continue;
     }
     planned.push({ row, name, shares });
   }
 
-  const creating = planned.filter((each) => 'name' in each).length;
+  const creating = planned.filter((each) => 'name' in each && each.existingId === undefined).length;
   const ids = await generateIds(client, creating);
   if (!ids.ok) return failedFor(ids.error);
 
@@ -219,20 +254,23 @@ export async function planCreates(
       operations.push(plannedFailure(each.row, each.failure));
       continue;
     }
-    const id = ids.value[next];
-    next += 1;
-    if (id === undefined) return failedFor(malformedIds());
     const { row, name } = each;
-    const create: CreatePayload = { c: id, n: name, p: parentFolder.id, m: kind.mimeType };
-    operations.push({
-      write: CREATE_WRITE,
-      rowKey: row.key,
-      description: shortened(
-        `create ${kind.noun} "${name}" in '${parentFolder.name}' (${parentFolder.id}), ` +
-          `at ${kind.link(id)}`,
-      ),
-      payload: { ...create },
-    });
+    let id = each.existingId;
+    if (id === undefined) {
+      id = ids.value[next];
+      next += 1;
+      if (id === undefined) return failedFor(malformedIds());
+      const create: CreatePayload = { c: id, n: name, p: parentFolder.id, m: kind.mimeType };
+      operations.push({
+        write: CREATE_WRITE,
+        rowKey: row.key,
+        description: shortened(
+          `create ${kind.noun} "${name}" in '${parentFolder.name}' (${parentFolder.id}), ` +
+            `at ${kind.link(id)}`,
+        ),
+        payload: { ...create },
+      });
+    }
     for (const share of each.shares) {
       const payload: SharePayload = { s: id, n: name, e: share.email, r: share.role, notify };
       operations.push({
@@ -253,19 +291,21 @@ export async function planCreates(
     );
   }
 
-  const diagnostics: Diagnostic[] =
-    alreadyThere.length === 0
-      ? []
-      : [
-          {
-            severity: 'warning',
-            code: 'E_RECIPE_VERB',
-            message: shortened(
-              `'${kind.verb}' plans nothing for ${listed(alreadyThere)}: already in ` +
-                `'${parentFolder.name}' (${parentFolder.id}).`,
-            ),
-          },
-        ];
+  const where = `'${parentFolder.name}' (${parentFolder.id})`;
+  const diagnostics: Diagnostic[] = [];
+  if (alreadyThere.length > 0) {
+    diagnostics.push(
+      warning(`'${kind.verb}' plans nothing for ${listed(alreadyThere)}: already in ${where}.`),
+    );
+  }
+  if (sharingOnly.length > 0) {
+    diagnostics.push(
+      warning(
+        `'${kind.verb}' creates nothing for ${listed(sharingOnly)}: already in ${where}; ` +
+          'it plans only the shares they lack.',
+      ),
+    );
+  }
   return {
     ok: true,
     value: {
@@ -382,6 +422,77 @@ function malformedIds(): GoogleError {
   };
 }
 
+const warning = (message: string): Diagnostic => ({
+  severity: 'warning',
+  code: 'E_RECIPE_VERB',
+  message: shortened(message),
+});
+
+/**
+ * The people an item is shared with directly, by email, and their roles: every page of
+ * Drive's `permissions.list`. A permission with no email (anyone with the link, a domain) is
+ * left out; access a person has through a group is not seen, so they are shared with directly.
+ */
+export async function heldShares(
+  client: GoogleClient,
+  fileId: string,
+): Promise<GoogleResult<readonly Share[]>> {
+  const held: Share[] = [];
+  let pageToken: string | undefined;
+  do {
+    const answer = await client.get(`${DRIVE_FILES}/${encodeURIComponent(fileId)}/permissions`, {
+      fields: 'nextPageToken, permissions(emailAddress, role)',
+      pageSize: PERMISSIONS_PAGE_SIZE,
+      supportsAllDrives: true,
+      ...(pageToken === undefined ? {} : { pageToken }),
+    });
+    if (!answer.ok) return answer;
+    const record = recordOf(answer.value);
+    const permissions = record?.['permissions'] ?? [];
+    if (!Array.isArray(permissions)) {
+      return {
+        ok: false,
+        error: {
+          code: 'E_GOOGLE_RESPONSE',
+          message: 'Google answered permissions.list without a list of permissions.',
+        },
+      };
+    }
+    for (const permission of permissions) {
+      const each = recordOf(permission);
+      const email = each?.['emailAddress'];
+      const role = each?.['role'];
+      if (typeof email === 'string' && typeof role === 'string') held.push({ email, role });
+    }
+    const next = record?.['nextPageToken'];
+    pageToken = typeof next === 'string' && next !== '' ? next : undefined;
+  } while (pageToken !== undefined);
+  return googleOk(held);
+}
+
+/** The wanted shares nobody already holds at that role or a stronger one. */
+export function missingShares(held: readonly Share[], wanted: readonly Share[]): readonly Share[] {
+  const strength = (role: string): number => ROLE_STRENGTH.indexOf(role);
+  return wanted.filter(
+    (share) =>
+      !held.some(
+        (holder) =>
+          holder.email.toLowerCase() === share.email.toLowerCase() &&
+          strength(holder.role) >= strength(share.role),
+      ),
+  );
+}
+
+/** The shares an existing item lacks, or why Drive could not say. */
+async function missingSharesOf(
+  client: GoogleClient,
+  fileId: string,
+  wanted: readonly Share[],
+): Promise<GoogleResult<readonly Share[]>> {
+  const held = await heldShares(client, fileId);
+  return held.ok ? googleOk(missingShares(held.value, wanted)) : held;
+}
+
 /**
  * A `share=` cell: `email:role; email:role`, each role `reader`, `commenter` or `writer`. A
  * blank cell shares with nobody. Anything else fails the row in the plan: an item half shared
@@ -416,8 +527,9 @@ export function parseShares(written: unknown, column: string): readonly Share[] 
  * parent: the item it already made (a retried Apply) is `applied`, another of the name since
  * the plan fails with `E_GOOGLE_CHANGED`. A create Drive refused, or whose answer was lost, is
  * checked by reading its generated id: if the item is there, it was made. A `share` whose
- * create failed in this batch fails with that reason and makes no request; a share Drive
- * refuses (a domain that forbids sharing outside it) fails alone.
+ * create failed in this batch fails with that reason and makes no request; a share the person
+ * already holds at that role or a stronger one is `applied` with no request, so no role is
+ * lowered; a share Drive refuses (a domain that forbids sharing outside it) fails alone.
  */
 export async function applyCreates(
   host: CreateHost,
@@ -457,6 +569,8 @@ export async function applyCreates(
   const client = connectAsPerson(host, budget.transport);
   /** The creates of this batch that failed, by the id they were to have, and why. */
   const createFailed = new Map<string, string>();
+  /** Who holds each item this batch shares, read once per item and kept up to date. */
+  const heldBy = new Map<string, Share[]>();
   for (const [index, payload] of work) {
     if (budget.expired()) break;
     if ('c' in payload) {
@@ -471,6 +585,24 @@ export async function applyCreates(
       outcomes[index] = failed(`creating '${payload.n}' failed, so it is not shared: ${why}`);
       continue;
     }
+    let held = heldBy.get(payload.s);
+    if (held === undefined) {
+      const read = await heldShares(client, payload.s);
+      if (!read.ok) {
+        if (budget.refusedForTime()) break;
+        outcomes[index] = failed(describeGoogleError(read.error));
+        continue;
+      }
+      held = [...read.value];
+      heldBy.set(payload.s, held);
+    }
+    const share: Share = { email: payload.e, role: payload.r };
+    // Held already, at this role or a stronger one (an Apply run twice, or access given since
+    // the plan): nothing is sent, so no role is ever lowered.
+    if (missingShares(held, [share]).length === 0) {
+      outcomes[index] = { status: 'applied' };
+      continue;
+    }
     const shared = await client.post(
       `${DRIVE_FILES}/${encodeURIComponent(payload.s)}/permissions`,
       { type: 'user', role: payload.r, emailAddress: payload.e },
@@ -481,6 +613,7 @@ export async function applyCreates(
       outcomes[index] = failed(describeGoogleError(shared.error));
       continue;
     }
+    held.push(share);
     outcomes[index] = { status: 'applied' };
   }
   return done();

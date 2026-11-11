@@ -1,12 +1,15 @@
-import type { TestRecipeOptions } from '@tyto/plugin-api/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  applyWith,
   FOLDER_MIME,
   fakeDrive,
+  inputTable,
+  planOver,
   type FakeDrive,
   type FakeGoogleDrive,
   type FakeItem,
+  type Planned,
 } from './drive.js';
 
 /**
@@ -14,8 +17,6 @@ import {
  * applied as the notebook's Apply does, over a synthetic Drive, signed in as a synthetic
  * person. Every id, name and email is invented.
  */
-type InputTable = NonNullable<TestRecipeOptions['input']>;
-
 const ROOT_ID = 'root0123456789';
 const CLIENTS_ID = 'clients0123456';
 const OTHER_ID = 'other0123456789';
@@ -60,42 +61,9 @@ function studio(extra: FakeItem[] = []): FakeDrive {
   };
 }
 
-function table(
-  columns: readonly string[],
-  rows: readonly (readonly (string | null)[])[],
-): InputTable {
-  return {
-    columns: columns.map((name) => ({ name, type: 'text', origin: 'test' })),
-    rows: rows.map((cells, index) => ({
-      key: `r${index + 1}`,
-      values: Object.fromEntries(columns.map((name, at) => [name, cells[at] ?? null])),
-      provenance: { source: 'test', id: `r${index + 1}`, fetchedAt: '2026-11-11T00:00:00.000Z' },
-    })),
-  };
-}
-
-async function plan(drive: FakeGoogleDrive, step: string, input: InputTable) {
-  const ran = await drive.plugin.runRecipe(step, { input });
-  if (!ran.ok) throw new Error(ran.error.map((item) => item.message).join('\n'));
-  const cell = ran.value.cells.at(-1);
-  return {
-    plan: cell?.plan,
-    diagnostics: (cell?.diagnostics ?? []).map(({ code, message }) => ({ code, message })),
-  };
-}
-
-type Planned = NonNullable<Awaited<ReturnType<typeof plan>>['plan']>;
-
-async function apply(drive: FakeGoogleDrive, planned: Planned) {
-  const verb = drive.plugin.recipes.verbs.get(VERB);
-  if (verb?.apply === undefined) throw new Error(`${VERB} has no apply`);
-  const applied = await verb.apply(planned);
-  if (!applied.ok) throw new Error(applied.error.map((item) => item.message).join('\n'));
-  return applied.value.operations.map(({ status, reason }) => ({
-    status,
-    ...(reason === undefined ? {} : { reason }),
-  }));
-}
+const table = inputTable;
+const plan = planOver;
+const apply = (drive: FakeGoogleDrive, planned: Planned) => applyWith(drive, VERB, planned);
 
 const item = (drive: FakeGoogleDrive, id: string): FakeItem | undefined =>
   drive.drive.items.find((each) => each.id === id);
@@ -223,6 +191,118 @@ describe('google.drive-folder', () => {
       },
     ]);
     expect(drive.drive.items.filter((each) => each.name === 'Acme')).toHaveLength(1);
+  });
+
+  it('plans only the shares an existing folder lacks, never one held at that role or above', async () => {
+    const existing = folder('acmeOld0123456', 'Acme', [ROOT_ID]);
+    existing.permissions = [
+      { email: 'owner@example.com', role: 'owner', notified: false },
+      { email: 'ana@example.com', role: 'writer', notified: false },
+      { email: 'bo@example.com', role: 'reader', notified: false },
+      { email: 'cy@example.com', role: 'commenter', notified: false },
+    ];
+    // Two permissions a page, so the plan reads every page of the listing.
+    const drive = await google({ ...studio([existing]), pageSize: 2 });
+    const answer = await plan(
+      drive,
+      `${VERB} share=Share`,
+      table(
+        ['name', 'Share'],
+        [
+          [
+            'Acme',
+            'ANA@example.com:reader; bo@example.com:writer; cy@example.com:reader; dee@example.com:reader',
+          ],
+        ],
+      ),
+    );
+    expect(answer.plan?.operations.map((each) => [each.write, each.description])).toEqual([
+      ['share', 'share "Acme" with bo@example.com as writer'],
+      ['share', 'share "Acme" with dee@example.com as reader'],
+    ]);
+    expect(answer.plan?.operations[0]?.payload).toMatchObject({ s: 'acmeOld0123456' });
+    expect(answer.diagnostics).toEqual([
+      {
+        code: 'E_RECIPE_VERB',
+        message:
+          `'${VERB}' creates nothing for 'Acme': already in 'Studio' (${ROOT_ID}); ` +
+          'it plans only the shares they lack.',
+      },
+    ]);
+    expect(
+      drive.calls
+        .filter((call) => call.path.endsWith('/permissions'))
+        .map((call) => call.query['pageToken'] ?? 'first'),
+    ).toEqual(['first', 'perm-page-2']);
+    expect(drive.calls.some((call) => call.path.endsWith('/generateIds'))).toBe(false);
+
+    expect(await apply(drive, answer.plan!)).toEqual([
+      { status: 'applied' },
+      { status: 'applied' },
+    ]);
+    // Every permission it had is still there, none lowered; bo is raised to writer.
+    expect(item(drive, 'acmeOld0123456')?.permissions).toEqual([
+      { email: 'owner@example.com', role: 'owner', notified: false },
+      { email: 'ana@example.com', role: 'writer', notified: false },
+      { email: 'cy@example.com', role: 'commenter', notified: false },
+      { email: 'bo@example.com', role: 'writer', notified: false },
+      { email: 'dee@example.com', role: 'reader', notified: false },
+    ]);
+    expect(drive.drive.items.filter((each) => each.name === 'Acme')).toHaveLength(1);
+  });
+
+  it('tries again, on the next run, a share that failed on an earlier one', async () => {
+    const drive = await google({ ...studio(), refusedDomain: 'elsewhere.example' });
+    const input = table(['name', 'Share'], [['Acme', 'ana@elsewhere.example:writer']]);
+    const first = await plan(drive, `${VERB} share=Share`, input);
+    expect((await apply(drive, first.plan!)).map((each) => each.status)).toEqual([
+      'applied',
+      'failed',
+    ]);
+    delete drive.drive.refusedDomain;
+    const second = await plan(drive, `${VERB} share=Share`, input);
+    expect(second.plan?.operations.map((each) => [each.write, each.payload])).toEqual([
+      [
+        'share',
+        { s: 'newA0123456789', n: 'Acme', e: 'ana@elsewhere.example', r: 'writer', notify: false },
+      ],
+    ]);
+    expect(await apply(drive, second.plan!)).toEqual([{ status: 'applied' }]);
+    expect(item(drive, 'newA0123456789')?.permissions).toEqual([
+      { email: 'ana@elsewhere.example', role: 'writer', notified: false },
+    ]);
+    // A third run finds everything there and plans nothing.
+    const third = await plan(drive, `${VERB} share=Share`, input);
+    expect(third.plan?.operations).toEqual([]);
+    expect(third.diagnostics[0]?.message).toContain("plans nothing for 'Acme'");
+  });
+
+  it('sends no share at Apply that the person was given since the plan, at that role or above', async () => {
+    const existing = folder('acmeOld0123456', 'Acme', [ROOT_ID]);
+    const drive = await google(studio([existing]));
+    const answer = await plan(
+      drive,
+      `${VERB} share=Share`,
+      table(['name', 'Share'], [['Acme', 'ana@example.com:reader']]),
+    );
+    expect(answer.plan?.operations).toHaveLength(1);
+    existing.permissions = [{ email: 'ana@example.com', role: 'writer', notified: false }];
+    expect(await apply(drive, answer.plan!)).toEqual([{ status: 'applied' }]);
+    expect(posts(drive)).toEqual([]);
+    expect(existing.permissions).toEqual([
+      { email: 'ana@example.com', role: 'writer', notified: false },
+    ]);
+  });
+
+  it('stops the plan when the existing folder’s sharing cannot be read', async () => {
+    const existing = folder('acmeOld0123456', 'Acme', [ROOT_ID]);
+    existing.permissionsHidden = true;
+    const drive = await google(studio([existing]));
+    const ran = await drive.plugin.runRecipe(`${VERB} share=Share`, {
+      input: table(['name', 'Share'], [['Acme', 'ana@example.com:reader']]),
+    });
+    expect(JSON.stringify(ran)).toContain('permissions answered 403');
+    expect(posts(drive)).toEqual([]);
   });
 
   it('fails the second of two rows of one name, and stops on two existing folders', async () => {

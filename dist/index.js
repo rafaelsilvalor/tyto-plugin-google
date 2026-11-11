@@ -2156,6 +2156,15 @@ var DEFAULT_NAME_COLUMN = "name";
 var MAX_NAME_LENGTH = 500;
 var IDS_PER_CALL = 1e3;
 var SHARE_ROLES = ["reader", "commenter", "writer"];
+var ROLE_STRENGTH = [
+  "reader",
+  "commenter",
+  "writer",
+  "fileOrganizer",
+  "organizer",
+  "owner"
+];
+var PERMISSIONS_PAGE_SIZE = 100;
 var OUT_OF_TIME = "could not check every row in one call's time; narrow the table to fewer rows and run again";
 async function planCreates(host, request, kind, clock = systemClock) {
   const problem8 = (text) => refused4(argumentsProblem(kind.verb, text));
@@ -2192,6 +2201,7 @@ async function planCreates(host, request, kind, clock = systemClock) {
   const planned = [];
   const firstRowOf = /* @__PURE__ */ new Map();
   const alreadyThere = [];
+  const sharingOnly = [];
   for (const row of table.rows) {
     const written = row.values[nameColumn.name];
     const name = typeof written === "string" ? written.trim() : "";
@@ -2224,13 +2234,20 @@ async function planCreates(host, request, kind, clock = systemClock) {
         `finds ${existing.value.length} items named '${name}' in '${parentFolder.name}' (${parentFolder.id}): ${listed(existing.value.map((each) => each.id))}; keep one, or rename the others, and run again`
       );
     }
-    if (existing.value.length === 1) {
-      alreadyThere.push(name);
+    const found = existing.value[0];
+    if (found !== void 0) {
+      const lacking = shares.length === 0 ? googleOk([]) : await missingSharesOf(client, found.id, shares);
+      if (!lacking.ok) return failedFor(lacking.error);
+      if (lacking.value.length === 0) alreadyThere.push(name);
+      else {
+        sharingOnly.push(name);
+        planned.push({ row, name, shares: lacking.value, existingId: found.id });
+      }
       continue;
     }
     planned.push({ row, name, shares });
   }
-  const creating = planned.filter((each) => "name" in each).length;
+  const creating = planned.filter((each) => "name" in each && each.existingId === void 0).length;
   const ids = await generateIds(client, creating);
   if (!ids.ok) return failedFor(ids.error);
   const operations = [];
@@ -2240,19 +2257,22 @@ async function planCreates(host, request, kind, clock = systemClock) {
       operations.push(plannedFailure2(each.row, each.failure));
       continue;
     }
-    const id = ids.value[next];
-    next += 1;
-    if (id === void 0) return failedFor(malformedIds());
     const { row, name } = each;
-    const create2 = { c: id, n: name, p: parentFolder.id, m: kind.mimeType };
-    operations.push({
-      write: CREATE_WRITE,
-      rowKey: row.key,
-      description: shortened(
-        `create ${kind.noun} "${name}" in '${parentFolder.name}' (${parentFolder.id}), at ${kind.link(id)}`
-      ),
-      payload: { ...create2 }
-    });
+    let id = each.existingId;
+    if (id === void 0) {
+      id = ids.value[next];
+      next += 1;
+      if (id === void 0) return failedFor(malformedIds());
+      const create2 = { c: id, n: name, p: parentFolder.id, m: kind.mimeType };
+      operations.push({
+        write: CREATE_WRITE,
+        rowKey: row.key,
+        description: shortened(
+          `create ${kind.noun} "${name}" in '${parentFolder.name}' (${parentFolder.id}), at ${kind.link(id)}`
+        ),
+        payload: { ...create2 }
+      });
+    }
     for (const share of each.shares) {
       const payload = { s: id, n: name, e: share.email, r: share.role, notify };
       operations.push({
@@ -2270,15 +2290,20 @@ async function planCreates(host, request, kind, clock = systemClock) {
       `would plan ${operations.length.toLocaleString("en-US")} operations, over the ${MAX_OPERATIONS.toLocaleString("en-US")} one plan holds; split the table`
     );
   }
-  const diagnostics = alreadyThere.length === 0 ? [] : [
-    {
-      severity: "warning",
-      code: "E_RECIPE_VERB",
-      message: shortened(
-        `'${kind.verb}' plans nothing for ${listed(alreadyThere)}: already in '${parentFolder.name}' (${parentFolder.id}).`
+  const where = `'${parentFolder.name}' (${parentFolder.id})`;
+  const diagnostics = [];
+  if (alreadyThere.length > 0) {
+    diagnostics.push(
+      warning(`'${kind.verb}' plans nothing for ${listed(alreadyThere)}: already in ${where}.`)
+    );
+  }
+  if (sharingOnly.length > 0) {
+    diagnostics.push(
+      warning(
+        `'${kind.verb}' creates nothing for ${listed(sharingOnly)}: already in ${where}; it plans only the shares they lack.`
       )
-    }
-  ];
+    );
+  }
   return {
     ok: true,
     value: {
@@ -2359,6 +2384,56 @@ function malformedIds() {
     message: "Google answered files.generateIds without the ids asked for."
   };
 }
+var warning = (message) => ({
+  severity: "warning",
+  code: "E_RECIPE_VERB",
+  message: shortened(message)
+});
+async function heldShares(client, fileId) {
+  const held = [];
+  let pageToken;
+  do {
+    const answer = await client.get(`${DRIVE_FILES}/${encodeURIComponent(fileId)}/permissions`, {
+      fields: "nextPageToken, permissions(emailAddress, role)",
+      pageSize: PERMISSIONS_PAGE_SIZE,
+      supportsAllDrives: true,
+      ...pageToken === void 0 ? {} : { pageToken }
+    });
+    if (!answer.ok) return answer;
+    const record = recordOf5(answer.value);
+    const permissions = record?.["permissions"] ?? [];
+    if (!Array.isArray(permissions)) {
+      return {
+        ok: false,
+        error: {
+          code: "E_GOOGLE_RESPONSE",
+          message: "Google answered permissions.list without a list of permissions."
+        }
+      };
+    }
+    for (const permission of permissions) {
+      const each = recordOf5(permission);
+      const email = each?.["emailAddress"];
+      const role = each?.["role"];
+      if (typeof email === "string" && typeof role === "string") held.push({ email, role });
+    }
+    const next = record?.["nextPageToken"];
+    pageToken = typeof next === "string" && next !== "" ? next : void 0;
+  } while (pageToken !== void 0);
+  return googleOk(held);
+}
+function missingShares(held, wanted) {
+  const strength = (role) => ROLE_STRENGTH.indexOf(role);
+  return wanted.filter(
+    (share) => !held.some(
+      (holder) => holder.email.toLowerCase() === share.email.toLowerCase() && strength(holder.role) >= strength(share.role)
+    )
+  );
+}
+async function missingSharesOf(client, fileId, wanted) {
+  const held = await heldShares(client, fileId);
+  return held.ok ? googleOk(missingShares(held.value, wanted)) : held;
+}
 function parseShares(written, column) {
   if (written === null || written === void 0) return [];
   if (typeof written !== "string") return `${column} holds ${String(written)}, not email:role`;
@@ -2413,6 +2488,7 @@ async function applyCreates(host, request, clock = systemClock) {
   const budget = budgetedTransport(host, clock);
   const client = connectAsPerson(host, budget.transport);
   const createFailed = /* @__PURE__ */ new Map();
+  const heldBy = /* @__PURE__ */ new Map();
   for (const [index, payload] of work) {
     if (budget.expired()) break;
     if ("c" in payload) {
@@ -2427,6 +2503,22 @@ async function applyCreates(host, request, clock = systemClock) {
       outcomes[index] = failed3(`creating '${payload.n}' failed, so it is not shared: ${why}`);
       continue;
     }
+    let held = heldBy.get(payload.s);
+    if (held === void 0) {
+      const read = await heldShares(client, payload.s);
+      if (!read.ok) {
+        if (budget.refusedForTime()) break;
+        outcomes[index] = failed3(describeGoogleError(read.error));
+        continue;
+      }
+      held = [...read.value];
+      heldBy.set(payload.s, held);
+    }
+    const share = { email: payload.e, role: payload.r };
+    if (missingShares(held, [share]).length === 0) {
+      outcomes[index] = { status: "applied" };
+      continue;
+    }
     const shared = await client.post(
       `${DRIVE_FILES}/${encodeURIComponent(payload.s)}/permissions`,
       { type: "user", role: payload.r, emailAddress: payload.e },
@@ -2437,6 +2529,7 @@ async function applyCreates(host, request, clock = systemClock) {
       outcomes[index] = failed3(describeGoogleError(shared.error));
       continue;
     }
+    held.push(share);
     outcomes[index] = { status: "applied" };
   }
   return done();
@@ -3226,6 +3319,26 @@ function readReadArguments(values, section) {
   const folderId = folderArgument(DRIVE_READ, values, section);
   if (typeof folderId !== "string") return folderId;
   return { mode: "folder", folderId };
+}
+
+// src/sheet-create.ts
+var SHEET_CREATE = "google.sheet-create";
+var SPREADSHEET_MIME_TYPE = "application/vnd.google-apps.spreadsheet";
+var SPREADSHEET_KIND = {
+  verb: SHEET_CREATE,
+  noun: "spreadsheet",
+  mimeType: SPREADSHEET_MIME_TYPE,
+  link: (id) => `https://docs.google.com/spreadsheets/d/${id}/edit`
+};
+function sheetCreateVerb(host, clock = systemClock) {
+  return {
+    id: SHEET_CREATE,
+    kind: "action",
+    arguments: CREATE_ARGUMENTS,
+    writes: [CREATE_WRITE, SHARE_WRITE],
+    plan: (request) => planCreates(host, request, SPREADSHEET_KIND, clock),
+    apply: (request) => applyCreates(host, request, clock)
+  };
 }
 
 // src/sheet-cache.ts
@@ -4470,7 +4583,7 @@ function sheetSyncVerb(host, clock = systemClock) {
 }
 var problem7 = (text) => argumentsProblem(SHEET_SYNC, text);
 var refused7 = (diagnostic) => ({ ok: false, error: [diagnostic] });
-var warning = (message) => ({
+var warning2 = (message) => ({
   severity: "warning",
   code: "E_RECIPE_VERB",
   message: `'${SHEET_SYNC}' ${message}`
@@ -4584,7 +4697,7 @@ async function planSheetSync(host, request) {
       ok: true,
       value: { target: targetOf(tab, spreadsheetId), operations: [], count: 0 },
       diagnostics: [
-        warning(
+        warning2(
           `was handed no rows, and the tab '${tab.title}' holds ${inTab.size}: it deletes nothing. An empty table is what a failed read before this step looks like; check it before you trust this run`
         )
       ]
@@ -4880,28 +4993,28 @@ async function planSheetSync(host, request) {
   const diagnostics = [];
   if (preserved.length > 0) {
     diagnostics.push(
-      warning(
+      warning2(
         `keeps ${preserved.length} row(s) the table no longer holds, because their ${listed(keep.map(([name]) => name))} hold text a person wrote: ${listed(preserved)}`
       )
     );
   }
   if (skippedArchived.length > 0) {
     diagnostics.push(
-      warning(
+      warning2(
         `does not add ${listed(skippedArchived)}, already in ${listed(listOf5(text("archived")))}`
       )
     );
   }
   if (skippedNeverHere.length > 0) {
     diagnostics.push(
-      warning(
+      warning2(
         `does not add ${listed(skippedNeverHere)}: move= sends them to another tab, and they were never in '${tab.title}'`
       )
     );
   }
   if (unkeyed.length > 0) {
     diagnostics.push(
-      warning(
+      warning2(
         `leaves rows ${unkeyed.join(", ")} of '${tab.title}' as they are: they hold no ${names[kc] ?? ""}`
       )
     );
@@ -4974,6 +5087,7 @@ function activate(host) {
     host.registerRecipeVerb(driveReadVerb(host)),
     host.registerRecipeVerb(driveMoveVerb(host)),
     host.registerRecipeVerb(driveFolderVerb(host)),
+    host.registerRecipeVerb(sheetCreateVerb(host)),
     host.registerRecipeVerb(driveCountVerb(host)),
     host.registerRecipeVerb(sheetLookupVerb(host))
   ];

@@ -5,7 +5,7 @@ Google Drive from a recipe. Tyto knows no provider (Tyto ADR 0011, ADR 0127): ev
 Google-specific lives here, in its own repository, and reaches Tyto only through the plugin API.
 This repository is public and unlicensed.
 
-Nine recipe verbs, all in the `google` namespace:
+Ten recipe verbs, all in the `google` namespace:
 
 | Verb                  | Kind      | What it does                                                       |
 | --------------------- | --------- | ------------------------------------------------------------------ |
@@ -16,6 +16,7 @@ Nine recipe verbs, all in the `google` namespace:
 | `google.drive-read`   | source    | What a JSON or text file in Drive holds, as rows.                  |
 | `google.drive-move`   | action    | Moves each row's file or folder into a folder under the root.      |
 | `google.drive-folder` | action    | Creates a folder per row as you, and shares it with listed people. |
+| `google.sheet-create` | action    | Creates a spreadsheet per row as you, and shares it likewise.      |
 | `google.drive-count`  | transform | Adds the number of PNG and JPEG files in each row's folder.        |
 | `google.sheet-lookup` | transform | Adds a tab's columns to each row, found by a key column.           |
 
@@ -43,14 +44,18 @@ the permissions below and asks for your approval.
 | `credentials:service-account` | The service account's JSON key, kept by Tyto, never in a file. |
 | `signin:google`               | Your own Google sign-in, run by Tyto in your browser.          |
 
-The verbs that read, write and move act as the service account. `google.drive-folder`, which
-creates, acts only as you, with your own sign-in, and shares only with the people its table
-lists: the service account is never given access to what it creates. See
-[Signing in as yourself](#signing-in-as-yourself).
+The verbs that read, write and move act as the service account. The two verbs that create,
+`google.drive-folder` and `google.sheet-create`, act only as you, with your own sign-in, and
+share only with the people their table lists: the service account is never used by them and
+never given access to what they create. See [Signing in as yourself](#signing-in-as-yourself).
 
 ## Credentials
 
-The plugin signs in as a Google Cloud service account, with the account's JSON key. Create
+The verbs that read, write and move sign in as a Google Cloud service account, with the
+account's JSON key; the verbs that create never use it (see
+[Signing in as yourself](#signing-in-as-yourself)). The service account also remains the way to
+run the reading and writing verbs from the command line, until the command line can sign in.
+Create
 one in Google Cloud (IAM, Service accounts, Keys, **Add key**, JSON), enable the Sheets and
 Drive APIs in its project, and share each spreadsheet or folder with the account's email, the
 key's `client_email`, such as `tyto@example-project.iam.gserviceaccount.com`: as an editor for
@@ -69,8 +74,11 @@ file or in Tyto's cache, and is renewed a minute before it expires.
 
 ## Signing in as yourself
 
-A service account owns no storage in a person's Drive, so what the plugin creates there it
-creates as you, with your own Google sign-in. Tyto runs that sign-in, not the plugin: the
+`google.drive-folder` and `google.sheet-create` act as you: what they create is yours, in your
+Drive or a shared drive you can write to, and is shared only with the people a row lists. They
+need Tyto's desktop app 0.21 or later (plugin API 0.20), which runs the sign-in. A service
+account owns no storage in a person's Drive, so what the plugin creates there it creates as you,
+with your own Google sign-in. Tyto runs that sign-in, not the plugin: the
 browser opens only when you click **Sign in** on the plugins screen, and the plugin receives a
 short-lived access token and never the refresh token, which Tyto keeps in the system keychain
 (Tyto ADR 0174).
@@ -87,6 +95,18 @@ a client belongs to whoever registered it. You supply one on the plugins screen 
 3. In Tyto's desktop app, on the plugins screen, find the `google` sign-in row, type the client
    ID and the client secret, and choose **Save**. Then choose **Sign in** and finish in the
    browser.
+4. Set the section's `root` to the folder everything is created under, and run a step, such as
+   one of these over a table with a `name` column and a `share` column:
+
+   ```
+   google.drive-folder share=share
+   google.sheet-create parent=Clients share=share notify=no
+   ```
+
+   A `share` cell reads `ana@example.com:writer; bo@example.com:reader`: each person and the
+   role they get, `reader`, `commenter` or `writer`. Nobody else is given access. Drive emails
+   them its sharing notice only with `notify=yes`; `no` is the default. Read the plan, then
+   apply it.
 
 Saving another client, or clearing it, ends the sign-in made with the previous one. The fields
 are write-only: Tyto keeps the client in the keychain and never shows it again.
@@ -405,8 +425,15 @@ google.drive-folder name=Client parent=Clients share=Access
 - **The parent stays under `root`**, which is required: a parent outside it, missing, or
   ambiguous stops the plan. This version creates no parent.
 - **A second run creates nothing twice.** The plan asks Drive for a folder of the row's name
-  directly in the parent, not in the trash; one found is left out, with a warning naming it,
-  and so are its shares. Several found stop the plan. Two rows of one name fail the second.
+  directly in the parent, not in the trash; one found is not created again, with a warning
+  naming it. Several found stop the plan. Two rows of one name fail the second.
+- **A second run shares what is missing.** For a folder already there, the plan reads who it
+  is shared with (Drive's `permissions.list`) and plans only the people of the row who do not
+  hold that role or a stronger one (`reader` < `commenter` < `writer` < organizer < owner), so a
+  share that failed on an earlier run is tried again. A person who holds a stronger role keeps
+  it: **no permission is ever removed or lowered**. Access a person has only through a group is
+  not seen, so they are shared with directly. A folder whose sharing you cannot read stops the
+  plan.
 - **The link is known before the folder exists.** The plan asks Drive for new ids
   (`files.generateIds`), so each `create` shows the folder's address and each `share` names it.
 - A row with a blank name, a name over 500 characters, or a `share=` cell that is not
@@ -419,9 +446,28 @@ Each `create` first asks for the name in the parent again: the folder the plan's
 Apply run twice) counts as `applied`, and another folder of the name, made since the plan, fails
 with `E_GOOGLE_CHANGED`. A create Drive refuses, or whose answer is lost, is checked by reading
 its id: if the folder is there, it was made. A `share` whose `create` failed in the same batch
-fails with that reason and sends nothing; a share Drive refuses, such as an address outside a
-domain that forbids it, fails alone. One batch spends at most 20 s; what it did not reach is
+fails with that reason and sends nothing. Before a `share`, the folder's sharing is read again:
+a person who holds that role or a stronger one by now is `applied` with nothing sent. A share
+Drive refuses, such as an address outside a domain that forbids it, fails alone, and the next
+run plans it again. One batch spends at most 20 s; what it did not reach is
 `skipped`, and applying again picks it up.
+
+## `google.sheet-create`
+
+An action: creates one empty spreadsheet per row, as the signed-in person, and shares it with
+the people the row lists, as a plan you read and then apply.
+
+```
+google.sheet-create name=Client parent=Clients share=Access
+```
+
+It takes the arguments of [`google.drive-folder`](#googledrive-folder) and follows its rules,
+creation, second runs, missing shares and Apply alike: a spreadsheet is a Drive item of the type
+`application/vnd.google-apps.spreadsheet`, created by Drive's `files.create` in the parent, so
+no Sheets API request is made and Google names its first tab. Only a spreadsheet of the row's
+name counts as already there: a folder or another file of that name is a different item. Each
+`create` shows the spreadsheet's address, `https://docs.google.com/spreadsheets/d/<id>/edit`,
+before it exists.
 
 ## `google.drive-count`
 
@@ -535,6 +581,19 @@ GOOGLE_LIVE_SA_FILE=<path to the service account's JSON key> GOOGLE_LIVE_SHEET=<
 
 Share the sheet and the folder with the key's `client_email` first. Keep the key outside this
 repository.
+
+The same file holds a second, separate suite for the verbs that create, as you. It is skipped
+unless `GOOGLE_LIVE_ACCESS_TOKEN` (an access token of your own sign-in, with the Drive scope) and
+`GOOGLE_LIVE_PARENT` (the folder to create in, as its id or address) are set. It creates one
+folder with `google.drive-folder` and one spreadsheet with `google.sheet-create`, each named
+with the run's date and time, applies them, and checks that a second run plans nothing. With
+`GOOGLE_LIVE_SHARE_EMAIL`, each is shared with that address as a reader, with no email sent.
+**It deletes nothing**: remove the two items by hand afterwards.
+
+```sh
+pnpm build
+GOOGLE_LIVE_ACCESS_TOKEN=<access token> GOOGLE_LIVE_PARENT=<folder id or address> pnpm test:live
+```
 
 The `contract` workflow runs every day, and on demand, against the newest published contract
 rather than the range in `package.json`: a red run there is a Tyto release this plugin does not
