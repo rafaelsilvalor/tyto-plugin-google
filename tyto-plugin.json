@@ -1,14 +1,22 @@
 {
   "name": "google",
   "version": "0.1.0",
-  "engine": ">=0.15",
+  "engine": ">=0.20",
   "contributes": ["recipe-verb"],
   "permissions": [
     "net:oauth2.googleapis.com",
     "net:sheets.googleapis.com",
     "net:www.googleapis.com",
-    "credentials:service-account"
+    "credentials:service-account",
+    "signin:google"
   ],
   "namespace": "google",
+  "signin": {
+    "google": {
+      "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&prompt=consent",
+      "token": "https://oauth2.googleapis.com/token",
+      "scopes": ["openid", "email", "https://www.googleapis.com/auth/drive"]
+    }
+  },
   "writes": ["clear", "write-row", "add-tab", "update", "move", "delete", "add", "format-tab"]
 }

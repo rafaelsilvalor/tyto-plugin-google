@@ -8,6 +8,8 @@
 export type GoogleErrorCode =
   /** The service account or the `google` section is missing or unusable; no request was made. */
   | 'E_GOOGLE_CONFIG'
+  /** Nobody is signed in to Google for the plugin, or this host cannot sign a person in. */
+  | 'E_GOOGLE_SIGNIN'
   /** Google refused the service account, its token, or its access to a file. */
   | 'E_GOOGLE_AUTH'
   /** Google answered a 3xx. Never followed: the next host may be one the person never allowed. */
@@ -30,7 +32,10 @@ export interface GoogleError {
   readonly message: string;
   /** The HTTP status, when Google answered. */
   readonly status?: number;
-  /** The host's own refusal code (`E_PERMISSION`, `E_PLUGIN_FETCH`, `E_CREDENTIAL_MISSING`). */
+  /**
+   * The host's own refusal code (`E_PERMISSION`, `E_PLUGIN_FETCH`, `E_CREDENTIAL_MISSING`,
+   * `E_SIGNIN_REQUIRED`, `E_SIGNIN_UNAVAILABLE`).
+   */
   readonly hostCode?: string;
 }
 
