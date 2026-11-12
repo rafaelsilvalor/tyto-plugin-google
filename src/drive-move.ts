@@ -47,7 +47,7 @@ const ARGUMENTS: readonly ArgumentSpec[] = [
   { name: 'to', type: 'text', required: true },
 ];
 
-export type DriveMoveHost = Pick<PluginHost, 'credentials' | 'fetch'>;
+export type DriveMoveHost = Pick<PluginHost, 'credentials' | 'fetch' | 'signin'>;
 
 /**
  * `google.drive-move to=<folder> [file=<column>]`: moves each row's Drive file or folder into

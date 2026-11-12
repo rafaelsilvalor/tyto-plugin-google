@@ -36,36 +36,40 @@ the permissions below and asks for your approval.
 
 ### What it may reach
 
-| Permission                    | Why                                                            |
-| ----------------------------- | -------------------------------------------------------------- |
-| `net:oauth2.googleapis.com`   | Exchanges the service account's signed assertion for a token.  |
-| `net:sheets.googleapis.com`   | The Sheets API: reading and writing a spreadsheet.             |
-| `net:www.googleapis.com`      | The Drive API: listing, reading and moving files.              |
-| `credentials:service-account` | The service account's JSON key, kept by Tyto, never in a file. |
-| `signin:google`               | Your own Google sign-in, run by Tyto in your browser.          |
+| Permission                    | Why                                                                          |
+| ----------------------------- | ---------------------------------------------------------------------------- |
+| `net:oauth2.googleapis.com`   | Exchanges the service account's signed assertion for a token (command line). |
+| `net:sheets.googleapis.com`   | The Sheets API: reading and writing a spreadsheet.                           |
+| `net:www.googleapis.com`      | The Drive API: listing, reading and moving files.                            |
+| `credentials:service-account` | The service account's JSON key, for the command line only.                   |
+| `signin:google`               | Your own Google sign-in, run by Tyto in your browser.                        |
 
-The verbs that read, write and move act as the service account. The two verbs that create,
-`google.drive-folder` and `google.sheet-create`, act only as you, with your own sign-in, and
-share only with the people their table lists: the service account is never used by them and
-never given access to what they create. See [Signing in as yourself](#signing-in-as-yourself).
+**In the desktop app every verb acts as you**, with your own Google sign-in, and never as a
+service account, even when one is stored: see [Signing in as yourself](#signing-in-as-yourself).
+The command line cannot sign in yet, so there the verbs that read, write and move act as a
+service account instead, and the two verbs that create, `google.drive-folder` and
+`google.sheet-create`, do not run: see
+[The service account: only for the command line](#the-service-account-only-for-the-command-line).
 
-## Credentials
+## The service account: only for the command line
 
-The verbs that read, write and move sign in as a Google Cloud service account, with the
-account's JSON key; the verbs that create never use it (see
-[Signing in as yourself](#signing-in-as-yourself)). The service account also remains the way to
-run the reading and writing verbs from the command line, until the command line can sign in.
-Create
-one in Google Cloud (IAM, Service accounts, Keys, **Add key**, JSON), enable the Sheets and
+The command line (`tyto recipe run`, `tyto mcp`) has no window to sign in from, so until it can
+sign in, the verbs that read, write and move run there as a Google Cloud service account, with
+the account's JSON key. The desktop app never uses it: a step in the window acts as you, and
+fails with `E_GOOGLE_SIGNIN` when nobody is signed in rather than falling back to the service
+account. The verbs that create never use it anywhere. On the command line with no key stored, a
+verb fails with `E_GOOGLE_CONFIG`, saying the command line needs one until it can sign in.
+
+Create one in Google Cloud (IAM, Service accounts, Keys, **Add key**, JSON), enable the Sheets and
 Drive APIs in its project, and share each spreadsheet or folder with the account's email, the
 key's `client_email`, such as `tyto@example-project.iam.gserviceaccount.com`: as an editor for
 anything a sink or an action writes, as a viewer for what is only read. A file the account
 cannot see answers as missing, and the error names the email to share it with.
 
-| Where        | The whole JSON key, from `{` to `}`          |
-| ------------ | -------------------------------------------- |
-| Command line | `TYTO_PLUGIN_GOOGLE_SERVICE_ACCOUNT`         |
-| Desktop app  | the system keychain, from the plugins screen |
+| Where        | The whole JSON key, from `{` to `}`                        |
+| ------------ | ---------------------------------------------------------- |
+| Command line | `TYTO_PLUGIN_GOOGLE_SERVICE_ACCOUNT`                       |
+| Desktop app  | not read: a key stored there is ignored, every verb is you |
 
 The key must be a `service_account` key with a PKCS#8 `private_key`. Its assertion goes only to
 `https://oauth2.googleapis.com/token`, whatever the key's `token_uri` says; a key naming another
@@ -74,9 +78,12 @@ file or in Tyto's cache, and is renewed a minute before it expires.
 
 ## Signing in as yourself
 
-`google.drive-folder` and `google.sheet-create` act as you: what they create is yours, in your
-Drive or a shared drive you can write to, and is shared only with the people a row lists. They
-need Tyto's desktop app 0.21 or later (plugin API 0.20), which runs the sign-in. A service
+In the desktop app every verb acts as you: the verbs that read, write and move see what your own
+account sees, so a spreadsheet or a folder needs no sharing with anyone else, and a file you
+cannot open answers as missing, with an error that says it is not shared with the account signed
+in on the plugins screen. `google.drive-folder` and `google.sheet-create` create what is yours,
+in your Drive or a shared drive you can write to, shared only with the people a row lists. Every
+verb needs Tyto's desktop app 0.21 or later (plugin API 0.20), which runs the sign-in. A service
 account owns no storage in a person's Drive, so what the plugin creates there it creates as you,
 with your own Google sign-in. Tyto runs that sign-in, not the plugin: the
 browser opens only when you click **Sign in** on the plugins screen, and the plugin receives a
@@ -111,10 +118,11 @@ a client belongs to whoever registered it. You supply one on the plugins screen 
 Saving another client, or clearing it, ends the sign-in made with the previous one. The fields
 are write-only: Tyto keeps the client in the keychain and never shows it again.
 
-When a verb needs your sign-in and nobody is signed in, it fails with `E_GOOGLE_SIGNIN` and says
-to sign in on the plugins screen. The command line has no window to sign in from, so there the
-same verb fails with `E_GOOGLE_SIGNIN` saying the command line cannot sign in; run that step in
-the desktop app. Your access token is redacted from every message, as the service account's is.
+When nobody is signed in, every verb in the desktop app fails with `E_GOOGLE_SIGNIN` and says to
+sign in on the plugins screen; none falls back to a stored service account. The command line has
+no window to sign in from, so there `google.drive-folder` and `google.sheet-create` fail with
+`E_GOOGLE_SIGNIN` saying the command line cannot sign in, and the other verbs act as the service
+account. Your access token is redacted from every message, as the service account's is.
 
 ## The `google` section of `.tyto/project.json`
 
@@ -179,7 +187,9 @@ google.sheet-rows tab=Tasks key=ID links=Brief notes=Owner
   copy, so a sheet edited during a run is never two tables stitched together (a later page that
   finds another copy fails and asks you to run again). The next run uses the cached copy only
   while Drive still gives the same `version`, and running again without cache reads Google.
-  When Drive does not give a version, the tab is read live and nothing is cached.
+  When Drive does not give a version, the tab is read live and nothing is cached. A copy read as
+  you and one read as the command line's service account are kept apart, so neither is ever
+  served to the other.
 
 ## `google.sheet-write`
 
@@ -420,8 +430,9 @@ google.drive-folder name=Client parent=Clients share=Access
 
 - **As you, and shared only with whom the row lists.** Every request of the plan and of its
   Apply is signed with your sign-in; nobody signed in is `E_GOOGLE_SIGNIN`. The service account
-  is not used and is shared nothing: a recipe that reads the new folder as it needs the folder
-  shared with it by hand, or a `share=` entry naming it.
+  is not used and is shared nothing: a recipe that reads the new folder in the desktop app reads
+  it as you, and one run from the command line needs the folder shared with the service account
+  by hand, or a `share=` entry naming it.
 - **The parent stays under `root`**, which is required: a parent outside it, missing, or
   ambiguous stops the plan. This version creates no parent.
 - **A second run creates nothing twice.** The plan asks Drive for a folder of the row's name
@@ -536,6 +547,7 @@ have been done. Each retry waits Google's `Retry-After`, or 10 s and then 20 s, 
 | Code                | What happened                                                                                      |
 | ------------------- | -------------------------------------------------------------------------------------------------- |
 | `E_GOOGLE_CONFIG`   | No key, a key that is not a service account's, a wrong `google` section, or an API not enabled.    |
+| `E_GOOGLE_SIGNIN`   | In the desktop app nobody is signed in to Google; on the command line, a verb that creates as you. |
 | `E_GOOGLE_AUTH`     | Google refused the key (`invalid_grant`: revoked, or the clock is off), or the file is not shared. |
 | `E_GOOGLE_REDIRECT` | Google answered a redirect, which is never followed.                                               |
 | `E_GOOGLE_HTTP`     | Any other failed answer, such as a missing file or a 5xx still failing after its retry.            |
@@ -580,7 +592,8 @@ GOOGLE_LIVE_SA_FILE=<path to the service account's JSON key> GOOGLE_LIVE_SHEET=<
 ```
 
 Share the sheet and the folder with the key's `client_email` first. Keep the key outside this
-repository.
+repository. The suite runs the plugin as the command line does, on a host without a sign-in
+port, which is the only place the verbs act as the service account.
 
 The same file holds a second, separate suite for the verbs that create, as you. It is skipped
 unless `GOOGLE_LIVE_ACCESS_TOKEN` (an access token of your own sign-in, with the Drive scope) and

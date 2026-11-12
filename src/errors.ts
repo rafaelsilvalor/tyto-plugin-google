@@ -42,6 +42,16 @@ export interface GoogleError {
 export type GoogleResult<T> =
   { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: GoogleError };
 
+/**
+ * Who a client acts as: the person signed in on the desktop's plugins screen, or the service
+ * account the command line falls back to until it can sign in (TYTO-677). A failure names it
+ * when it says what a file must be shared with, and the sheet cache keeps the two apart.
+ */
+export type Identity =
+  { readonly kind: 'person' } | { readonly kind: 'service-account'; readonly clientEmail: string };
+
+export const PERSON: Identity = { kind: 'person' };
+
 export function googleOk<T>(value: T): GoogleResult<T> {
   return { ok: true, value };
 }
@@ -130,8 +140,8 @@ const QUOTED_LIMIT = 300;
  * whose cause is "the API is not enabled in this Cloud project" can carry a scope signature
  * too, and the same token with the same scopes succeeds once the API is enabled. So
  * service-disabled is tested first, the scope signature second, then a missing file or one not
- * shared with the service account, and a 401 or 403 that matches nothing names no cause rather
- * than borrowing one.
+ * shared with whoever the client acts as, and a 401 or 403 that matches nothing names no cause
+ * rather than borrowing one.
  *
  * `text` is the body as Google sent it; the caller redacts the whole message afterwards.
  */
@@ -139,7 +149,8 @@ export function classifyFailure(
   label: string,
   status: number,
   text: string,
-  clientEmail: string,
+  /** Who the call acted as; `undefined` where the caller cannot say (a retried 5xx). */
+  identity: Identity | undefined,
 ): GoogleError {
   const body = readErrorBody(text);
   const said = quoted(body, text);
@@ -150,9 +161,9 @@ export function classifyFailure(
       code: 'E_GOOGLE_CONFIG',
       status,
       message:
-        `${label} answered ${status}: the API is not enabled in the service account's Cloud ` +
-        'project. Enable it in the Google Cloud console (APIs & Services) and run again; no ' +
-        `key needs changing. ${said}`.trim(),
+        `${label} answered ${status}: the API is not enabled in ${projectOf(identity)}. ` +
+        'Enable it in the Google Cloud console (APIs & Services) and run again; nothing else ' +
+        `needs changing. ${said}`.trim(),
     };
   }
   if (SCOPE_INSUFFICIENT.test(signatures)) {
@@ -169,8 +180,8 @@ export function classifyFailure(
       code: status === 404 ? 'E_GOOGLE_HTTP' : 'E_GOOGLE_AUTH',
       status,
       message:
-        `${label} answered ${status}: the file does not exist, or is not shared with the ` +
-        `service account. Check the id, and share it with ${clientEmail}. ${said}`.trim(),
+        `${label} answered ${status}: the file does not exist, or is not shared with ` +
+        `${sharedWith(identity)} ${said}`.trim(),
     };
   }
   if (status === 401 || status === 403) {
@@ -183,6 +194,23 @@ export function classifyFailure(
     };
   }
   return { code: 'E_GOOGLE_HTTP', status, message: `${label} answered ${status}. ${said}`.trim() };
+}
+
+/** The Cloud project whose APIs a call goes through. */
+function projectOf(identity: Identity | undefined): string {
+  if (identity === undefined) return 'the Cloud project this call goes through';
+  return identity.kind === 'person'
+    ? 'the Cloud project of the OAuth client set on the plugins screen'
+    : "the service account's Cloud project";
+}
+
+/** Who a file must be shared with, and what to do about it, as the end of a sentence. */
+function sharedWith(identity: Identity | undefined): string {
+  if (identity === undefined) return 'the account this call acts as. Check the id.';
+  return identity.kind === 'person'
+    ? 'the Google account signed in on the plugins screen. Check the id, and share the file ' +
+        'with that account or sign in with one it is shared with.'
+    : `the service account. Check the id, and share it with ${identity.clientEmail}.`;
 }
 
 /** Google's own words for a failure, shortened: its `message` when it sent JSON. */

@@ -18,7 +18,7 @@ import { argumentsProblem, verbFailed, type Diagnostic } from './verb.js';
 /**
  * Reading one tab once, for every verb that reads a tab as a table (`google.sheet-rows`,
  * `google.sheet-lookup`): the same fetch, the same header rules, the same cache under
- * `sheet/<spreadsheetId>/<sheetId>` at the file's Drive `version`, and the same `refresh`.
+ * `sheet/<who>/<spreadsheetId>/<sheetId>` at the file's Drive `version`, and the same `refresh`.
  */
 
 /** What a step asks of a tab: where it is, and the columns it needs found in its header. */
@@ -65,7 +65,7 @@ export async function firstSnapshot(
     );
   }
   if (version.ok && !refresh) {
-    const entry = await readCache(host, verb, asked.spreadsheetId, tab.sheetId);
+    const entry = await readCache(host, verb, client.identity, asked.spreadsheetId, tab.sheetId);
     if (entry !== undefined && entry.version === version.value) {
       const cached = readOf(verb, entry.snapshot, asked, entry.fetchedAt);
       if ('severity' in cached || covers(entry.snapshot, cached.plan)) return cached;
@@ -81,7 +81,7 @@ export async function firstSnapshot(
       fetchedAt: live.fetchedAt,
       snapshot: live.snapshot,
     };
-    await writeCache(host, verb, entry);
+    await writeCache(host, verb, client.identity, entry);
   }
   return live;
 }

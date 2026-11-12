@@ -4,6 +4,7 @@ import type { FetchedResponse, HostFetchInit } from '@tyto/plugin-api';
 import { testPlugin, type PluginHarness, type TestRecipeOptions } from '@tyto/plugin-api/testing';
 
 import { response } from './host.js';
+import { withoutSigninPort } from './sheets.js';
 import { testClock, testKey, tokenEndpoint, type TestKey } from './google.js';
 
 /**
@@ -72,7 +73,13 @@ export async function fakeDrive(
   drive: FakeDrive,
   options: {
     readonly section?: unknown;
+    /**
+     * Left out, the host is the command line's (no sign-in port: the service account acts).
+     * Given, it is the desktop's with these people signed in, and the person acts.
+     */
     readonly signins?: Readonly<Record<string, string>>;
+    /** Whether a service account is stored; `true` when left out. */
+    readonly serviceAccount?: boolean;
   } = {},
 ): Promise<FakeGoogleDrive> {
   key ??= await testKey();
@@ -81,8 +88,10 @@ export async function fakeDrive(
   const loaded = await testPlugin({
     manifest,
     load: () => import(entry),
-    secrets: { 'service-account': key.json },
-    ...(options.signins === undefined ? {} : { signins: options.signins }),
+    secrets: options.serviceAccount === false ? {} : { 'service-account': key.json },
+    ...(options.signins === undefined
+      ? { capabilities: withoutSigninPort() }
+      : { signins: options.signins }),
     ...(options.section === undefined ? {} : { section: options.section }),
     async fetch(url: string, init: HostFetchInit) {
       const parsed = new URL(url);

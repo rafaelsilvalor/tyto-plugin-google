@@ -29,16 +29,19 @@ const NO_BROWSER =
  * token and never opens a browser (Tyto ADR 0174 decision 6). The token is held for the life
  * of this source only, one verb call, and {@link Tokens.invalidate} drops it, so the next
  * {@link Tokens.token} asks the host again: after a 401 the host may hold a newer one.
+ *
+ * `first` is a token the caller already asked the host for, to choose who acts: it is held
+ * at once rather than asked for twice.
  */
-export function createSigninTokens(host: SigninHost): Tokens {
-  let held: string | undefined;
+export function createSigninTokens(host: SigninHost, first?: string): Tokens {
+  let held: string | undefined = first;
   /** Every token this source handed out, so one dropped by `invalidate` is still redacted. */
   const handedOut = new Set<string>();
 
   return {
     async token(): Promise<GoogleResult<string>> {
       if (held === undefined) {
-        const asked = await askHost(host);
+        const asked = await askSignin(host);
         if (!asked.ok) return asked;
         held = asked.value;
       }
@@ -52,8 +55,12 @@ export function createSigninTokens(host: SigninHost): Tokens {
   };
 }
 
-/** The host's answer, with its refusals turned into a sentence the person can act on. */
-async function askHost(host: SigninHost): Promise<GoogleResult<string>> {
+/**
+ * The host's answer, with its refusals turned into a sentence the person can act on. A host
+ * without the sign-in port (the CLI) is `E_GOOGLE_SIGNIN` with the host code
+ * `E_SIGNIN_UNAVAILABLE`, which `connect` reads as "act as the service account".
+ */
+export async function askSignin(host: SigninHost): Promise<GoogleResult<string>> {
   try {
     return googleOk(await host.signin.accessToken(SIGNIN_ID));
   } catch (thrown) {

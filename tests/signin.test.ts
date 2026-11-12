@@ -113,7 +113,7 @@ describe('createSigninTokens', () => {
     ];
     const sent: string[] = [];
     const client = createGoogleClient({
-      clientEmail: 'the signed-in person',
+      identity: { kind: 'person' },
       tokens: createSigninTokens(host),
       transport: {
         fetch(_url, init = {}) {

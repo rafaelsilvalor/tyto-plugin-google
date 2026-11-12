@@ -41,12 +41,19 @@ export interface GoogleConfig {
 
 export type ConfigHost = Pick<PluginHost, 'credentials'>;
 
+/**
+ * Read only on a host that cannot sign a person in (the CLI): the desktop acts as the signed-in
+ * person and never asks for the service account (TYTO-677).
+ */
 const NO_ACCOUNT =
-  'No Google service account is stored. Store its whole JSON key as the service-account ' +
-  `credential (${SERVICE_ACCOUNT_VARIABLE} on the command line, the keychain in the desktop).`;
+  'No Google service account is stored, and the command line needs one until it can sign in ' +
+  'to Google as a person. Store its whole JSON key in ' +
+  `${SERVICE_ACCOUNT_VARIABLE}, or run this step in the desktop app, signed in to Google on ` +
+  'its plugins screen.';
 
 /**
- * The section and the service account, or why they cannot be had — before any request.
+ * The section and the service account, or why they cannot be had — before any request. Only
+ * the command line acts as the service account; the desktop acts as the signed-in person.
  *
  * The section is checked first, so a typo in the folder's project costs no secret read.
  */

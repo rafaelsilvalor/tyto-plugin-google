@@ -9,7 +9,7 @@ import { filledRows, readGridTabs, type GridTab } from './sheet-snapshot.js';
 import type { AppliedOperation, ApplyAnswer, ApplyRequest, JsonValue } from './verb.js';
 
 /** The parts of the host an Apply uses. */
-export type ApplyHost = Pick<PluginHost, 'credentials' | 'fetch' | 'cache' | 'log'>;
+export type ApplyHost = Pick<PluginHost, 'credentials' | 'fetch' | 'signin' | 'cache' | 'log'>;
 
 /** The time an Apply measures its budget by; a test passes one it moves. */
 export interface WriteClock {
