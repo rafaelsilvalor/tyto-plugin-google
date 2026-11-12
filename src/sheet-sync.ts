@@ -56,7 +56,7 @@ const ARGUMENTS: readonly ArgumentSpec[] = [
   { name: 'archived', type: 'text' },
 ];
 
-export type SheetSyncHost = Pick<PluginHost, 'credentials' | 'fetch' | 'cache' | 'log'>;
+export type SheetSyncHost = Pick<PluginHost, 'credentials' | 'fetch' | 'signin' | 'cache' | 'log'>;
 
 /**
  * `google.sheet-sync key=<col> tab=<tab> [move=<col>] [keep=<cols>] [archived=<tabs>]`: makes

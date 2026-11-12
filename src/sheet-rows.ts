@@ -45,7 +45,7 @@ const ARGUMENTS: readonly ArgumentSpec[] = [
   { name: 'max', type: 'number' },
 ];
 
-export type SheetRowsHost = Pick<PluginHost, 'credentials' | 'fetch' | 'cache' | 'log'>;
+export type SheetRowsHost = Pick<PluginHost, 'credentials' | 'fetch' | 'signin' | 'cache' | 'log'>;
 
 /**
  * `google.sheet-rows`: one tab of a spreadsheet as a table, one row per sheet row under the
@@ -154,7 +154,7 @@ async function laterSnapshot(
     code: 'E_RECIPE_VERB',
     message: `'${SHEET_ROWS}' failed: the tab changed while its pages were read; run again.`,
   };
-  const entry = await readCache(host, SHEET_ROWS, asked.spreadsheetId, cursor.s);
+  const entry = await readCache(host, SHEET_ROWS, client.identity, asked.spreadsheetId, cursor.s);
   if (entry !== undefined) {
     const cached = readOf(SHEET_ROWS, entry.snapshot, asked, entry.fetchedAt);
     if (

@@ -54,7 +54,7 @@ const TEXT_COLUMNS: readonly Column[] = [
   { name: 'text', type: 'text', origin: ORIGIN },
 ];
 
-export type DriveReadHost = Pick<PluginHost, 'credentials' | 'fetch'>;
+export type DriveReadHost = Pick<PluginHost, 'credentials' | 'fetch' | 'signin'>;
 
 /**
  * `google.drive-read`: what a JSON or text file holds, as rows. `file=` reads one file;

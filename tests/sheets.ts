@@ -75,6 +75,10 @@ export interface SheetCall {
 export interface FakeGoogle {
   readonly plugin: PluginHarness;
   readonly calls: SheetCall[];
+  /** Every Sheets and Drive request's `Authorization` header, in order: whose token signed it. */
+  readonly bearers: string[];
+  /** How many times the service account's token was asked for at Google's token endpoint. */
+  readonly assertions: { count: number };
   readonly sheet: FakeSpreadsheet;
 }
 
@@ -85,23 +89,39 @@ export async function fakeGoogle(
   options: {
     readonly section?: unknown;
     readonly capabilities?: Partial<HostCapabilities>;
+    /**
+     * Left out, the host is the command line's: it has no sign-in port, so the plugin acts as
+     * the service account. Given, it is the desktop's, with these people signed in (`{}` for
+     * nobody), and the plugin acts as the person.
+     */
+    readonly signins?: Readonly<Record<string, string>>;
+    /** Whether a service account is stored; `true` when left out. */
+    readonly serviceAccount?: boolean;
   } = {},
 ): Promise<FakeGoogle> {
   key ??= await testKey();
   const endpoint = tokenEndpoint(key.publicKey, testClock(Date.now()));
   const calls: SheetCall[] = [];
+  const bearers: string[] = [];
+  const assertions = { count: 0 };
   const loaded = await testPlugin({
     manifest,
     load: () => import(entry),
-    secrets: { 'service-account': key.json },
+    secrets: options.serviceAccount === false ? {} : { 'service-account': key.json },
     ...(options.section === undefined ? {} : { section: options.section }),
-    ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
+    ...(options.signins === undefined ? {} : { signins: options.signins }),
+    capabilities: {
+      ...(options.signins === undefined ? withoutSigninPort() : {}),
+      ...options.capabilities,
+    },
     async fetch(url: string, init: HostFetchInit) {
       const parsed = new URL(url);
       if (parsed.host === 'oauth2.googleapis.com') {
+        assertions.count += 1;
         const answer = await endpoint.answer(init);
         return response(answer.status, await answer.text());
       }
+      bearers.push(String(init.headers?.['Authorization'] ?? ''));
       const query: Record<string, string | string[]> = {};
       for (const name of new Set(parsed.searchParams.keys())) {
         const all = parsed.searchParams.getAll(name);
@@ -121,7 +141,15 @@ export async function fakeGoogle(
   if (!loaded.ok) {
     throw new Error(loaded.error.map((item) => `${item.code}: ${item.message}`).join('\n'));
   }
-  return { plugin: loaded.value, calls, sheet };
+  return { plugin: loaded.value, calls, bearers, assertions, sheet };
+}
+
+/**
+ * The command line's host: no `signinAccessToken` port, so `host.signin` answers
+ * `E_SIGNIN_UNAVAILABLE`, as `tyto recipe run` and `tyto mcp` do.
+ */
+export function withoutSigninPort(): Partial<HostCapabilities> {
+  return { signinAccessToken: undefined } as unknown as Partial<HostCapabilities>;
 }
 
 function answerOf(sheet: FakeSpreadsheet, call: SheetCall): FetchedResponse {

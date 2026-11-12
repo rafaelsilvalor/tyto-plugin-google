@@ -1,4 +1,5 @@
 // src/errors.ts
+var PERSON = { kind: "person" };
 function googleOk(value) {
   return { ok: true, value };
 }
@@ -42,7 +43,7 @@ function isRateLimited(status, body) {
 var SERVICE_DISABLED = /has not been used in project|SERVICE_DISABLED|API .* is disabled/i;
 var SCOPE_INSUFFICIENT = /ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficient authentication scopes|insufficientPermissions/i;
 var QUOTED_LIMIT = 300;
-function classifyFailure(label, status, text, clientEmail) {
+function classifyFailure(label, status, text, identity) {
   const body = readErrorBody(text);
   const said = quoted(body, text);
   const signatures = [text, ...body.reasons, body.status ?? ""].join("\n");
@@ -50,7 +51,7 @@ function classifyFailure(label, status, text, clientEmail) {
     return {
       code: "E_GOOGLE_CONFIG",
       status,
-      message: `${label} answered ${status}: the API is not enabled in the service account's Cloud project. Enable it in the Google Cloud console (APIs & Services) and run again; no ` + `key needs changing. ${said}`.trim()
+      message: `${label} answered ${status}: the API is not enabled in ${projectOf(identity)}. Enable it in the Google Cloud console (APIs & Services) and run again; nothing else ` + `needs changing. ${said}`.trim()
     };
   }
   if (SCOPE_INSUFFICIENT.test(signatures)) {
@@ -64,7 +65,7 @@ function classifyFailure(label, status, text, clientEmail) {
     return {
       code: status === 404 ? "E_GOOGLE_HTTP" : "E_GOOGLE_AUTH",
       status,
-      message: `${label} answered ${status}: the file does not exist, or is not shared with the ` + `service account. Check the id, and share it with ${clientEmail}. ${said}`.trim()
+      message: `${label} answered ${status}: the file does not exist, or is not shared with ` + `${sharedWith(identity)} ${said}`.trim()
     };
   }
   if (status === 401 || status === 403) {
@@ -75,6 +76,14 @@ function classifyFailure(label, status, text, clientEmail) {
     };
   }
   return { code: "E_GOOGLE_HTTP", status, message: `${label} answered ${status}. ${said}`.trim() };
+}
+function projectOf(identity) {
+  if (identity === void 0) return "the Cloud project this call goes through";
+  return identity.kind === "person" ? "the Cloud project of the OAuth client set on the plugins screen" : "the service account's Cloud project";
+}
+function sharedWith(identity) {
+  if (identity === void 0) return "the account this call acts as. Check the id.";
+  return identity.kind === "person" ? "the Google account signed in on the plugins screen. Check the id, and share the file with that account or sign in with one it is shared with." : `the service account. Check the id, and share it with ${identity.clientEmail}.`;
 }
 function quoted(body, text) {
   const words = (body.message ?? text).trim();
@@ -162,7 +171,7 @@ function base64Decode(text) {
 var TOKEN_URI = "https://oauth2.googleapis.com/token";
 var SERVICE_ACCOUNT_CREDENTIAL = "service-account";
 var SERVICE_ACCOUNT_VARIABLE = "TYTO_PLUGIN_GOOGLE_SERVICE_ACCOUNT";
-var NO_ACCOUNT = `No Google service account is stored. Store its whole JSON key as the service-account credential (${SERVICE_ACCOUNT_VARIABLE} on the command line, the keychain in the desktop).`;
+var NO_ACCOUNT = `No Google service account is stored, and the command line needs one until it can sign in to Google as a person. Store its whole JSON key in ${SERVICE_ACCOUNT_VARIABLE}, or run this step in the desktop app, signed in to Google on its plugins screen.`;
 async function resolveGoogleConfig(host, sectionValue) {
   const section = readSection(sectionValue);
   if (!section.ok) return section;
@@ -369,7 +378,7 @@ async function send(transport, outgoing, redact) {
         { status }
       );
     }
-    const failure = classifyFailure(label, status, text, "");
+    const failure = classifyFailure(label, status, text, void 0);
     return googleError(
       "E_GOOGLE_HTTP",
       redact(`${failure.message} Still so${tried} within ${budget} s; try again later.`),
@@ -388,7 +397,7 @@ function retryAfter(header, now) {
   return Number.isNaN(date) ? void 0 : Math.max(0, date - now);
 }
 function createGoogleClient(options) {
-  const { transport, tokens, clientEmail } = options;
+  const { transport, tokens, identity } = options;
   async function request(method, address, query, body) {
     const answer = await exchange(method, address, query, body);
     if (!answer.ok) return answer;
@@ -434,13 +443,14 @@ function createGoogleClient(options) {
         continue;
       }
       if (status < 200 || status >= 300) {
-        const failure = classifyFailure(label, status, text, clientEmail);
+        const failure = classifyFailure(label, status, text, identity);
         return { ok: false, error: { ...failure, message: redact(failure.message) } };
       }
       return googleOk({ status, text, label });
     }
   }
   return {
+    identity,
     get: (url, query) => request("GET", url, query, void 0),
     async getText(url, query) {
       const answer = await exchange("GET", url, query, void 0, "*/*");
@@ -652,13 +662,13 @@ function tokenRefusal(text) {
 var SIGNIN_ID = "google";
 var SIGNED_OUT = "Nobody is signed in to Google for this plugin. Sign in to Google on the plugins screen of Tyto's desktop app (set the OAuth client there first if the row asks for one), then run again.";
 var NO_BROWSER = "The command line cannot sign in to Google as a person: it has no window to sign in from. Run this step in the desktop app, after signing in to Google on its plugins screen.";
-function createSigninTokens(host) {
-  let held;
+function createSigninTokens(host, first) {
+  let held = first;
   const handedOut = /* @__PURE__ */ new Set();
   return {
     async token() {
       if (held === void 0) {
-        const asked = await askHost(host);
+        const asked = await askSignin(host);
         if (!asked.ok) return asked;
         held = asked.value;
       }
@@ -671,7 +681,7 @@ function createSigninTokens(host) {
     secrets: () => [...handedOut]
   };
 }
-async function askHost(host) {
+async function askSignin(host) {
   try {
     return googleOk(await host.signin.accessToken(SIGNIN_ID));
   } catch (thrown) {
@@ -691,22 +701,30 @@ async function askHost(host) {
 }
 
 // src/connect.ts
-async function connect(host, section, through) {
-  const config = await resolveGoogleConfig(host, section);
-  if (!config.ok) return config;
+async function connect(host, sectionValue, through) {
+  const section = readSection(sectionValue);
+  if (!section.ok) return section;
   const transport = through ?? { fetch: (url, init) => host.fetch(url, init) };
-  const tokens = createTokenSource({ transport, account: config.value.account });
+  const signedIn = await askSignin(host);
+  if (signedIn.ok) {
+    const tokens = createSigninTokens(host, signedIn.value);
+    const client2 = createGoogleClient({ transport, tokens, identity: PERSON });
+    return googleOk({ section: section.value, client: client2 });
+  }
+  if (signedIn.error.hostCode !== "E_SIGNIN_UNAVAILABLE") return signedIn;
+  const config = await resolveGoogleConfig(host, sectionValue);
+  if (!config.ok) return config;
+  const { account } = config.value;
   const client = createGoogleClient({
     transport,
-    tokens,
-    clientEmail: config.value.account.clientEmail
+    tokens: createTokenSource({ transport, account }),
+    identity: { kind: "service-account", clientEmail: account.clientEmail }
   });
-  return googleOk({ config: config.value, client });
+  return googleOk({ section: config.value.section, client });
 }
-var PERSON = "your own Google account, the one signed in on the plugins screen";
 function connectAsPerson(host, through) {
   const transport = through ?? { fetch: (url, init) => host.fetch(url, init) };
-  return createGoogleClient({ transport, tokens: createSigninTokens(host), clientEmail: PERSON });
+  return createGoogleClient({ transport, tokens: createSigninTokens(host), identity: PERSON });
 }
 
 // src/drive-query.ts
@@ -3343,13 +3361,14 @@ function sheetCreateVerb(host, clock = systemClock) {
 
 // src/sheet-cache.ts
 var ENTRY_LIMIT_BYTES = 32 * 1024 * 1024;
-function cacheKey(spreadsheetId, sheetId) {
-  return `sheet/${spreadsheetId}/${sheetId}`;
+function cacheKey(identity, spreadsheetId, sheetId) {
+  const who = identity.kind === "person" ? "person" : identity.clientEmail;
+  return `sheet/${who}/${spreadsheetId}/${sheetId}`;
 }
-async function readCache(host, verb, spreadsheetId, sheetId) {
+async function readCache(host, verb, identity, spreadsheetId, sheetId) {
   let stored;
   try {
-    stored = await host.cache.get(cacheKey(spreadsheetId, sheetId));
+    stored = await host.cache.get(cacheKey(identity, spreadsheetId, sheetId));
   } catch (thrown) {
     host.log.warn(`${verb} read no cache: ${messageOf(thrown)}`);
     return void 0;
@@ -3366,14 +3385,15 @@ async function readCache(host, verb, spreadsheetId, sheetId) {
   }
   return entry;
 }
-async function writeCache(host, verb, entry) {
+async function writeCache(host, verb, identity, entry) {
   const bytes = new TextEncoder().encode(JSON.stringify(entry));
   if (bytes.byteLength > ENTRY_LIMIT_BYTES) {
     host.log.warn(`${verb} cached no tab of ${bytes.byteLength} bytes, over the host's limit`);
     return;
   }
   try {
-    await host.cache.put(cacheKey(entry.snapshot.spreadsheetId, entry.snapshot.sheetId), bytes);
+    const key = cacheKey(identity, entry.snapshot.spreadsheetId, entry.snapshot.sheetId);
+    await host.cache.put(key, bytes);
   } catch (thrown) {
     host.log.warn(`${verb} cached nothing: ${messageOf(thrown)}`);
   }
@@ -3421,7 +3441,7 @@ async function firstSnapshot(host, verb, client, asked, refresh) {
     );
   }
   if (version.ok && !refresh) {
-    const entry = await readCache(host, verb, asked.spreadsheetId, tab.sheetId);
+    const entry = await readCache(host, verb, client.identity, asked.spreadsheetId, tab.sheetId);
     if (entry !== void 0 && entry.version === version.value) {
       const cached = readOf(verb, entry.snapshot, asked, entry.fetchedAt);
       if ("severity" in cached || covers(entry.snapshot, cached.plan)) return cached;
@@ -3436,7 +3456,7 @@ async function firstSnapshot(host, verb, client, asked, refresh) {
       fetchedAt: live.fetchedAt,
       snapshot: live.snapshot
     };
-    await writeCache(host, verb, entry);
+    await writeCache(host, verb, client.identity, entry);
   }
   return live;
 }
@@ -4500,7 +4520,7 @@ async function laterSnapshot(host, client, asked, cursor) {
     code: "E_RECIPE_VERB",
     message: `'${SHEET_ROWS}' failed: the tab changed while its pages were read; run again.`
   };
-  const entry = await readCache(host, SHEET_ROWS, asked.spreadsheetId, cursor.s);
+  const entry = await readCache(host, SHEET_ROWS, client.identity, asked.spreadsheetId, cursor.s);
   if (entry !== void 0) {
     const cached = readOf(SHEET_ROWS, entry.snapshot, asked, entry.fetchedAt);
     if (!("severity" in cached) && covers(entry.snapshot, cached.plan) && cached.digest === cursor.d) {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { CLIENT_EMAIL } from './google.js';
 import {
   callsTo,
   fakeGoogle,
@@ -241,7 +242,9 @@ describe('google.sheet-lookup', () => {
     const first = await google(sheetState, options);
     expect((await look(first, step)).diagnostics).toEqual([]);
     expect(callsTo(first, 'values')).toHaveLength(1);
-    expect(cache.entry(`sheet/${SPREADSHEET_ID}/5`)).toMatchObject({ version: '7' });
+    expect(cache.entry(`sheet/${CLIENT_EMAIL}/${SPREADSHEET_ID}/5`)).toMatchObject({
+      version: '7',
+    });
 
     // The same cache entry google.sheet-rows keeps and reads: one read serves both verbs.
     const cached = await google(sheetState, options);

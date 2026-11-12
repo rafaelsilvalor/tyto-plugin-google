@@ -53,7 +53,7 @@ const ARGUMENTS: readonly ArgumentSpec[] = [
   { name: 'formulas', type: 'text' },
 ];
 
-export type SheetWriteHost = Pick<PluginHost, 'credentials' | 'fetch' | 'cache' | 'log'>;
+export type SheetWriteHost = Pick<PluginHost, 'credentials' | 'fetch' | 'signin' | 'cache' | 'log'>;
 
 /**
  * `google.sheet-write tab=<tab> mode=replace|append [formulas=<columns>]`: writes the table into

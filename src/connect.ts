@@ -1,51 +1,72 @@
 import type { PluginHost } from '@tyto/plugin-api';
 
 import { createTokenSource } from './auth.js';
-import { resolveGoogleConfig, type GoogleConfig } from './config.js';
-import { googleOk, type GoogleResult } from './errors.js';
+import { readSection, resolveGoogleConfig, type GoogleSection } from './config.js';
+import { googleOk, PERSON, type GoogleResult } from './errors.js';
 import { createGoogleClient, type GoogleClient, type Transport } from './http.js';
-import { createSigninTokens } from './signin.js';
+import { askSignin, createSigninTokens } from './signin.js';
 
-export type ConnectHost = Pick<PluginHost, 'credentials' | 'fetch'>;
+export type ConnectHost = Pick<PluginHost, 'credentials' | 'fetch' | 'signin'>;
 
 export interface Connection {
-  readonly config: GoogleConfig;
+  readonly section: GoogleSection;
   readonly client: GoogleClient;
 }
 
 /**
- * The section, the service account and a client signed with its token, for one verb call.
- * Resolved on every call, so a key or a section changed between two runs is the next run's.
+ * The section and a client for one verb call, acting as whoever this host lets the plugin act
+ * as (TYTO-677):
+ *
+ * - **A host with a sign-in port** (the desktop) acts as the signed-in person, always. Nobody
+ *   signed in is `E_GOOGLE_SIGNIN`, never the service account, even when one is stored: in the
+ *   window the service account is obsolete.
+ * - **A host without one** (the CLI: `tyto recipe run`, `tyto mcp`) answers `host.signin` with
+ *   `E_SIGNIN_UNAVAILABLE`, and only then does the client act as the stored service account,
+ *   the command line's fallback until it can sign in.
+ *
+ * `host.signin` is in every `PluginHost`, so the port is told apart by asking it, not by
+ * looking for it. Resolved on every call, so a sign-in, a key or a section changed between two
+ * runs is the next run's.
  */
 export async function connect(
   host: ConnectHost,
-  section: unknown,
+  sectionValue: unknown,
   /** A way out other than `host.fetch` alone: an Apply's, which stops at its budget. */
   through?: Transport,
 ): Promise<GoogleResult<Connection>> {
-  const config = await resolveGoogleConfig(host, section);
-  if (!config.ok) return config;
+  // The section first, so a typo in the folder's project costs no sign-in and no secret read.
+  const section = readSection(sectionValue);
+  if (!section.ok) return section;
   const transport: Transport = through ?? { fetch: (url, init) => host.fetch(url, init) };
-  const tokens = createTokenSource({ transport, account: config.value.account });
+
+  const signedIn = await askSignin(host);
+  if (signedIn.ok) {
+    const tokens = createSigninTokens(host, signedIn.value);
+    const client = createGoogleClient({ transport, tokens, identity: PERSON });
+    return googleOk({ section: section.value, client });
+  }
+  if (signedIn.error.hostCode !== 'E_SIGNIN_UNAVAILABLE') return signedIn;
+
+  const config = await resolveGoogleConfig(host, sectionValue);
+  if (!config.ok) return config;
+  const { account } = config.value;
   const client = createGoogleClient({
     transport,
-    tokens,
-    clientEmail: config.value.account.clientEmail,
+    tokens: createTokenSource({ transport, account }),
+    identity: { kind: 'service-account', clientEmail: account.clientEmail },
   });
-  return googleOk({ config: config.value, client });
+  return googleOk({ section: config.value.section, client });
 }
 
 export type PersonHost = Pick<PluginHost, 'fetch' | 'signin'>;
 
-/** What a failure of the person's client says to share a file with: the person's own account. */
-export const PERSON = 'your own Google account, the one signed in on the plugins screen';
-
 /**
  * A client signed with the signed-in person's token (Tyto ADR 0174), for what is created in the
- * person's Drive: a service account owns no storage there. Nobody signed in is
+ * person's Drive: a service account owns no storage there, so these verbs act as the person on
+ * every host, and the command line answers `E_GOOGLE_SIGNIN`. Nobody signed in is
  * `E_GOOGLE_SIGNIN` at the first request, and the token is redacted from every message.
  */
 export function connectAsPerson(host: PersonHost, through?: Transport): GoogleClient {
   const transport: Transport = through ?? { fetch: (url, init) => host.fetch(url, init) };
-  return createGoogleClient({ transport, tokens: createSigninTokens(host), clientEmail: PERSON });
+  return createGoogleClient({ transport, tokens: createSigninTokens(host), identity: PERSON });
 }

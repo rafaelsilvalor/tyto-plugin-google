@@ -6,12 +6,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createTokenSource } from '../src/auth.js';
 import { parseServiceAccount } from '../src/config.js';
+import { withoutSigninPort } from './sheets.js';
 
 /**
  * The plugin against the real Google, read-only: a token, `google.sheet-rows` on one sheet and
  * `google.drive-list` on one folder. Skipped unless all three variables are set, so CI and
  * every agent skip it; the maintainer runs it with `pnpm test:live` and a service account the
- * sheet and the folder are shared with. Nothing is written, nothing is printed but counts, and
+ * sheet and the folder are shared with, on a host without a sign-in port, as the command line. Nothing is written, nothing is printed but counts, and
  * the asserts read shapes only, so no real name or value enters this repository.
  */
 const SA_FILE = process.env['GOOGLE_LIVE_SA_FILE'];
@@ -55,6 +56,8 @@ describe.skipIf(!configured)('live Google, read-only', () => {
       load: () => import(entry),
       secrets: { 'service-account': key },
       section: { spreadsheet: SHEET, root: FOLDER },
+      // The command line's host: only there do the verbs act as the service account.
+      capabilities: withoutSigninPort(),
       fetch: realFetch,
       deadlineMs: 30_000,
     });

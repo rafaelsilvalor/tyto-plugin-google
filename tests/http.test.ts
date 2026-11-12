@@ -33,7 +33,7 @@ function setup(
   const requests: Request[] = [];
   const tokens = fakeTokens();
   const client = createGoogleClient({
-    clientEmail: CLIENT_EMAIL,
+    identity: { kind: 'service-account', clientEmail: CLIENT_EMAIL },
     tokens,
     transport: {
       now: clock.now,
