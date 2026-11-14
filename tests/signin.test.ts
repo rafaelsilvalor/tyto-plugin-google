@@ -81,15 +81,15 @@ describe('createSigninTokens', () => {
     await harness.close();
   });
 
-  it('says the command line cannot sign in, on a host without the sign-in port', async () => {
-    // The in-process host composes no `signinAccessToken`, as the CLI does not.
+  it('says a terminal with no keychain cannot sign in, on a host without the sign-in port', async () => {
+    // The in-process host composes no `signinAccessToken`, as a terminal with no keychain does not.
     const { host } = googleHost();
     const answer = await createSigninTokens(host).token();
     expect(answer.ok).toBe(false);
     if (!answer.ok) {
       expect(answer.error.code).toBe('E_GOOGLE_SIGNIN');
       expect(answer.error.hostCode).toBe('E_SIGNIN_UNAVAILABLE');
-      expect(answer.error.message).toContain('The command line cannot sign in to Google');
+      expect(answer.error.message).toContain('This terminal cannot sign in to Google');
     }
   });
 
