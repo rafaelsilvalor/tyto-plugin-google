@@ -30,7 +30,7 @@ const ARGUMENTS: readonly ArgumentSpec[] = [
   { name: 'type', type: 'text', values: ['image'] },
 ];
 
-export type DriveCountHost = Pick<PluginHost, 'credentials' | 'fetch' | 'signin'>;
+export type DriveCountHost = Pick<PluginHost, 'fetch' | 'signin'>;
 
 /**
  * `google.drive-count folder=<column> [type=image]`: adds `<column>_images`, the number of PNG

@@ -65,7 +65,7 @@ export async function firstSnapshot(
     );
   }
   if (version.ok && !refresh) {
-    const entry = await readCache(host, verb, client.identity, asked.spreadsheetId, tab.sheetId);
+    const entry = await readCache(host, verb, asked.spreadsheetId, tab.sheetId);
     if (entry !== undefined && entry.version === version.value) {
       const cached = readOf(verb, entry.snapshot, asked, entry.fetchedAt);
       if ('severity' in cached || covers(entry.snapshot, cached.plan)) return cached;
@@ -81,7 +81,7 @@ export async function firstSnapshot(
       fetchedAt: live.fetchedAt,
       snapshot: live.snapshot,
     };
-    await writeCache(host, verb, client.identity, entry);
+    await writeCache(host, verb, entry);
   }
   return live;
 }

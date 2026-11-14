@@ -4,21 +4,20 @@ import type { FetchedResponse, HostFetchInit } from '@tyto/plugin-api';
 import { testPlugin, type PluginHarness } from '@tyto/plugin-api/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { createTokenSource } from '../src/auth.js';
-import { parseServiceAccount } from '../src/config.js';
-import { withoutSigninPort } from './sheets.js';
-
 /**
- * The plugin against the real Google, read-only: a token, `google.sheet-rows` on one sheet and
- * `google.drive-list` on one folder. Skipped unless all three variables are set, so CI and
- * every agent skip it; the maintainer runs it with `pnpm test:live` and a service account the
- * sheet and the folder are shared with, on a host without a sign-in port, as a headless terminal. Nothing is written, nothing is printed but counts, and
- * the asserts read shapes only, so no real name or value enters this repository.
+ * The plugin against the real Google, read-only, as a person: `google.sheet-rows` on one sheet
+ * and `google.drive-list` on one folder, signed with the access token `GOOGLE_LIVE_ACCESS_TOKEN`
+ * holds (one of your own sign-in's, with the Drive scope), as every verb acts (TYTO-701).
+ * Skipped unless all three variables are set, so CI and every agent skip it; the maintainer
+ * runs it with `pnpm test:live`. Nothing is written, nothing is printed but counts, and the
+ * asserts read shapes only, so no real name or value enters this repository.
  */
-const SA_FILE = process.env['GOOGLE_LIVE_SA_FILE'];
+const ACCESS_TOKEN = process.env['GOOGLE_LIVE_ACCESS_TOKEN'];
 const SHEET = process.env['GOOGLE_LIVE_SHEET'];
 const FOLDER = process.env['GOOGLE_LIVE_FOLDER'];
-const configured = [SA_FILE, SHEET, FOLDER].every((value) => value !== undefined && value !== '');
+const configured = [ACCESS_TOKEN, SHEET, FOLDER].every(
+  (value) => value !== undefined && value !== '',
+);
 
 const manifest = readFileSync(new URL('../tyto-plugin.json', import.meta.url), 'utf8');
 const entry = new URL('../dist/index.js', import.meta.url).href;
@@ -46,18 +45,14 @@ function count(label: string, value: number): void {
 }
 
 describe.skipIf(!configured)('live Google, read-only', () => {
-  let key = '';
   let plugin: PluginHarness | undefined;
 
   beforeAll(async () => {
-    key = readFileSync(SA_FILE ?? '', 'utf8');
     const loaded = await testPlugin({
       manifest,
       load: () => import(entry),
-      secrets: { 'service-account': key },
+      signins: { google: ACCESS_TOKEN ?? '' },
       section: { spreadsheet: SHEET, root: FOLDER },
-      // A headless terminal's host: only there do the verbs act as the service account.
-      capabilities: withoutSigninPort(),
       fetch: realFetch,
       deadlineMs: 30_000,
     });
@@ -67,29 +62,6 @@ describe.skipIf(!configured)('live Google, read-only', () => {
   afterAll(async () => {
     await plugin?.close();
   });
-
-  it('buys a token with the service account', async () => {
-    const account = parseServiceAccount(key);
-    expect(account.ok).toBe(true);
-    if (!account.ok) return;
-    const tokens = createTokenSource({
-      account: account.value,
-      transport: {
-        fetch: async (url, init) => {
-          const fetched = await realFetch(url, init ?? {});
-          const text = new TextDecoder().decode(fetched.body);
-          return {
-            ...fetched,
-            ok: fetched.status >= 200 && fetched.status < 300,
-            text: async () => text,
-            json: async () => JSON.parse(text) as unknown,
-          };
-        },
-      },
-    });
-    const token = await tokens.token();
-    expect(token.ok ? typeof token.value : token.error.code).toBe('string');
-  }, 30_000);
 
   it('reads the sheet with google.sheet-rows', async () => {
     const ran = await plugin?.runRecipe('google.sheet-rows');
@@ -130,7 +102,6 @@ describe.skipIf(!configured)('live Google, read-only', () => {
  * two items by hand afterwards. With `GOOGLE_LIVE_SHARE_EMAIL`, each is shared with that address
  * as a reader, with no email sent.
  */
-const ACCESS_TOKEN = process.env['GOOGLE_LIVE_ACCESS_TOKEN'];
 const PARENT = process.env['GOOGLE_LIVE_PARENT'];
 const SHARE_EMAIL = process.env['GOOGLE_LIVE_SHARE_EMAIL'];
 const creating = [ACCESS_TOKEN, PARENT].every((value) => value !== undefined && value !== '');

@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { decodeCursor, encodeCursor, fingerprint } from '../src/cursor.js';
 import { columnLetter, inferType } from '../src/sheet-grid.js';
 import { response } from './host.js';
-import { CLIENT_EMAIL } from './google.js';
 import {
   callsTo,
   fakeGoogle,
@@ -255,8 +254,8 @@ describe('paging and the cache', () => {
     expect(answer.table?.rows).toHaveLength(12_000);
     expect(answer.table?.rows[11_999]?.key).toBe('id-12000');
     expect(callsTo(sheet, 'values')).toHaveLength(1);
-    expect([...cache.entries.keys()]).toEqual([`sheet/${CLIENT_EMAIL}/${SPREADSHEET_ID}/3`]);
-    expect(cache.entry(`sheet/${CLIENT_EMAIL}/${SPREADSHEET_ID}/3`)).toMatchObject({
+    expect([...cache.entries.keys()]).toEqual([`sheet/person/${SPREADSHEET_ID}/3`]);
+    expect(cache.entry(`sheet/person/${SPREADSHEET_ID}/3`)).toMatchObject({
       v: 1,
       version: '9',
     });
@@ -325,7 +324,7 @@ describe('paging and the cache', () => {
     const fresh = await rows(edited, 'google.sheet-rows');
     expect(callsTo(edited, 'values')).toHaveLength(1);
     expect(fresh.table?.rows).toHaveLength(4);
-    expect(cache.entry(`sheet/${CLIENT_EMAIL}/${SPREADSHEET_ID}/0`)).toMatchObject({
+    expect(cache.entry(`sheet/person/${SPREADSHEET_ID}/0`)).toMatchObject({
       version: '42',
     });
   });

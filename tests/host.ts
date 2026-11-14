@@ -10,8 +10,9 @@ import {
 
 /**
  * The `PluginHost` Tyto hands this plugin, built in process from the real manifest: the same
- * permission checks (`net:<host>`, `credentials:service-account`) and the same `config` and
- * `credentials` the isolated host gives, over fakes for the network and the secrets.
+ * permission checks (`net:<host>`) and the same `config` the isolated host gives, over a fake
+ * for the network. It composes no sign-in port, as a terminal with no system keychain does not:
+ * {@link signedIn} puts a person in front of it.
  *
  * In process rather than through `testPlugin`, so the configuration, the token and the client
  * are tested on their own; the verbs are driven through `testPlugin`.
@@ -28,7 +29,6 @@ export interface FakeRequest {
 export interface HostOptions {
   /** The plugin's settings by its own keys, as `settings.json` resolved them. */
   readonly settings?: Readonly<Record<string, unknown>>;
-  readonly secrets?: Readonly<Record<string, string>>;
   readonly fetch?: (url: string, init: HostFetchInit) => Promise<FetchedResponse>;
 }
 
@@ -45,7 +45,8 @@ export function googleHost(options: HostOptions = {}): {
         if (options.fetch === undefined) throw new Error(`no fake answers ${url}`);
         return options.fetch(url, init);
       },
-      credential: async (_plugin, key) => options.secrets?.[key],
+      // The plugin holds no `credentials:` permission, so no secret is there to read.
+      credential: async () => undefined,
       describeCredential: (_plugin, key) => `the test's secret '${key}'`,
     },
   });
@@ -60,6 +61,25 @@ export function googleHost(options: HostOptions = {}): {
   });
   if (!activated.ok || captured === undefined) throw new Error('the manifest did not activate');
   return { host: captured, requests };
+}
+
+/** The signed-in person's access token in the fakes: invented, as every token here is. */
+export const PERSON_TOKEN = 'person-token-0701';
+
+/**
+ * `host`'s network, cache and log, with a person signed in to Google, as in the desktop's
+ * window or a terminal after `tyto signin google`: the only place a verb runs (TYTO-701).
+ */
+export function signedIn(
+  host: PluginHost,
+  token: string = PERSON_TOKEN,
+): Pick<PluginHost, 'fetch' | 'signin' | 'cache' | 'log'> {
+  return {
+    fetch: (url, init) => host.fetch(url, init),
+    cache: host.cache,
+    log: host.log,
+    signin: { accessToken: () => Promise.resolve(token) },
+  };
 }
 
 /** A response as the host's `fetch` answers it. */

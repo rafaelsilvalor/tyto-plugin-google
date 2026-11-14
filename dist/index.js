@@ -1,5 +1,4 @@
 // src/errors.ts
-var PERSON = { kind: "person" };
 function googleOk(value) {
   return { ok: true, value };
 }
@@ -43,7 +42,7 @@ function isRateLimited(status, body) {
 var SERVICE_DISABLED = /has not been used in project|SERVICE_DISABLED|API .* is disabled/i;
 var SCOPE_INSUFFICIENT = /ACCESS_TOKEN_SCOPE_INSUFFICIENT|insufficient authentication scopes|insufficientPermissions/i;
 var QUOTED_LIMIT = 300;
-function classifyFailure(label, status, text, identity) {
+function classifyFailure(label, status, text) {
   const body = readErrorBody(text);
   const said = quoted(body, text);
   const signatures = [text, ...body.reasons, body.status ?? ""].join("\n");
@@ -51,7 +50,7 @@ function classifyFailure(label, status, text, identity) {
     return {
       code: "E_GOOGLE_CONFIG",
       status,
-      message: `${label} answered ${status}: the API is not enabled in ${projectOf(identity)}. Enable it in the Google Cloud console (APIs & Services) and run again; nothing else ` + `needs changing. ${said}`.trim()
+      message: `${label} answered ${status}: the API is not enabled in ${PROJECT}. Enable it in the Google Cloud console (APIs & Services) and run again; nothing else ` + `needs changing. ${said}`.trim()
     };
   }
   if (SCOPE_INSUFFICIENT.test(signatures)) {
@@ -65,7 +64,7 @@ function classifyFailure(label, status, text, identity) {
     return {
       code: status === 404 ? "E_GOOGLE_HTTP" : "E_GOOGLE_AUTH",
       status,
-      message: `${label} answered ${status}: the file does not exist, or is not shared with ` + `${sharedWith(identity)} ${said}`.trim()
+      message: `${label} answered ${status}: the file does not exist, or is not shared with ` + `${SHARED_WITH} ${said}`.trim()
     };
   }
   if (status === 401 || status === 403) {
@@ -77,14 +76,8 @@ function classifyFailure(label, status, text, identity) {
   }
   return { code: "E_GOOGLE_HTTP", status, message: `${label} answered ${status}. ${said}`.trim() };
 }
-function projectOf(identity) {
-  if (identity === void 0) return "the Cloud project this call goes through";
-  return identity.kind === "person" ? "the Cloud project of the OAuth client set on the plugins screen" : "the service account's Cloud project";
-}
-function sharedWith(identity) {
-  if (identity === void 0) return "the account this call acts as. Check the id.";
-  return identity.kind === "person" ? "the Google account signed in on the plugins screen. Check the id, and share the file with that account or sign in with one it is shared with." : `the service account. Check the id, and share it with ${identity.clientEmail}.`;
-}
+var PROJECT = "the Cloud project of the OAuth client set on the plugins screen";
+var SHARED_WITH = "the Google account signed in on the plugins screen. Check the id, and share the file with that account or sign in with one it is shared with.";
 function quoted(body, text) {
   const words = (body.message ?? text).trim();
   if (words === "") return "";
@@ -98,145 +91,7 @@ function listOf(value) {
   return Array.isArray(value) ? value : [];
 }
 
-// src/jwt.ts
-var PKCS8_HEADER = "-----BEGIN PRIVATE KEY-----";
-var PKCS8_FOOTER = "-----END PRIVATE KEY-----";
-var SIGNING_ALGORITHM = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" };
-function isPkcs8Pem(pem) {
-  const trimmed2 = pem.trim();
-  return trimmed2.startsWith(PKCS8_HEADER) && trimmed2.endsWith(PKCS8_FOOTER);
-}
-function pemToDer(pem) {
-  const body = pem.trim().slice(PKCS8_HEADER.length, -PKCS8_FOOTER.length).replace(/\s+/g, "");
-  return base64Decode(body);
-}
-function pemBody(pem) {
-  return pem.trim().slice(PKCS8_HEADER.length, -PKCS8_FOOTER.length).replace(/\s+/g, "");
-}
-async function importSigningKey(der) {
-  return globalThis.crypto.subtle.importKey("pkcs8", der, SIGNING_ALGORITHM, false, ["sign"]);
-}
-async function signAssertion(key, claims, keyId) {
-  const header = { alg: "RS256", typ: "JWT", ...keyId === void 0 ? {} : { kid: keyId } };
-  const signingInput = `${base64UrlOfText(JSON.stringify(header))}.${base64UrlOfText(
-    JSON.stringify(claims)
-  )}`;
-  const signature = await globalThis.crypto.subtle.sign(
-    SIGNING_ALGORITHM,
-    key,
-    new TextEncoder().encode(signingInput)
-  );
-  return `${signingInput}.${base64Url(new Uint8Array(signature))}`;
-}
-var ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-function base64Url(bytes) {
-  let encoded = "";
-  for (let index = 0; index < bytes.length; index += 3) {
-    const first = bytes[index] ?? 0;
-    const second = bytes[index + 1];
-    const third = bytes[index + 2];
-    const triple = first << 16 | (second ?? 0) << 8 | (third ?? 0);
-    encoded += ALPHABET[triple >> 18 & 63];
-    encoded += ALPHABET[triple >> 12 & 63];
-    if (second !== void 0) encoded += ALPHABET[triple >> 6 & 63];
-    if (third !== void 0) encoded += ALPHABET[triple & 63];
-  }
-  return encoded.replace(/\+/g, "-").replace(/\//g, "_");
-}
-function base64UrlOfText(text) {
-  return base64Url(new TextEncoder().encode(text));
-}
-function base64Decode(text) {
-  const unpadded = text.replace(/=+$/, "");
-  if (unpadded.length % 4 === 1) return void 0;
-  const bytes = new Uint8Array(Math.floor(unpadded.length * 3 / 4));
-  let buffer = 0;
-  let bits = 0;
-  let written = 0;
-  for (const character of unpadded) {
-    const value = ALPHABET.indexOf(character);
-    if (value < 0) return void 0;
-    buffer = (buffer << 6 | value) & 16383;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      bytes[written] = buffer >> bits & 255;
-      written += 1;
-    }
-  }
-  return bytes;
-}
-
 // src/config.ts
-var TOKEN_URI = "https://oauth2.googleapis.com/token";
-var SERVICE_ACCOUNT_CREDENTIAL = "service-account";
-var SERVICE_ACCOUNT_VARIABLE = "TYTO_PLUGIN_GOOGLE_SERVICE_ACCOUNT";
-var NO_ACCOUNT = `No Google service account is stored, and this terminal cannot sign in to Google as a person: it has no system keychain. Store the whole JSON key in ${SERVICE_ACCOUNT_VARIABLE}, run \`tyto signin google\` on a machine with a keychain, or run this step in the desktop app, signed in to Google on its plugins screen.`;
-async function resolveGoogleConfig(host, sectionValue) {
-  const section = readSection(sectionValue);
-  if (!section.ok) return section;
-  let stored;
-  try {
-    stored = await host.credentials(SERVICE_ACCOUNT_CREDENTIAL);
-  } catch (thrown) {
-    const hostCode = hostCodeOf(thrown);
-    if (hostCode === "E_CREDENTIAL_MISSING") {
-      return googleError("E_GOOGLE_CONFIG", NO_ACCOUNT, { hostCode });
-    }
-    return googleError(
-      "E_GOOGLE_CONFIG",
-      `Tyto could not read the service-account credential: ${messageOf(thrown)}`,
-      hostCode === void 0 ? {} : { hostCode }
-    );
-  }
-  if (typeof stored !== "string" || stored.trim() === "") {
-    return googleError("E_GOOGLE_CONFIG", NO_ACCOUNT, { hostCode: "E_CREDENTIAL_MISSING" });
-  }
-  const account = parseServiceAccount(stored);
-  if (!account.ok) return account;
-  return googleOk({ account: account.value, section: section.value });
-}
-function parseServiceAccount(text) {
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return refused("is not JSON. Store the whole key file Google Cloud downloads, from { to }.");
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return refused("is not a JSON object.");
-  }
-  const key = parsed;
-  if (key["type"] !== "service_account") {
-    return refused(
-      "is not a service account key (its type is not service_account). An OAuth client or a person's sign-in is not supported."
-    );
-  }
-  const clientEmail = key["client_email"];
-  if (typeof clientEmail !== "string" || !/^[^\s@]+@[^\s@]+$/.test(clientEmail)) {
-    return refused("has no client_email.");
-  }
-  const privateKey = key["private_key"];
-  if (typeof privateKey !== "string" || !isPkcs8Pem(privateKey)) {
-    return refused(
-      "has no private_key in PKCS#8 PEM (-----BEGIN PRIVATE KEY-----). Download a new JSON key for the account in Google Cloud."
-    );
-  }
-  const tokenUri = key["token_uri"] ?? TOKEN_URI;
-  if (tokenUri !== TOKEN_URI) {
-    return refused(`names a token_uri other than ${TOKEN_URI}, which is the only one used.`);
-  }
-  const privateKeyId = key["private_key_id"];
-  return googleOk({
-    clientEmail,
-    privateKey,
-    tokenUri: TOKEN_URI,
-    ...typeof privateKeyId === "string" && privateKeyId !== "" ? { privateKeyId } : {}
-  });
-}
-function refused(why) {
-  return googleError("E_GOOGLE_CONFIG", `The stored service-account credential ${why}`);
-}
 function readSection(value) {
   if (value === void 0 || value === null) return googleOk({});
   if (typeof value !== "object" || Array.isArray(value)) {
@@ -378,7 +233,7 @@ async function send(transport, outgoing, redact) {
         { status }
       );
     }
-    const failure = classifyFailure(label, status, text, void 0);
+    const failure = classifyFailure(label, status, text);
     return googleError(
       "E_GOOGLE_HTTP",
       redact(`${failure.message} Still so${tried} within ${budget} s; try again later.`),
@@ -397,7 +252,7 @@ function retryAfter(header, now) {
   return Number.isNaN(date) ? void 0 : Math.max(0, date - now);
 }
 function createGoogleClient(options) {
-  const { transport, tokens, identity } = options;
+  const { transport, tokens } = options;
   async function request(method, address, query, body) {
     const answer = await exchange(method, address, query, body);
     if (!answer.ok) return answer;
@@ -443,14 +298,13 @@ function createGoogleClient(options) {
         continue;
       }
       if (status < 200 || status >= 300) {
-        const failure = classifyFailure(label, status, text, identity);
+        const failure = classifyFailure(label, status, text);
         return { ok: false, error: { ...failure, message: redact(failure.message) } };
       }
       return googleOk({ status, text, label });
     }
   }
   return {
-    identity,
     get: (url, query) => request("GET", url, query, void 0),
     async getText(url, query) {
       const answer = await exchange("GET", url, query, void 0, "*/*");
@@ -496,172 +350,10 @@ async function bodyText(response) {
 }
 var defaultSleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-// src/auth.ts
-var SCOPES = [
-  "https://www.googleapis.com/auth/spreadsheets",
-  "https://www.googleapis.com/auth/drive"
-];
-var ASSERTION_LIFETIME_SECONDS = 3600;
-var RENEW_BEFORE_MILLISECONDS = 6e4;
-var JWT_BEARER = "urn:ietf:params:oauth:grant-type:jwt-bearer";
-var HELD = /* @__PURE__ */ new Map();
-function createTokenSource(options) {
-  const { transport, account } = options;
-  const held = options.held ?? HELD;
-  const now = transport.now ?? Date.now;
-  const keyBody = pemBody(account.privateKey);
-  const keyLines = account.privateKey.split(/\r?\n/).filter((line) => line.length >= 16);
-  let assertion = "";
-  const handedOut = /* @__PURE__ */ new Set();
-  const secrets = () => [
-    ...handedOut,
-    assertion,
-    account.privateKey,
-    keyBody,
-    ...keyLines
-  ];
-  async function requestToken() {
-    const der = pemToDer(account.privateKey);
-    if (der === void 0) {
-      return googleError(
-        "E_GOOGLE_CONFIG",
-        "The service account's private_key is not base64 PEM. Download a new JSON key."
-      );
-    }
-    let key;
-    try {
-      key = await importSigningKey(der);
-    } catch {
-      return googleError(
-        "E_GOOGLE_CONFIG",
-        "The service account's private_key is not an RSA key WebCrypto can sign with. Download a new JSON key."
-      );
-    }
-    const asked = now();
-    const issuedAt = Math.floor(asked / 1e3);
-    assertion = await signAssertion(
-      key,
-      {
-        iss: account.clientEmail,
-        scope: SCOPES.join(" "),
-        aud: TOKEN_URI,
-        iat: issuedAt,
-        exp: issuedAt + ASSERTION_LIFETIME_SECONDS
-      },
-      account.privateKeyId
-    );
-    const redact = redactWith(secrets());
-    const label = "POST oauth2.googleapis.com/token";
-    const answer = await send(
-      transport,
-      {
-        method: "POST",
-        url: TOKEN_URI,
-        label,
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/x-www-form-urlencoded"
-        },
-        body: `grant_type=${encodeURIComponent(JWT_BEARER)}&assertion=${assertion}`
-      },
-      redact
-    );
-    if (!answer.ok) return answer;
-    const { status, text } = answer.value;
-    if (status < 200 || status >= 300) {
-      const refusal = tokenRefusal(text);
-      const said = refusal.description === "" ? "" : ` Google said: ${refusal.description}`;
-      if (refusal.error === "invalid_grant") {
-        return googleError(
-          "E_GOOGLE_AUTH",
-          redact(
-            `Google refused ${account.clientEmail}'s assertion (invalid_grant): the key was revoked or deleted, or this machine's clock is off by minutes. Check the key in Google Cloud (IAM, Service accounts, Keys) and the clock.${said}`
-          ),
-          { status }
-        );
-      }
-      return googleError(
-        status >= 500 ? "E_GOOGLE_HTTP" : "E_GOOGLE_AUTH",
-        redact(
-          `${label} answered ${status}${refusal.error === "" ? "" : ` (${refusal.error})`} for ${account.clientEmail}.${said}`
-        ),
-        { status }
-      );
-    }
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      return googleError("E_GOOGLE_RESPONSE", `${label} answered ${status} with no JSON.`, {
-        status
-      });
-    }
-    const body = typeof parsed === "object" && parsed !== null ? parsed : {};
-    const accessToken = body["access_token"];
-    const expiresIn = body["expires_in"];
-    if (typeof accessToken !== "string" || accessToken === "") {
-      return googleError("E_GOOGLE_RESPONSE", `${label} answered ${status} with no access_token.`, {
-        status
-      });
-    }
-    if (typeof expiresIn !== "number" || !(expiresIn > 0)) {
-      return googleError("E_GOOGLE_RESPONSE", `${label} answered ${status} with no expires_in.`, {
-        status
-      });
-    }
-    return googleOk({ accessToken, expiresAt: asked + expiresIn * 1e3 });
-  }
-  return {
-    async token() {
-      let entry = held.get(account.clientEmail);
-      if (entry === void 0 || entry.privateKey !== account.privateKey) {
-        entry = { privateKey: account.privateKey };
-        held.set(account.clientEmail, entry);
-      }
-      const current = entry.token;
-      if (current !== void 0 && now() < current.expiresAt - RENEW_BEFORE_MILLISECONDS) {
-        handedOut.add(current.accessToken);
-        return googleOk(current.accessToken);
-      }
-      const owner = entry;
-      owner.pending ??= requestToken().then((answer2) => {
-        delete owner.pending;
-        if (answer2.ok) owner.token = answer2.value;
-        else delete owner.token;
-        return answer2;
-      });
-      const answer = await owner.pending;
-      if (!answer.ok) return answer;
-      handedOut.add(answer.value.accessToken);
-      return googleOk(answer.value.accessToken);
-    },
-    invalidate() {
-      const entry = held.get(account.clientEmail);
-      if (entry !== void 0) delete entry.token;
-    },
-    secrets
-  };
-}
-function tokenRefusal(text) {
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return { error: "", description: text.trim().slice(0, 300) };
-  }
-  const body = typeof parsed === "object" && parsed !== null ? parsed : {};
-  const error = body["error"];
-  const description = body["error_description"];
-  if (typeof error === "string") {
-    return { error, description: typeof description === "string" ? description : "" };
-  }
-  return { error: "", description: readErrorBody(text).message ?? "" };
-}
-
 // src/signin.ts
 var SIGNIN_ID = "google";
 var SIGNED_OUT = "Nobody is signed in to Google for this plugin. Sign in to Google on the plugins screen of Tyto's desktop app (set the OAuth client there first if the row asks for one), or in a terminal with `tyto signin google`, then run again.";
-var NO_KEYCHAIN = "This terminal cannot sign in to Google as a person: it has no system keychain to keep the sign-in in. Run this step in the desktop app, or in a terminal on a machine with a keychain after `tyto signin google`.";
+var NO_KEYCHAIN = "This terminal has no system keychain, so it cannot sign in to Google, and Tyto's Google verbs act only as a signed-in person. Run this step in the desktop app, or in a terminal on a machine with a keychain after `tyto signin google`.";
 function createSigninTokens(host, first) {
   let held = first;
   const handedOut = /* @__PURE__ */ new Set();
@@ -704,27 +396,18 @@ async function askSignin(host) {
 async function connect(host, sectionValue, through) {
   const section = readSection(sectionValue);
   if (!section.ok) return section;
-  const transport = through ?? { fetch: (url, init) => host.fetch(url, init) };
   const signedIn = await askSignin(host);
-  if (signedIn.ok) {
-    const tokens = createSigninTokens(host, signedIn.value);
-    const client2 = createGoogleClient({ transport, tokens, identity: PERSON });
-    return googleOk({ section: section.value, client: client2 });
-  }
-  if (signedIn.error.hostCode !== "E_SIGNIN_UNAVAILABLE") return signedIn;
-  const config = await resolveGoogleConfig(host, sectionValue);
-  if (!config.ok) return config;
-  const { account } = config.value;
+  if (!signedIn.ok) return signedIn;
+  const transport = through ?? { fetch: (url, init) => host.fetch(url, init) };
   const client = createGoogleClient({
     transport,
-    tokens: createTokenSource({ transport, account }),
-    identity: { kind: "service-account", clientEmail: account.clientEmail }
+    tokens: createSigninTokens(host, signedIn.value)
   });
-  return googleOk({ section: config.value.section, client });
+  return googleOk({ section: section.value, client });
 }
 function connectAsPerson(host, through) {
   const transport = through ?? { fetch: (url, init) => host.fetch(url, init) };
-  return createGoogleClient({ transport, tokens: createSigninTokens(host), identity: PERSON });
+  return createGoogleClient({ transport, tokens: createSigninTokens(host) });
 }
 
 // src/drive-query.ts
@@ -930,6 +613,43 @@ function folderArgument(verb, values, section) {
     );
   }
   return read.value.root;
+}
+
+// src/base64.ts
+var ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+function base64Url(bytes) {
+  let encoded = "";
+  for (let index = 0; index < bytes.length; index += 3) {
+    const first = bytes[index] ?? 0;
+    const second = bytes[index + 1];
+    const third = bytes[index + 2];
+    const triple = first << 16 | (second ?? 0) << 8 | (third ?? 0);
+    encoded += ALPHABET[triple >> 18 & 63];
+    encoded += ALPHABET[triple >> 12 & 63];
+    if (second !== void 0) encoded += ALPHABET[triple >> 6 & 63];
+    if (third !== void 0) encoded += ALPHABET[triple & 63];
+  }
+  return encoded.replace(/\+/g, "-").replace(/\//g, "_");
+}
+function base64Decode(text) {
+  const unpadded = text.replace(/=+$/, "");
+  if (unpadded.length % 4 === 1) return void 0;
+  const bytes = new Uint8Array(Math.floor(unpadded.length * 3 / 4));
+  let buffer = 0;
+  let bits = 0;
+  let written = 0;
+  for (const character of unpadded) {
+    const value = ALPHABET.indexOf(character);
+    if (value < 0) return void 0;
+    buffer = (buffer << 6 | value) & 16383;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes[written] = buffer >> bits & 255;
+      written += 1;
+    }
+  }
+  return bytes;
 }
 
 // src/cursor.ts
@@ -1417,18 +1137,18 @@ var SHEETS2 = "https://sheets.googleapis.com/v4/spreadsheets";
 function budgetedTransport(host, clock) {
   const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
   let outOfTime = false;
-  let refused8 = false;
+  let refused7 = false;
   const expired = () => {
     if (clock.now() > deadline) outOfTime = true;
     return outOfTime;
   };
   return {
     expired,
-    refusedForTime: () => refused8,
+    refusedForTime: () => refused7,
     transport: {
       fetch: (url, init) => {
         if (expired()) {
-          refused8 = true;
+          refused7 = true;
           return Promise.reject(new Error(NOT_REACHED));
         }
         return host.fetch(url, init);
@@ -1747,7 +1467,7 @@ function sheetWriteVerb(host, clock = systemClock) {
   };
 }
 var problem = (text) => argumentsProblem(SHEET_WRITE, text);
-var refused2 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var refused = (diagnostic) => ({ ok: false, error: [diagnostic] });
 async function planSheetWrite(host, request) {
   const { table } = request;
   const spreadsheetId = spreadsheetOf(
@@ -1755,22 +1475,22 @@ async function planSheetWrite(host, request) {
     request.arguments["spreadsheet"],
     request.section
   );
-  if (typeof spreadsheetId !== "string") return refused2(spreadsheetId);
+  if (typeof spreadsheetId !== "string") return refused(spreadsheetId);
   const mode = request.arguments["mode"] === "append" ? "append" : "replace";
   const columns = writeColumns(table, String(request.arguments["formulas"] ?? ""));
-  if (!Array.isArray(columns)) return refused2(columns);
+  if (!Array.isArray(columns)) return refused(columns);
   const connection = await connect(host, request.section);
-  if (!connection.ok) return refused2(verbFailed(SHEET_WRITE, connection.error));
+  if (!connection.ok) return refused(verbFailed(SHEET_WRITE, connection.error));
   const { client } = connection.value;
   const spreadsheet = await readGridSpreadsheet(client, spreadsheetId);
-  if (!spreadsheet.ok) return refused2(verbFailed(SHEET_WRITE, spreadsheet.error));
+  if (!spreadsheet.ok) return refused(verbFailed(SHEET_WRITE, spreadsheet.error));
   const separator = formulaSeparator(spreadsheet.value.locale);
   const written = request.arguments["tab"];
   const tab = pickTab(
     spreadsheet.value.tabs,
     typeof written === "string" ? written.trim() || void 0 : void 0
   );
-  if (typeof tab === "string") return refused2(problem(tab));
+  if (typeof tab === "string") return refused(problem(tab));
   let positions;
   let header;
   let start;
@@ -1780,23 +1500,23 @@ async function planSheetWrite(host, request) {
     start = 2;
   } else {
     const values = await readValues(client, spreadsheetId, tab);
-    if (!values.ok) return refused2(verbFailed(SHEET_WRITE, values.error));
+    if (!values.ok) return refused(verbFailed(SHEET_WRITE, values.error));
     if (values.value.length === 0) {
       positions = columns.map((_, index) => index);
       header = columns.map((column) => column.name);
       start = 2;
     } else {
       const names = headerOf2(values.value, tab.title);
-      if (typeof names === "string") return refused2(problem(names));
+      if (typeof names === "string") return refused(problem(names));
       const found = placed(columns, names, tab.title);
-      if (!Array.isArray(found)) return refused2(found);
+      if (!Array.isArray(found)) return refused(found);
       positions = found;
       start = values.value.length + 1;
     }
   }
   const fixed = (mode === "replace" ? 1 : 0) + (header === void 0 ? 0 : 1);
   if (fixed + table.rows.length > MAX_OPERATIONS) {
-    return refused2(
+    return refused(
       problem(
         `would write ${table.rows.length.toLocaleString("en-US")} rows, over the ${(MAX_OPERATIONS - fixed).toLocaleString("en-US")} one plan holds; split the table`
       )
@@ -2011,15 +1731,15 @@ function driveCountVerb(host) {
     transform: (request) => countImages(host, request)
   };
 }
-var refused3 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var refused2 = (diagnostic) => ({ ok: false, error: [diagnostic] });
 var problem2 = (text) => argumentsProblem(DRIVE_COUNT, text);
 async function countImages(host, request) {
   const { table } = request;
   const asked = textArgument(request.arguments, "folder");
-  if (asked === void 0) return refused3(problem2("needs folder=, the column naming each folder"));
+  if (asked === void 0) return refused2(problem2("needs folder=, the column naming each folder"));
   const column = table.columns.find((each) => each.name === asked) ?? table.columns.find((each) => each.name.toLowerCase() === asked.toLowerCase());
   if (column === void 0) {
-    return refused3(
+    return refused2(
       problem2(
         `folder= names the column '${asked}', which the table does not have; its columns are ` + listed(table.columns.map((each) => each.name))
       )
@@ -2027,7 +1747,7 @@ async function countImages(host, request) {
   }
   const added = `${column.name}_images`;
   if (table.columns.some((each) => each.name.toLowerCase() === added.toLowerCase())) {
-    return refused3(problem2(`would add the column '${added}', which the table already has`));
+    return refused2(problem2(`would add the column '${added}', which the table already has`));
   }
   const folderOfRow = [];
   for (const row of table.rows) {
@@ -2038,7 +1758,7 @@ async function countImages(host, request) {
     }
     const id = folderIdOf(value);
     if (id === void 0) {
-      return refused3(
+      return refused2(
         problem2(
           `row ${row.key}: ${column.name} holds '${String(value)}', which is neither a Drive folder id nor its address`
         )
@@ -2048,7 +1768,7 @@ async function countImages(host, request) {
   }
   const folders = [...new Set(folderOfRow.filter((id) => id !== null))];
   if (folders.length > MAX_FOLDERS) {
-    return refused3({
+    return refused2({
       severity: "error",
       code: "E_RECIPE_VERB",
       message: `'${DRIVE_COUNT}' would count ${folders.length.toLocaleString("en-US")} folders, over the ${MAX_FOLDERS} one call counts; narrow it to fewer rows first.`
@@ -2057,10 +1777,10 @@ async function countImages(host, request) {
   const counts = /* @__PURE__ */ new Map();
   if (folders.length > 0) {
     const connection = await connect(host, request.section);
-    if (!connection.ok) return refused3(verbFailed(DRIVE_COUNT, connection.error));
+    if (!connection.ok) return refused2(verbFailed(DRIVE_COUNT, connection.error));
     for (const folder of folders) {
       const counted = await countIn(connection.value.client, folder);
-      if (!counted.ok) return refused3(verbFailed(DRIVE_COUNT, counted.error));
+      if (!counted.ok) return refused2(verbFailed(DRIVE_COUNT, counted.error));
       counts.set(folder, counted.value);
     }
   }
@@ -2185,7 +1905,7 @@ var ROLE_STRENGTH = [
 var PERMISSIONS_PAGE_SIZE = 100;
 var OUT_OF_TIME = "could not check every row in one call's time; narrow the table to fewer rows and run again";
 async function planCreates(host, request, kind, clock = systemClock) {
-  const problem8 = (text) => refused4(argumentsProblem(kind.verb, text));
+  const problem8 = (text) => refused3(argumentsProblem(kind.verb, text));
   const { table } = request;
   const nameColumn = columnOf(
     table,
@@ -2198,7 +1918,7 @@ async function planCreates(host, request, kind, clock = systemClock) {
   if (shareColumn?.problem !== void 0) return problem8(shareColumn.problem);
   const notify = textArgument(request.arguments, "notify") === "yes";
   const section = readSection(request.section);
-  if (!section.ok) return refused4(verbFailed(kind.verb, section.error));
+  if (!section.ok) return refused3(verbFailed(kind.verb, section.error));
   const rootId = section.value.root;
   if (rootId === void 0) {
     return problem8(
@@ -2208,11 +1928,11 @@ async function planCreates(host, request, kind, clock = systemClock) {
   const budget = budgetedTransport(host, clock);
   const client = connectAsPerson(host, budget.transport);
   const walk = rootWalk(client, rootId);
-  const failedFor = (error) => budget.refusedForTime() ? refused4({
+  const failedFor = (error) => budget.refusedForTime() ? refused3({
     severity: "error",
     code: "E_RECIPE_VERB",
     message: `'${kind.verb}' ${OUT_OF_TIME}.`
-  }) : refused4(verbFailed(kind.verb, error));
+  }) : refused3(verbFailed(kind.verb, error));
   const parent = await parentOf(walk, rootId, textArgument(request.arguments, "parent"));
   if (!parent.ok) return "error" in parent ? failedFor(parent.error) : problem8(parent.problem);
   const parentFolder = parent.folder;
@@ -2599,7 +2319,7 @@ function plannedFailure2(row, reason) {
     payload: { x: text }
   };
 }
-var refused4 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var refused3 = (diagnostic) => ({ ok: false, error: [diagnostic] });
 function columnOf(table, argument, name) {
   if (table.columns.some((each) => each.name === name)) return { name };
   const matches = table.columns.filter((each) => each.name.toLowerCase() === name.toLowerCase());
@@ -2756,27 +2476,27 @@ function driveMoveVerb(host, clock = systemClock) {
   };
 }
 var problem3 = (text) => argumentsProblem(DRIVE_MOVE, text);
-var refused5 = (diagnostic) => ({ ok: false, error: [diagnostic] });
-var verbRefused = (text) => refused5({ severity: "error", code: "E_RECIPE_VERB", message: `'${DRIVE_MOVE}' ${text}.` });
+var refused4 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var verbRefused = (text) => refused4({ severity: "error", code: "E_RECIPE_VERB", message: `'${DRIVE_MOVE}' ${text}.` });
 var OUT_OF_TIME2 = "could not check every file in one call's time; narrow the table to fewer rows and run again";
 async function planDriveMove(host, request, clock = systemClock) {
   const { table } = request;
   const column = columnOf2(table, textArgument(request.arguments, "file") ?? DEFAULT_FILE_COLUMN);
-  if (typeof column !== "string") return refused5(column);
+  if (typeof column !== "string") return refused4(column);
   const to = textArgument(request.arguments, "to");
-  if (to === void 0) return refused5(problem3("needs to=, the folder the files move into"));
+  if (to === void 0) return refused4(problem3("needs to=, the folder the files move into"));
   const section = readSection(request.section);
-  if (!section.ok) return refused5(verbFailed(DRIVE_MOVE, section.error));
+  if (!section.ok) return refused4(verbFailed(DRIVE_MOVE, section.error));
   const rootId = section.value.root;
   if (rootId === void 0) {
-    return refused5(
+    return refused4(
       problem3(
         "needs root in the google section of .tyto/project.json: it moves only files under it"
       )
     );
   }
   if (table.rows.length > MAX_OPERATIONS) {
-    return refused5(
+    return refused4(
       problem3(
         `would move ${table.rows.length.toLocaleString("en-US")} files, over the ${MAX_OPERATIONS.toLocaleString("en-US")} one plan holds; split the table`
       )
@@ -2784,9 +2504,9 @@ async function planDriveMove(host, request, clock = systemClock) {
   }
   const budget = budgetedTransport(host, clock);
   const connection = await connect(host, request.section, budget.transport);
-  if (!connection.ok) return refused5(verbFailed(DRIVE_MOVE, connection.error));
+  if (!connection.ok) return refused4(verbFailed(DRIVE_MOVE, connection.error));
   const walk = rootWalk(connection.value.client, rootId);
-  const failedFor = (error) => budget.refusedForTime() ? verbRefused(OUT_OF_TIME2) : refused5(verbFailed(DRIVE_MOVE, error));
+  const failedFor = (error) => budget.refusedForTime() ? verbRefused(OUT_OF_TIME2) : refused4(verbFailed(DRIVE_MOVE, error));
   const hasParentColumn = table.columns.some((each) => each.name === PARENT_COLUMN);
   const destinations = /* @__PURE__ */ new Map();
   const operations = [];
@@ -2797,7 +2517,7 @@ async function planDriveMove(host, request, clock = systemClock) {
     if (destination === void 0) {
       const found = await destinationOf(walk, rootId, parent, to);
       if (!found.ok) {
-        return "error" in found ? failedFor(found.error) : refused5(problem3(found.problem));
+        return "error" in found ? failedFor(found.error) : refused4(problem3(found.problem));
       }
       destination = found.folder;
       destinations.set(parent, destination);
@@ -3361,14 +3081,13 @@ function sheetCreateVerb(host, clock = systemClock) {
 
 // src/sheet-cache.ts
 var ENTRY_LIMIT_BYTES = 32 * 1024 * 1024;
-function cacheKey(identity, spreadsheetId, sheetId) {
-  const who = identity.kind === "person" ? "person" : identity.clientEmail;
-  return `sheet/${who}/${spreadsheetId}/${sheetId}`;
+function cacheKey(spreadsheetId, sheetId) {
+  return `sheet/person/${spreadsheetId}/${sheetId}`;
 }
-async function readCache(host, verb, identity, spreadsheetId, sheetId) {
+async function readCache(host, verb, spreadsheetId, sheetId) {
   let stored;
   try {
-    stored = await host.cache.get(cacheKey(identity, spreadsheetId, sheetId));
+    stored = await host.cache.get(cacheKey(spreadsheetId, sheetId));
   } catch (thrown) {
     host.log.warn(`${verb} read no cache: ${messageOf(thrown)}`);
     return void 0;
@@ -3385,14 +3104,14 @@ async function readCache(host, verb, identity, spreadsheetId, sheetId) {
   }
   return entry;
 }
-async function writeCache(host, verb, identity, entry) {
+async function writeCache(host, verb, entry) {
   const bytes = new TextEncoder().encode(JSON.stringify(entry));
   if (bytes.byteLength > ENTRY_LIMIT_BYTES) {
     host.log.warn(`${verb} cached no tab of ${bytes.byteLength} bytes, over the host's limit`);
     return;
   }
   try {
-    const key = cacheKey(identity, entry.snapshot.spreadsheetId, entry.snapshot.sheetId);
+    const key = cacheKey(entry.snapshot.spreadsheetId, entry.snapshot.sheetId);
     await host.cache.put(key, bytes);
   } catch (thrown) {
     host.log.warn(`${verb} cached nothing: ${messageOf(thrown)}`);
@@ -3441,7 +3160,7 @@ async function firstSnapshot(host, verb, client, asked, refresh) {
     );
   }
   if (version.ok && !refresh) {
-    const entry = await readCache(host, verb, client.identity, asked.spreadsheetId, tab.sheetId);
+    const entry = await readCache(host, verb, asked.spreadsheetId, tab.sheetId);
     if (entry !== void 0 && entry.version === version.value) {
       const cached = readOf(verb, entry.snapshot, asked, entry.fetchedAt);
       if ("severity" in cached || covers(entry.snapshot, cached.plan)) return cached;
@@ -3456,7 +3175,7 @@ async function firstSnapshot(host, verb, client, asked, refresh) {
       fetchedAt: live.fetchedAt,
       snapshot: live.snapshot
     };
-    await writeCache(host, verb, client.identity, entry);
+    await writeCache(host, verb, entry);
   }
   return live;
 }
@@ -4324,23 +4043,23 @@ function sheetLookupVerb(host) {
     transform: (request) => lookUp(host, request)
   };
 }
-var refused6 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var refused5 = (diagnostic) => ({ ok: false, error: [diagnostic] });
 var problem5 = (text) => argumentsProblem(SHEET_LOOKUP, text);
 var listOf4 = (written) => [...new Set((written ?? "").split(",").map((item) => item.trim()))].filter((item) => item !== "");
 async function lookUp(host, request) {
   const { table } = request;
   const tabName = textArgument(request.arguments, "tab");
-  if (tabName === void 0) return refused6(problem5("needs tab=, the tab to look rows up in"));
+  if (tabName === void 0) return refused5(problem5("needs tab=, the tab to look rows up in"));
   const keyName = textArgument(request.arguments, "key");
-  if (keyName === void 0) return refused6(problem5("needs key=, the column to match rows by"));
+  if (keyName === void 0) return refused5(problem5("needs key=, the column to match rows by"));
   const wanted = listOf4(textArgument(request.arguments, "columns"));
-  if (wanted.length === 0) return refused6(problem5("needs columns=, the tab columns to add"));
+  if (wanted.length === 0) return refused5(problem5("needs columns=, the tab columns to add"));
   const links = listOf4(textArgument(request.arguments, "links"));
   const notes = listOf4(textArgument(request.arguments, "notes"));
   const prefix = request.arguments["prefix"] === void 0 ? DEFAULT_PREFIX : String(request.arguments["prefix"]).trim();
   const keyColumn = table.columns.find((each) => each.name === keyName) ?? table.columns.find((each) => each.name.toLowerCase() === keyName.toLowerCase());
   if (keyColumn === void 0) {
-    return refused6(
+    return refused5(
       problem5(
         `key= names the column '${keyName}', which the table does not have; its columns are ` + listed(table.columns.map((each) => each.name))
       )
@@ -4351,9 +4070,9 @@ async function lookUp(host, request) {
     request.arguments["spreadsheet"],
     request.section
   );
-  if (typeof spreadsheetId !== "string") return refused6(spreadsheetId);
+  if (typeof spreadsheetId !== "string") return refused5(spreadsheetId);
   const connection = await connect(host, request.section);
-  if (!connection.ok) return refused6(verbFailed(SHEET_LOOKUP, connection.error));
+  if (!connection.ok) return refused5(verbFailed(SHEET_LOOKUP, connection.error));
   const read = await firstSnapshot(
     host,
     SHEET_LOOKUP,
@@ -4364,14 +4083,14 @@ async function lookUp(host, request) {
     // current Drive version, which any edit to the spreadsheet raises.
     false
   );
-  if ("severity" in read) return refused6(read);
+  if ("severity" in read) return refused5(read);
   const { snapshot, names, plan } = read;
   const kc = plan.key ?? 0;
   const added = [];
   for (const written of wanted) {
     const at = columnIndexOf(names, written);
     if (at === void 0)
-      return refused6(notInTab(SHEET_LOOKUP, "columns", written, names, snapshot.title));
+      return refused5(notInTab(SHEET_LOOKUP, "columns", written, names, snapshot.title));
     const type = inferType(snapshot.values, at);
     added.push({
       column: { name: `${prefix}${names[at] ?? ""}`, type, origin: ORIGIN },
@@ -4394,7 +4113,7 @@ async function lookUp(host, request) {
   for (const { column } of added) {
     const lowered = column.name.toLowerCase();
     if (taken.has(lowered)) {
-      return refused6(
+      return refused5(
         problem5(
           `would add the column '${column.name}', which the table already has; name another prefix=`
         )
@@ -4409,7 +4128,7 @@ async function lookUp(host, request) {
     const sheetRow = index + 1;
     const before = rowOfKey.get(key);
     if (before !== void 0) {
-      return refused6(
+      return refused5(
         problem5(
           `rows ${before} and ${sheetRow} of the tab '${snapshot.title}' both hold '${key}' in ${names[kc] ?? ""}; a key must be unique, and the lookup does not guess which row is it`
         )
@@ -4520,7 +4239,7 @@ async function laterSnapshot(host, client, asked, cursor) {
     code: "E_RECIPE_VERB",
     message: `'${SHEET_ROWS}' failed: the tab changed while its pages were read; run again.`
   };
-  const entry = await readCache(host, SHEET_ROWS, client.identity, asked.spreadsheetId, cursor.s);
+  const entry = await readCache(host, SHEET_ROWS, asked.spreadsheetId, cursor.s);
   if (entry !== void 0) {
     const cached = readOf(SHEET_ROWS, entry.snapshot, asked, entry.fetchedAt);
     if (!("severity" in cached) && covers(entry.snapshot, cached.plan) && cached.digest === cursor.d) {
@@ -4602,7 +4321,7 @@ function sheetSyncVerb(host, clock = systemClock) {
   };
 }
 var problem7 = (text) => argumentsProblem(SHEET_SYNC, text);
-var refused7 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var refused6 = (diagnostic) => ({ ok: false, error: [diagnostic] });
 var warning2 = (message) => ({
   severity: "warning",
   code: "E_RECIPE_VERB",
@@ -4619,38 +4338,38 @@ async function planSheetSync(host, request) {
     request.arguments["spreadsheet"],
     request.section
   );
-  if (typeof spreadsheetId !== "string") return refused7(spreadsheetId);
+  if (typeof spreadsheetId !== "string") return refused6(spreadsheetId);
   const columns = writeColumns(table, "");
-  if (!Array.isArray(columns)) return refused7(columns);
+  if (!Array.isArray(columns)) return refused6(columns);
   const tableColumn = (name) => columns.find((column) => column.name.toLowerCase() === name.toLowerCase());
   const keyColumn = tableColumn(text("key"));
   if (keyColumn === void 0) {
-    return refused7(problem7(`key= names '${text("key")}', which is not a column of the table`));
+    return refused6(problem7(`key= names '${text("key")}', which is not a column of the table`));
   }
   const moveName = text("move");
   const moveColumn = moveName === "" ? void 0 : tableColumn(moveName);
   if (moveName !== "" && moveColumn === void 0) {
-    return refused7(problem7(`move= names '${moveName}', which is not a column of the table`));
+    return refused6(problem7(`move= names '${moveName}', which is not a column of the table`));
   }
   const connection = await connect(host, request.section);
-  if (!connection.ok) return refused7(verbFailed(SHEET_SYNC, connection.error));
+  if (!connection.ok) return refused6(verbFailed(SHEET_SYNC, connection.error));
   const { client } = connection.value;
   const tabs = await readGridTabs(client, spreadsheetId);
-  if (!tabs.ok) return refused7(verbFailed(SHEET_SYNC, tabs.error));
+  if (!tabs.ok) return refused6(verbFailed(SHEET_SYNC, tabs.error));
   const tab = pickTab(tabs.value, text("tab"));
-  if (typeof tab === "string") return refused7(problem7(tab));
+  if (typeof tab === "string") return refused6(problem7(tab));
   const values = await readValues(client, spreadsheetId, tab);
-  if (!values.ok) return refused7(verbFailed(SHEET_SYNC, values.error));
+  if (!values.ok) return refused6(verbFailed(SHEET_SYNC, values.error));
   const names = headerOf2(values.value, tab.title);
-  if (typeof names === "string") return refused7(problem7(names));
+  if (typeof names === "string") return refused6(problem7(names));
   const kc = columnIndexOf(names, keyColumn.name);
   if (kc === void 0) {
-    return refused7(problem7(`the tab '${tab.title}' has no column '${keyColumn.name}' in row 1`));
+    return refused6(problem7(`the tab '${tab.title}' has no column '${keyColumn.name}' in row 1`));
   }
   const keep = listOf5(text("keep")).map((name) => [name, columnIndexOf(names, name)]);
   const unknownKeep = keep.filter(([, index]) => index === void 0).map(([name]) => name);
   if (unknownKeep.length > 0) {
-    return refused7(
+    return refused6(
       problem7(`keep= names ${listed(unknownKeep)}, which the tab '${tab.title}' has no column for`)
     );
   }
@@ -4666,7 +4385,7 @@ async function planSheetSync(host, request) {
     }
   }
   if (unplaced.length > 0) {
-    return refused7(
+    return refused6(
       problem7(
         `cannot write ${listed(unplaced)}: the tab '${tab.title}' has no column of that name in row 1. Its columns are ${listed(names)}`
       )
@@ -4684,7 +4403,7 @@ async function planSheetSync(host, request) {
     }
     const before = inTab.get(key);
     if (before !== void 0) {
-      return refused7(
+      return refused6(
         problem7(
           `rows ${before.number} and ${number} of the tab '${tab.title}' both hold '${key}' in ${names[kc] ?? ""}; a key must be unique, and the sync does not guess which row is it`
         )
@@ -4706,7 +4425,7 @@ async function planSheetSync(host, request) {
       continue;
     }
     if (inTable.has(key)) {
-      return refused7(
+      return refused6(
         problem7(`the table holds '${key}' in ${keyColumn.name} twice; a key must be unique`)
       );
     }
@@ -4729,14 +4448,14 @@ async function planSheetSync(host, request) {
     const found = pickTab(tabs.value, title);
     if (typeof found === "string") continue;
     const read = await readValues(client, spreadsheetId, found);
-    if (!read.ok) return refused7(verbFailed(SHEET_SYNC, read.error));
+    if (!read.ok) return refused6(verbFailed(SHEET_SYNC, read.error));
     tabsRead.set(found.title, read.value);
     if (read.value.length === 0) continue;
     const archivedNames = headerOf2(read.value, found.title);
-    if (typeof archivedNames === "string") return refused7(problem7(archivedNames));
+    if (typeof archivedNames === "string") return refused6(problem7(archivedNames));
     const at = columnIndexOf(archivedNames, keyColumn.name);
     if (at === void 0) {
-      return refused7(
+      return refused6(
         problem7(`archived= names '${found.title}', which has no column '${keyColumn.name}'`)
       );
     }
@@ -4770,7 +4489,7 @@ async function planSheetSync(host, request) {
     { links: names.map((_, index) => index), notes: [] },
     lastRow
   );
-  if (!extras.ok) return refused7(verbFailed(SHEET_SYNC, extras.error));
+  if (!extras.ok) return refused6(verbFailed(SHEET_SYNC, extras.error));
   const linkAt = (at, number) => extras.value.links[String(at)]?.[String(number)];
   const digestOf2 = (row) => rowDigest(row.cells, rowLinks(extras.value.links, row.number));
   const changedOf = (cells, row) => {
@@ -4859,7 +4578,7 @@ async function planSheetSync(host, request) {
     let read = tabsRead.get(found.title);
     if (read === void 0) {
       const answer = await readValues(client, spreadsheetId, found);
-      if (!answer.ok) return refused7(verbFailed(SHEET_SYNC, answer.error));
+      if (!answer.ok) return refused6(verbFailed(SHEET_SYNC, answer.error));
       read = answer.value;
       tabsRead.set(found.title, read);
     }
@@ -4973,7 +4692,7 @@ async function planSheetSync(host, request) {
     lastRow - writes(deletes) - writes(moveDrafts) + writes(addDrafts),
     false
   );
-  if (!formatted.ok) return refused7(verbFailed(SHEET_SYNC, formatted.error));
+  if (!formatted.ok) return refused6(verbFailed(SHEET_SYNC, formatted.error));
   for (const [destination, header] of destinations) {
     if (typeof header === "string") continue;
     const into = moveDrafts.filter(
@@ -4987,7 +4706,7 @@ async function planSheetSync(host, request) {
       (tabsRead.get(found.title)?.length ?? 1) + into,
       true
     );
-    if (!done.ok) return refused7(verbFailed(SHEET_SYNC, done.error));
+    if (!done.ok) return refused6(verbFailed(SHEET_SYNC, done.error));
   }
   const ordered = [
     ...tabDrafts,
@@ -4998,7 +4717,7 @@ async function planSheetSync(host, request) {
     ...formatDrafts
   ];
   if (ordered.length > MAX_OPERATIONS) {
-    return refused7(
+    return refused6(
       problem7(
         `would plan ${ordered.length.toLocaleString("en-US")} operations, over the ${MAX_OPERATIONS.toLocaleString("en-US")} one plan holds; split the table`
       )

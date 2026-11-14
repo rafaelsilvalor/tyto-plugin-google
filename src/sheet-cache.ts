@@ -1,6 +1,6 @@
 import type { PluginHost } from '@tyto/plugin-api';
 
-import { messageOf, type Identity } from './errors.js';
+import { messageOf } from './errors.js';
 import type { RawCell, Snapshot } from './sheet-grid.js';
 
 /**
@@ -12,9 +12,9 @@ import type { RawCell, Snapshot } from './sheet-grid.js';
  * than the file. Later pages of the same run take the entry by the snapshot's digest instead,
  * so a run is one snapshot even if the sheet is edited while it pages.
  *
- * **A person's reads and the service account's never share an entry** (TYTO-677): the key
- * names who read the tab, so a tab the service account cached on a headless terminal is never
- * served to the person, where the person's own access decides, and the other way round.
+ * **Only the signed-in person's reads are cached** (TYTO-701): the key keeps its `person`
+ * segment, so an entry a service account wrote under its own email before TYTO-701 is never
+ * served to anyone.
  *
  * **The cache never fails a read.** A host with no cache, a refused write, an entry over the
  * host's 32 MiB or one that is not this plugin's shape is a warning in the log and a live read.
@@ -33,25 +33,20 @@ export interface CacheEntry {
   readonly snapshot: Snapshot;
 }
 
-/**
- * `sheet/<who>/<spreadsheetId>/<sheetId>`: one entry per tab and reader, replaced by every live
- * read of it. `<who>` is `person`, or the service account's email, whose `@` no `person` has.
- */
-export function cacheKey(identity: Identity, spreadsheetId: string, sheetId: number): string {
-  const who = identity.kind === 'person' ? 'person' : identity.clientEmail;
-  return `sheet/${who}/${spreadsheetId}/${sheetId}`;
+/** `sheet/person/<spreadsheetId>/<sheetId>`: one entry per tab, replaced by every live read. */
+export function cacheKey(spreadsheetId: string, sheetId: number): string {
+  return `sheet/person/${spreadsheetId}/${sheetId}`;
 }
 
 export async function readCache(
   host: CacheHost,
   verb: string,
-  identity: Identity,
   spreadsheetId: string,
   sheetId: number,
 ): Promise<CacheEntry | undefined> {
   let stored;
   try {
-    stored = await host.cache.get(cacheKey(identity, spreadsheetId, sheetId));
+    stored = await host.cache.get(cacheKey(spreadsheetId, sheetId));
   } catch (thrown) {
     host.log.warn(`${verb} read no cache: ${messageOf(thrown)}`);
     return undefined;
@@ -74,19 +69,14 @@ export async function readCache(
 }
 
 /** Stores a tab's snapshot; a refusal is a warning, never the read's failure. */
-export async function writeCache(
-  host: CacheHost,
-  verb: string,
-  identity: Identity,
-  entry: CacheEntry,
-): Promise<void> {
+export async function writeCache(host: CacheHost, verb: string, entry: CacheEntry): Promise<void> {
   const bytes = new TextEncoder().encode(JSON.stringify(entry));
   if (bytes.byteLength > ENTRY_LIMIT_BYTES) {
     host.log.warn(`${verb} cached no tab of ${bytes.byteLength} bytes, over the host's limit`);
     return;
   }
   try {
-    const key = cacheKey(identity, entry.snapshot.spreadsheetId, entry.snapshot.sheetId);
+    const key = cacheKey(entry.snapshot.spreadsheetId, entry.snapshot.sheetId);
     await host.cache.put(key, bytes);
   } catch (thrown) {
     host.log.warn(`${verb} cached nothing: ${messageOf(thrown)}`);

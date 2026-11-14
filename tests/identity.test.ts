@@ -2,29 +2,29 @@ import type { TestRecipeOptions } from '@tyto/plugin-api/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { fakeDrive, INBOX_ID, INBOX_URL, type FakeGoogleDrive } from './drive.js';
-import { CLIENT_EMAIL } from './google.js';
 import { response } from './host.js';
 import {
-  callsTo,
   fakeGoogle,
   memoryCache,
-  SPREADSHEET_ID,
   SPREADSHEET_URL,
   type FakeGoogle,
   type FakeSpreadsheet,
 } from './sheets.js';
 
 /**
- * Who every existing verb acts as (TYTO-677, TYTO-700): on a host that signs in (the desktop,
- * or a terminal after `tyto signin google`), the signed-in person, never the service account,
- * even when one is stored; on a host that cannot (a terminal with no system keychain), the
- * service account. Every token, id and email is invented.
+ * Who every verb acts as (TYTO-677, TYTO-700, TYTO-701): the signed-in person, on a host that
+ * signs in (the desktop, or a terminal after `tyto signin google`), and nobody else. On a host
+ * that cannot sign in (a terminal with no system keychain) no verb runs: each fails with
+ * `E_GOOGLE_SIGNIN` and makes no request. Every token, id and email is invented.
  */
 type InputTable = NonNullable<TestRecipeOptions['input']>;
 
 const PERSON_TOKEN = 'person-token-0677';
 const SIGNED_IN = { google: PERSON_TOKEN };
 const SIGN_IN_HINT = 'Sign in to Google on the plugins screen';
+const NO_KEYCHAIN =
+  "This terminal has no system keychain, so it cannot sign in to Google, and Tyto's Google " +
+  'verbs act only as a signed-in person.';
 
 const open: { close(): Promise<void> }[] = [];
 afterEach(async () => {
@@ -118,25 +118,17 @@ async function readAndSync(google: FakeGoogle) {
 }
 
 describe('in the window (a host with a sign-in port)', () => {
-  it('reads and syncs a sheet as the signed-in person, with no service account stored', async () => {
-    const google = await sheets({ signins: SIGNED_IN, serviceAccount: false });
+  it('reads and syncs a sheet as the signed-in person', async () => {
+    const google = await sheets({ signins: SIGNED_IN });
     const answer = await readAndSync(google);
     expect(answer.rows).toBe(2);
     expect(answer.applied).toEqual(['applied']);
     expect(google.sheet.tabs[0]?.values[1]).toEqual(['EX-1', 'New title']);
     expect(new Set(google.bearers)).toEqual(new Set([`Bearer ${PERSON_TOKEN}`]));
-    expect(google.assertions.count).toBe(0);
     expect(JSON.stringify(answer.plan)).not.toContain(PERSON_TOKEN);
   });
 
-  it('acts as the person even when a service account is stored', async () => {
-    const google = await sheets({ signins: SIGNED_IN });
-    await readAndSync(google);
-    expect(new Set(google.bearers)).toEqual(new Set([`Bearer ${PERSON_TOKEN}`]));
-    expect(google.assertions.count).toBe(0);
-  });
-
-  it('says to sign in, never falling back to the stored service account, on every verb', async () => {
+  it('says to sign in on every verb when nobody is signed in', async () => {
     const google = await sheets({ signins: {} });
     const steps: [string, InputTable | undefined][] = [
       ['google.sheet-rows tab=Queue', undefined],
@@ -174,9 +166,8 @@ describe('in the window (a host with a sign-in port)', () => {
       expect(said).toContain('E_GOOGLE_SIGNIN');
       expect(said).toContain(SIGN_IN_HINT);
     }
-    // Not one request reached Google: no token was bought, no file was read.
+    // Not one request reached Google.
     expect(google.bearers).toEqual([]);
-    expect(google.assertions.count).toBe(0);
     expect(signedOut.calls).toEqual([]);
   });
 
@@ -191,10 +182,9 @@ describe('in the window (a host with a sign-in port)', () => {
     const applied = await google.plugin.recipes.verbs.get('google.sheet-sync')?.apply?.(plan);
     expect(JSON.stringify(applied)).toContain(SIGN_IN_HINT);
     expect(google.sheet.tabs[0]?.values[1]).toEqual(['EX-1', 'Old title']);
-    expect(google.assertions.count).toBe(0);
   });
 
-  it("tells the person a file is not shared with their account, never a robot's email", async () => {
+  it('tells the person a file is not shared with their account', async () => {
     const google = await sheets({
       signins: SIGNED_IN,
       capabilities: {
@@ -212,56 +202,49 @@ describe('in the window (a host with a sign-in port)', () => {
     });
     const said = JSON.stringify(await google.plugin.runRecipe('google.sheet-rows'));
     expect(said).toContain('is not shared with the Google account signed in on the plugins screen');
-    expect(said).not.toContain(CLIENT_EMAIL);
     expect(said).not.toContain('service account');
   });
 });
 
 describe('on a terminal with no keychain (a host without a sign-in port)', () => {
-  it('reads and syncs a sheet as the service account', async () => {
-    const google = await sheets();
-    const answer = await readAndSync(google);
-    expect(answer.applied).toEqual(['applied']);
-    expect(google.bearers.length).toBeGreaterThan(0);
-    expect(google.bearers.every((each) => each.startsWith('Bearer ya29.test-token-'))).toBe(true);
-    // No count of token requests: a token the module already holds for the account is reused.
-  });
-
-  it('says a terminal with no keychain needs a service account, never to sign in', async () => {
-    const google = await sheets({ serviceAccount: false });
-    const said = JSON.stringify(await google.plugin.runRecipe('google.sheet-rows'));
-    expect(said).toContain('E_GOOGLE_CONFIG');
-    expect(said).toContain('this terminal cannot sign in to Google as a person');
-    expect(said).not.toContain(SIGN_IN_HINT);
-    expect(google.bearers).toEqual([]);
-  });
-
-  it('lists Drive as the service account', async () => {
-    const opened = await drive();
-    const ran = await opened.plugin.runRecipe('google.drive-list');
-    expect(ran.ok && ran.value.cells.at(-1)?.table?.rows.length).toBe(1);
-    expect(opened.calls.every((call) => call.authorization.startsWith('Bearer ya29.'))).toBe(true);
-  });
-});
-
-describe('the sheet cache', () => {
-  it("never serves the service account's read of a tab to the person, nor the other way", async () => {
-    const cache = memoryCache();
-    const robot = await sheets({ capabilities: cache.capabilities });
-    expect((await robot.plugin.runRecipe('google.sheet-rows')).ok).toBe(true);
-    expect(callsTo(robot, 'values')).toHaveLength(1);
-
-    const person = await sheets({ signins: SIGNED_IN, capabilities: cache.capabilities });
-    expect((await person.plugin.runRecipe('google.sheet-rows')).ok).toBe(true);
-    // Same Drive version, yet read live: the robot's entry is not the person's.
-    expect(callsTo(person, 'values')).toHaveLength(1);
-    expect([...cache.entries.keys()].sort()).toEqual([
-      `sheet/person/${SPREADSHEET_ID}/5`,
-      `sheet/${CLIENT_EMAIL}/${SPREADSHEET_ID}/5`,
+  it('runs no verb: each says the terminal cannot sign in, and nothing reaches Google', async () => {
+    const google = await sheets({ keychain: false });
+    const steps: [string, InputTable | undefined][] = [
+      ['google.sheet-rows tab=Queue', undefined],
+      ['google.sheet-lookup tab=Queue key=ID columns=Title', synced()],
+      ['google.sheet-write tab=Queue mode=replace', synced()],
+      ['google.sheet-sync tab=Queue key=ID', synced()],
+    ];
+    const terminal = await drive({ keychain: false });
+    const driveSteps: [string, InputTable | undefined][] = [
+      ['google.drive-list', undefined],
+      ['google.drive-read file=object012345678', undefined],
+      [
+        'google.drive-move to=processed',
+        table(['id', 'parent_id'], [['object012345678', INBOX_ID]]),
+      ],
+      ['google.drive-count folder=Folder', table(['Folder'], [[INBOX_ID]])],
+      ['google.drive-folder', table(['name'], [['Clients']])],
+      ['google.sheet-create name=name', table(['name'], [['Clients']])],
+    ];
+    const answers = await Promise.all([
+      ...steps.map(([step, input]) =>
+        google.plugin.runRecipe(step, input === undefined ? {} : { input }),
+      ),
+      ...driveSteps.map(([step, input]) =>
+        terminal.plugin.runRecipe(step, input === undefined ? {} : { input }),
+      ),
     ]);
-
-    // Each one's next run is served from its own entry.
-    expect((await person.plugin.runRecipe('google.sheet-rows')).ok).toBe(true);
-    expect(callsTo(person, 'values')).toHaveLength(1);
+    expect(answers).toHaveLength(10);
+    for (const answer of answers) {
+      const said = JSON.stringify(answer);
+      expect(said).toContain('E_GOOGLE_SIGNIN');
+      expect(said).toContain(NO_KEYCHAIN);
+      expect(said).not.toContain(SIGN_IN_HINT);
+      expect(said).not.toContain('service account');
+    }
+    expect(google.bearers).toEqual([]);
+    expect(google.calls).toEqual([]);
+    expect(terminal.calls).toEqual([]);
   });
 });

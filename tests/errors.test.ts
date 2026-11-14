@@ -1,15 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-  classifyFailure,
-  isRateLimited,
-  PERSON,
-  readErrorBody,
-  type Identity,
-} from '../src/errors.js';
-import { CLIENT_EMAIL } from './google.js';
-
-const ROBOT: Identity = { kind: 'service-account', clientEmail: CLIENT_EMAIL };
+import { classifyFailure, isRateLimited, readErrorBody } from '../src/errors.js';
 
 const LABEL = 'GET sheets.googleapis.com/v4/spreadsheets/x';
 
@@ -42,7 +33,7 @@ describe('classifyFailure', () => {
         details: ['SERVICE_DISABLED', 'ACCESS_TOKEN_SCOPE_INSUFFICIENT'],
       },
     );
-    const failure = classifyFailure(LABEL, 403, text, ROBOT);
+    const failure = classifyFailure(LABEL, 403, text);
     expect(failure.code).toBe('E_GOOGLE_CONFIG');
     expect(failure.message).toContain('the API is not enabled');
     expect(failure.message).not.toContain('scopes');
@@ -53,32 +44,12 @@ describe('classifyFailure', () => {
       status: 'PERMISSION_DENIED',
       details: ['ACCESS_TOKEN_SCOPE_INSUFFICIENT'],
     });
-    const failure = classifyFailure(LABEL, 403, text, ROBOT);
+    const failure = classifyFailure(LABEL, 403, text);
     expect(failure.code).toBe('E_GOOGLE_AUTH');
     expect(failure.message).toContain("the token's scopes do not cover this call");
   });
 
-  it('asks to share a missing or forbidden file with the service account', () => {
-    const missing = classifyFailure(
-      LABEL,
-      404,
-      googleBody(404, 'Requested entity was not found.'),
-      ROBOT,
-    );
-    expect(missing.code).toBe('E_GOOGLE_HTTP');
-    expect(missing.message).toContain(`share it with ${CLIENT_EMAIL}`);
-
-    const forbidden = classifyFailure(
-      LABEL,
-      403,
-      googleBody(403, 'The caller does not have permission', { status: 'PERMISSION_DENIED' }),
-      ROBOT,
-    );
-    expect(forbidden.code).toBe('E_GOOGLE_AUTH');
-    expect(forbidden.message).toContain(`share it with ${CLIENT_EMAIL}`);
-  });
-
-  it("tells the person to share with the signed-in account, never a service account's email", () => {
+  it('tells the person to share a missing or forbidden file with the signed-in account', () => {
     for (const status of [403, 404]) {
       const failure = classifyFailure(
         LABEL,
@@ -86,32 +57,27 @@ describe('classifyFailure', () => {
         googleBody(status, 'The caller does not have permission', {
           status: 'PERMISSION_DENIED',
         }),
-        PERSON,
       );
+      expect(failure.code).toBe(status === 404 ? 'E_GOOGLE_HTTP' : 'E_GOOGLE_AUTH');
       expect(failure.message).toContain(
         'is not shared with the Google account signed in on the plugins screen',
       );
-      expect(failure.message).not.toContain('service account');
-      expect(failure.message).not.toContain(CLIENT_EMAIL);
     }
   });
 
-  it("names the OAuth client's Cloud project, for the person, when an API is disabled", () => {
+  it("names the OAuth client's Cloud project when an API is disabled", () => {
     const text = googleBody(403, 'Google Drive API has not been used in project 123.', {
       status: 'PERMISSION_DENIED',
       details: ['SERVICE_DISABLED'],
     });
-    const person = classifyFailure(LABEL, 403, text, PERSON);
-    expect(person.message).toContain('the Cloud project of the OAuth client');
-    expect(person.message).not.toContain('service account');
-    expect(classifyFailure(LABEL, 403, text, ROBOT).message).toContain(
-      "the service account's Cloud project",
+    expect(classifyFailure(LABEL, 403, text).message).toContain(
+      'the Cloud project of the OAuth client',
     );
   });
 
   it('names no cause for a 401 or 403 no rule matches', () => {
     for (const status of [401, 403]) {
-      const failure = classifyFailure(LABEL, status, 'denied', ROBOT);
+      const failure = classifyFailure(LABEL, status, 'denied');
       expect(failure.code).toBe('E_GOOGLE_AUTH');
       expect(failure.message).toContain('unknown cause');
       expect(failure.message).not.toContain('scope');
@@ -124,7 +90,6 @@ describe('classifyFailure', () => {
       LABEL,
       400,
       googleBody(400, `Unable to parse range: ${'x'.repeat(400)}`),
-      ROBOT,
     );
     expect(failure).toMatchObject({ code: 'E_GOOGLE_HTTP', status: 400 });
     expect(failure.message).toContain('Google said: Unable to parse range');

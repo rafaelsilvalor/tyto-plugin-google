@@ -18,13 +18,13 @@ const SIGNED_OUT =
   'a terminal with `tyto signin google`, then run again.';
 
 const NO_KEYCHAIN =
-  'This terminal cannot sign in to Google as a person: it has no system keychain to keep the ' +
-  'sign-in in. Run this step in the desktop app, or in a terminal on a machine with a ' +
-  'keychain after `tyto signin google`.';
+  "This terminal has no system keychain, so it cannot sign in to Google, and Tyto's Google " +
+  'verbs act only as a signed-in person. Run this step in the desktop app, or in a terminal ' +
+  'on a machine with a keychain after `tyto signin google`.';
 
 /**
- * The signed-in person's access token, as {@link Tokens}, so the same client that signs its
- * requests with the service account's token signs them with the person's.
+ * The signed-in person's access token, as {@link Tokens}: the only token any request of this
+ * plugin is signed with (TYTO-701).
  *
  * The host runs the browser flow and refreshes the token; the plugin never sees the refresh
  * token and never opens a browser (Tyto ADR 0174 decision 6). The token is held for the life
@@ -59,8 +59,8 @@ export function createSigninTokens(host: SigninHost, first?: string): Tokens {
 /**
  * The host's answer, with its refusals turned into a sentence the person can act on. A host
  * that cannot sign a person in (a terminal with no system keychain: headless, CI) is
- * `E_GOOGLE_SIGNIN` with the host code `E_SIGNIN_UNAVAILABLE`, which `connect` reads as "act as
- * the service account"; no other refusal is.
+ * `E_GOOGLE_SIGNIN` with the host code `E_SIGNIN_UNAVAILABLE`, and the verb stops there: Tyto's
+ * Google verbs act only as a signed-in person, with no fallback (TYTO-701).
  */
 export async function askSignin(host: SigninHost): Promise<GoogleResult<string>> {
   try {

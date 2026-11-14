@@ -135,8 +135,7 @@ describe('google.drive-folder', () => {
       { email: 'bo@example.com', role: 'reader', notified: false },
     ]);
     expect(item(drive, 'newB0123456789')?.permissions).toBeUndefined();
-    // Every Drive request, the plan's and the Apply's, was the person's; the service account
-    // was never asked for a token and is shared nothing.
+    // Every Drive request, the plan's and the Apply's, was the person's.
     expect(new Set(drive.calls.map((call) => call.authorization))).toEqual(
       new Set([`Bearer ${PERSON_TOKEN}`]),
     );

@@ -12,8 +12,8 @@ import {
   type FakeGoogleDrive,
   type FakeItem,
 } from './drive.js';
-import { testClock, testKey, tokenEndpoint } from './google.js';
-import { googleHost, response } from './host.js';
+import { testClock } from './google.js';
+import { googleHost, response, signedIn } from './host.js';
 
 /**
  * `google.drive-move` and `google.drive-count` through `testPlugin`: planned or transformed
@@ -326,16 +326,9 @@ describe('google.drive-move', () => {
 
 describe('applyDriveMoves budget', () => {
   it('sends no PATCH past its 20 s and answers what it did not reach as skipped', async () => {
-    const key = await testKey();
     const clock = testClock(Date.now());
-    const endpoint = tokenEndpoint(key.publicKey, clock);
-    const { host, requests } = googleHost({
-      secrets: { 'service-account': key.json },
-      fetch: async (url, init) => {
-        if (url.startsWith('https://oauth2.googleapis.com/')) {
-          const answer = await endpoint.answer(init);
-          return response(answer.status, await answer.text());
-        }
+    const { host: terminal, requests } = googleHost({
+      fetch: async () => {
         // The first re-read is slow: the budget is gone when it answers.
         clock.advance(21_000);
         return response(200, {
@@ -348,7 +341,7 @@ describe('applyDriveMoves budget', () => {
     });
     const payload = (f: string) => ({ f, from: [INBOX_ID], to: PROCESSED_ID });
     const answer = await applyDriveMoves(
-      host,
+      signedIn(terminal),
       {
         arguments: {},
         target: 'the folder',

@@ -89,7 +89,11 @@ describe('createSigninTokens', () => {
     if (!answer.ok) {
       expect(answer.error.code).toBe('E_GOOGLE_SIGNIN');
       expect(answer.error.hostCode).toBe('E_SIGNIN_UNAVAILABLE');
-      expect(answer.error.message).toContain('This terminal cannot sign in to Google');
+      expect(answer.error.message).toBe(
+        "This terminal has no system keychain, so it cannot sign in to Google, and Tyto's " +
+          'Google verbs act only as a signed-in person. Run this step in the desktop app, or in ' +
+          'a terminal on a machine with a keychain after `tyto signin google`.',
+      );
     }
   });
 
@@ -113,7 +117,6 @@ describe('createSigninTokens', () => {
     ];
     const sent: string[] = [];
     const client = createGoogleClient({
-      identity: { kind: 'person' },
       tokens: createSigninTokens(host),
       transport: {
         fetch(_url, init = {}) {

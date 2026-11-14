@@ -32,17 +32,17 @@ describe('tyto-plugin.json', () => {
     if (loaded.ok) await loaded.value.close();
   });
 
-  it('reaches only the three Google API hosts, and holds the service account and a sign-in', async () => {
+  it('reaches only the Sheets and Drive API hosts, and holds a sign-in and no credential', async () => {
     const plugin = await harness();
     expect(plugin.manifest.name).toBe('google');
     expect(plugin.manifest.namespace).toBe('google');
     // No setting: the configuration is the project's `google` section, handed to every call.
     expect(plugin.manifest.contributes).toEqual(['recipe-verb']);
+    // Every verb acts as the signed-in person (TYTO-701): the plugin keeps no key and asks
+    // Google for no token itself, so it holds no `credentials:` and no token host.
     expect(plugin.manifest.permissions).toEqual([
-      'net:oauth2.googleapis.com',
       'net:sheets.googleapis.com',
       'net:www.googleapis.com',
-      'credentials:service-account',
       'signin:google',
     ]);
     await plugin.close();
