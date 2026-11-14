@@ -10,7 +10,7 @@ import { isPkcs8Pem } from './jwt.js';
  */
 export const TOKEN_URI = 'https://oauth2.googleapis.com/token';
 
-/** The credential key, and how a person sets it on the command line. */
+/** The credential key, and how a person sets it for a headless terminal. */
 export const SERVICE_ACCOUNT_CREDENTIAL = 'service-account';
 const SERVICE_ACCOUNT_VARIABLE = 'TYTO_PLUGIN_GOOGLE_SERVICE_ACCOUNT';
 
@@ -42,18 +42,20 @@ export interface GoogleConfig {
 export type ConfigHost = Pick<PluginHost, 'credentials'>;
 
 /**
- * Read only on a host that cannot sign a person in (the CLI): the desktop acts as the signed-in
- * person and never asks for the service account (TYTO-677).
+ * Read only on a host that cannot sign a person in (a terminal with no system keychain:
+ * headless, CI). A host that signs in acts as the person and never asks for the service
+ * account (TYTO-677, TYTO-700).
  */
 const NO_ACCOUNT =
-  'No Google service account is stored, and the command line needs one until it can sign in ' +
-  'to Google as a person. Store its whole JSON key in ' +
-  `${SERVICE_ACCOUNT_VARIABLE}, or run this step in the desktop app, signed in to Google on ` +
-  'its plugins screen.';
+  'No Google service account is stored, and this terminal cannot sign in to Google as a ' +
+  'person: it has no system keychain. Store the whole JSON key in ' +
+  `${SERVICE_ACCOUNT_VARIABLE}, run \`tyto signin google\` on a machine with a keychain, or ` +
+  'run this step in the desktop app, signed in to Google on its plugins screen.';
 
 /**
- * The section and the service account, or why they cannot be had — before any request. Only
- * the command line acts as the service account; the desktop acts as the signed-in person.
+ * The section and the service account, or why they cannot be had — before any request. Only a
+ * terminal with no system keychain acts as the service account; a host that signs in acts as
+ * the signed-in person.
  *
  * The section is checked first, so a typo in the folder's project costs no secret read.
  */

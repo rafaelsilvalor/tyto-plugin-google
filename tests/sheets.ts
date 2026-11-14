@@ -90,7 +90,7 @@ export async function fakeGoogle(
     readonly section?: unknown;
     readonly capabilities?: Partial<HostCapabilities>;
     /**
-     * Left out, the host is the command line's: it has no sign-in port, so the plugin acts as
+     * Left out, the host is a headless terminal's: it has no sign-in port, so the plugin acts as
      * the service account. Given, it is the desktop's, with these people signed in (`{}` for
      * nobody), and the plugin acts as the person.
      */
@@ -145,8 +145,9 @@ export async function fakeGoogle(
 }
 
 /**
- * The command line's host: no `signinAccessToken` port, so `host.signin` answers
- * `E_SIGNIN_UNAVAILABLE`, as `tyto recipe run` and `tyto mcp` do.
+ * A headless terminal's host: no `signinAccessToken` port, so `host.signin` answers
+ * `E_SIGNIN_UNAVAILABLE`, as `tyto recipe run` and `tyto mcp` do on a machine with no system
+ * keychain (headless, CI).
  */
 export function withoutSigninPort(): Partial<HostCapabilities> {
   return { signinAccessToken: undefined } as unknown as Partial<HostCapabilities>;

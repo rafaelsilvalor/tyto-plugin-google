@@ -13,8 +13,8 @@ import type { RawCell, Snapshot } from './sheet-grid.js';
  * so a run is one snapshot even if the sheet is edited while it pages.
  *
  * **A person's reads and the service account's never share an entry** (TYTO-677): the key
- * names who read the tab, so a tab the service account cached on the command line is never
- * served to the window, where the person's own access decides, and the other way round.
+ * names who read the tab, so a tab the service account cached on a headless terminal is never
+ * served to the person, where the person's own access decides, and the other way round.
  *
  * **The cache never fails a read.** A host with no cache, a refused write, an entry over the
  * host's 32 MiB or one that is not this plugin's shape is a warning in the log and a live read.

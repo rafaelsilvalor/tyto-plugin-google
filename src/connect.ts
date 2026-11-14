@@ -15,14 +15,17 @@ export interface Connection {
 
 /**
  * The section and a client for one verb call, acting as whoever this host lets the plugin act
- * as (TYTO-677):
+ * as (TYTO-677, TYTO-700):
  *
- * - **A host with a sign-in port** (the desktop) acts as the signed-in person, always. Nobody
- *   signed in is `E_GOOGLE_SIGNIN`, never the service account, even when one is stored: in the
- *   window the service account is obsolete.
- * - **A host without one** (the CLI: `tyto recipe run`, `tyto mcp`) answers `host.signin` with
- *   `E_SIGNIN_UNAVAILABLE`, and only then does the client act as the stored service account,
- *   the command line's fallback until it can sign in.
+ * - **A host that answers a token** acts as the signed-in person, always: the desktop's window,
+ *   and a terminal (`tyto recipe run`, `tyto mcp`) after `tyto signin google`, which keeps the
+ *   sign-in in the system keychain (Tyto ADR 0194). The service account is never read, even
+ *   when one is stored.
+ * - **A host that answers `E_SIGNIN_UNAVAILABLE`** is a terminal with no system keychain
+ *   (headless, CI): only then does the client act as the stored service account.
+ * - **Any other refusal** (nobody signed in, a refused or broken sign-in) is
+ *   `E_GOOGLE_SIGNIN`, returned as it is: the service account is never a silent second choice
+ *   when a sign-in merely failed.
  *
  * `host.signin` is in every `PluginHost`, so the port is told apart by asking it, not by
  * looking for it. Resolved on every call, so a sign-in, a key or a section changed between two
@@ -63,7 +66,7 @@ export type PersonHost = Pick<PluginHost, 'fetch' | 'signin'>;
 /**
  * A client signed with the signed-in person's token (Tyto ADR 0174), for what is created in the
  * person's Drive: a service account owns no storage there, so these verbs act as the person on
- * every host, and the command line answers `E_GOOGLE_SIGNIN`. Nobody signed in is
+ * every host, and a terminal with no system keychain answers `E_GOOGLE_SIGNIN`. Nobody signed in is
  * `E_GOOGLE_SIGNIN` at the first request, and the token is redacted from every message.
  */
 export function connectAsPerson(host: PersonHost, through?: Transport): GoogleClient {
