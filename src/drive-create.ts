@@ -40,10 +40,8 @@ import {
  * Planning and applying "create an item in Drive, as the person, and share it": shared by
  * `google.drive-folder` and `google.sheet-create`.
  *
- * Everything is created as the signed-in person, never as the service account, which owns no
- * storage in a person's Drive, and is shared only with the people a row lists: the service
- * account is never given access (the maintainer's decision of 2026-11-11, which retires it
- * once the sign-in works).
+ * Everything is created as the signed-in person, as every verb acts (TYTO-701), and is shared
+ * only with the people a row lists (the maintainer's decision of 2026-11-11).
  */
 export const CREATE_WRITE = 'create';
 export const SHARE_WRITE = 'share';

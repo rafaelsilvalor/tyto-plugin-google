@@ -9,7 +9,6 @@ import {
   messageOf,
   readErrorBody,
   type GoogleResult,
-  type Identity,
 } from './errors.js';
 
 /** `host.fetch`, or a test's stand-in for it. */
@@ -148,7 +147,7 @@ export async function send(
         { status },
       );
     }
-    const failure = classifyFailure(label, status, text, undefined);
+    const failure = classifyFailure(label, status, text);
     return googleError(
       'E_GOOGLE_HTTP',
       redact(`${failure.message} Still so${tried} within ${budget} s; try again later.`),
@@ -176,15 +175,13 @@ export interface Tokens {
   token(): Promise<GoogleResult<string>>;
   /** Forgets the token held, so the next {@link Tokens.token} asks Google for a new one. */
   invalidate(): void;
-  /** Everything no message may carry: the token, the assertion, the key. */
+  /** Everything no message may carry: every token handed out. */
   secrets(): readonly string[];
 }
 
 export type Query = Readonly<Record<string, string | number | boolean | readonly string[]>>;
 
 export interface GoogleClient {
-  /** Who the client acts as. Not a secret: a service account's email at most. */
-  readonly identity: Identity;
   get(url: string, query?: Query): Promise<GoogleResult<unknown>>;
   /** A GET whose 2xx body is the file itself (Drive's `alt=media`), handed back as text. */
   getText(url: string, query?: Query): Promise<GoogleResult<string>>;
@@ -197,17 +194,15 @@ export interface GoogleClient {
 export interface GoogleClientOptions {
   readonly transport: Transport;
   readonly tokens: Tokens;
-  /** Who the tokens are: a failure names it, and the sheet cache keys its entries by it. */
-  readonly identity: Identity;
 }
 
 /**
  * A client for the Sheets and Drive APIs, over the host's `fetch`, signed with the token of
- * whoever it acts as: the signed-in person, or a headless terminal's service account. A 401 asks for a new token once and tries again: a token Google dropped
+ * the signed-in person. A 401 asks for a new token once and tries again: a token Google dropped
  * before its time is not the person's to fix.
  */
 export function createGoogleClient(options: GoogleClientOptions): GoogleClient {
-  const { transport, tokens, identity } = options;
+  const { transport, tokens } = options;
 
   async function request(
     method: Method,
@@ -270,7 +265,7 @@ export function createGoogleClient(options: GoogleClientOptions): GoogleClient {
         continue;
       }
       if (status < 200 || status >= 300) {
-        const failure = classifyFailure(label, status, text, identity);
+        const failure = classifyFailure(label, status, text);
         return { ok: false, error: { ...failure, message: redact(failure.message) } };
       }
       return googleOk({ status, text, label });
@@ -278,7 +273,6 @@ export function createGoogleClient(options: GoogleClientOptions): GoogleClient {
   }
 
   return {
-    identity,
     get: (url, query) => request('GET', url, query, undefined),
     async getText(url, query) {
       const answer = await exchange('GET', url, query, undefined, '*/*');

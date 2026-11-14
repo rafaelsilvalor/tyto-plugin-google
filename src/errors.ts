@@ -6,11 +6,11 @@
  * words, and puts the code first in those words (see {@link describeGoogleError}).
  */
 export type GoogleErrorCode =
-  /** The service account or the `google` section is missing or unusable; no request was made. */
+  /** The `google` section is unusable, or an API is not enabled; no request was made. */
   | 'E_GOOGLE_CONFIG'
   /** Nobody is signed in to Google for the plugin, or this host cannot sign a person in. */
   | 'E_GOOGLE_SIGNIN'
-  /** Google refused the service account, its token, or its access to a file. */
+  /** Google refused the person's token, or their access to a file. */
   | 'E_GOOGLE_AUTH'
   /** Google answered a 3xx. Never followed: the next host may be one the person never allowed. */
   | 'E_GOOGLE_REDIRECT'
@@ -41,17 +41,6 @@ export interface GoogleError {
 
 export type GoogleResult<T> =
   { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: GoogleError };
-
-/**
- * Who a client acts as: the signed-in person (the desktop's plugins screen, or `tyto signin
- * google` in a terminal), or the service account a terminal with no system keychain acts as
- * (TYTO-677, TYTO-700). A failure names it
- * when it says what a file must be shared with, and the sheet cache keeps the two apart.
- */
-export type Identity =
-  { readonly kind: 'person' } | { readonly kind: 'service-account'; readonly clientEmail: string };
-
-export const PERSON: Identity = { kind: 'person' };
 
 export function googleOk<T>(value: T): GoogleResult<T> {
   return { ok: true, value };
@@ -141,18 +130,12 @@ const QUOTED_LIMIT = 300;
  * whose cause is "the API is not enabled in this Cloud project" can carry a scope signature
  * too, and the same token with the same scopes succeeds once the API is enabled. So
  * service-disabled is tested first, the scope signature second, then a missing file or one not
- * shared with whoever the client acts as, and a 401 or 403 that matches nothing names no cause
+ * shared with the signed-in person, and a 401 or 403 that matches nothing names no cause
  * rather than borrowing one.
  *
  * `text` is the body as Google sent it; the caller redacts the whole message afterwards.
  */
-export function classifyFailure(
-  label: string,
-  status: number,
-  text: string,
-  /** Who the call acted as; `undefined` where the caller cannot say (a retried 5xx). */
-  identity: Identity | undefined,
-): GoogleError {
+export function classifyFailure(label: string, status: number, text: string): GoogleError {
   const body = readErrorBody(text);
   const said = quoted(body, text);
   const signatures = [text, ...body.reasons, body.status ?? ''].join('\n');
@@ -162,7 +145,7 @@ export function classifyFailure(
       code: 'E_GOOGLE_CONFIG',
       status,
       message:
-        `${label} answered ${status}: the API is not enabled in ${projectOf(identity)}. ` +
+        `${label} answered ${status}: the API is not enabled in ${PROJECT}. ` +
         'Enable it in the Google Cloud console (APIs & Services) and run again; nothing else ' +
         `needs changing. ${said}`.trim(),
     };
@@ -182,7 +165,7 @@ export function classifyFailure(
       status,
       message:
         `${label} answered ${status}: the file does not exist, or is not shared with ` +
-        `${sharedWith(identity)} ${said}`.trim(),
+        `${SHARED_WITH} ${said}`.trim(),
     };
   }
   if (status === 401 || status === 403) {
@@ -197,22 +180,13 @@ export function classifyFailure(
   return { code: 'E_GOOGLE_HTTP', status, message: `${label} answered ${status}. ${said}`.trim() };
 }
 
-/** The Cloud project whose APIs a call goes through. */
-function projectOf(identity: Identity | undefined): string {
-  if (identity === undefined) return 'the Cloud project this call goes through';
-  return identity.kind === 'person'
-    ? 'the Cloud project of the OAuth client set on the plugins screen'
-    : "the service account's Cloud project";
-}
+/** The Cloud project whose APIs every call goes through: the sign-in's OAuth client's. */
+const PROJECT = 'the Cloud project of the OAuth client set on the plugins screen';
 
 /** Who a file must be shared with, and what to do about it, as the end of a sentence. */
-function sharedWith(identity: Identity | undefined): string {
-  if (identity === undefined) return 'the account this call acts as. Check the id.';
-  return identity.kind === 'person'
-    ? 'the Google account signed in on the plugins screen. Check the id, and share the file ' +
-        'with that account or sign in with one it is shared with.'
-    : `the service account. Check the id, and share it with ${identity.clientEmail}.`;
-}
+const SHARED_WITH =
+  'the Google account signed in on the plugins screen. Check the id, and share the file ' +
+  'with that account or sign in with one it is shared with.';
 
 /** Google's own words for a failure, shortened: its `message` when it sent JSON. */
 function quoted(body: GoogleErrorBody, text: string): string {

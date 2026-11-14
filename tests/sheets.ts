@@ -3,8 +3,7 @@ import { readFileSync } from 'node:fs';
 import type { FetchedResponse, HostCapabilities, HostFetchInit } from '@tyto/plugin-api';
 import { testPlugin, type PluginHarness } from '@tyto/plugin-api/testing';
 
-import { response } from './host.js';
-import { testClock, testKey, tokenEndpoint, type TestKey } from './google.js';
+import { PERSON_TOKEN, response } from './host.js';
 
 /**
  * A synthetic spreadsheet for `google.sheet-rows`, answered through the contract's own
@@ -77,12 +76,8 @@ export interface FakeGoogle {
   readonly calls: SheetCall[];
   /** Every Sheets and Drive request's `Authorization` header, in order: whose token signed it. */
   readonly bearers: string[];
-  /** How many times the service account's token was asked for at Google's token endpoint. */
-  readonly assertions: { count: number };
   readonly sheet: FakeSpreadsheet;
 }
-
-let key: TestKey | undefined;
 
 export async function fakeGoogle(
   sheet: FakeSpreadsheet,
@@ -90,37 +85,30 @@ export async function fakeGoogle(
     readonly section?: unknown;
     readonly capabilities?: Partial<HostCapabilities>;
     /**
-     * Left out, the host is a headless terminal's: it has no sign-in port, so the plugin acts as
-     * the service account. Given, it is the desktop's, with these people signed in (`{}` for
-     * nobody), and the plugin acts as the person.
+     * The people signed in (`{}` for nobody). Left out, a person is, with {@link PERSON_TOKEN}:
+     * every verb acts only as a signed-in person (TYTO-701).
      */
     readonly signins?: Readonly<Record<string, string>>;
-    /** Whether a service account is stored; `true` when left out. */
-    readonly serviceAccount?: boolean;
+    /**
+     * `false` for a terminal with no system keychain: no sign-in port, so `host.signin`
+     * answers `E_SIGNIN_UNAVAILABLE` and no verb runs.
+     */
+    readonly keychain?: boolean;
   } = {},
 ): Promise<FakeGoogle> {
-  key ??= await testKey();
-  const endpoint = tokenEndpoint(key.publicKey, testClock(Date.now()));
   const calls: SheetCall[] = [];
   const bearers: string[] = [];
-  const assertions = { count: 0 };
   const loaded = await testPlugin({
     manifest,
     load: () => import(entry),
-    secrets: options.serviceAccount === false ? {} : { 'service-account': key.json },
     ...(options.section === undefined ? {} : { section: options.section }),
-    ...(options.signins === undefined ? {} : { signins: options.signins }),
+    ...(options.keychain === false ? {} : { signins: options.signins ?? { google: PERSON_TOKEN } }),
     capabilities: {
-      ...(options.signins === undefined ? withoutSigninPort() : {}),
+      ...(options.keychain === false ? withoutSigninPort() : {}),
       ...options.capabilities,
     },
     async fetch(url: string, init: HostFetchInit) {
       const parsed = new URL(url);
-      if (parsed.host === 'oauth2.googleapis.com') {
-        assertions.count += 1;
-        const answer = await endpoint.answer(init);
-        return response(answer.status, await answer.text());
-      }
       bearers.push(String(init.headers?.['Authorization'] ?? ''));
       const query: Record<string, string | string[]> = {};
       for (const name of new Set(parsed.searchParams.keys())) {
@@ -141,7 +129,7 @@ export async function fakeGoogle(
   if (!loaded.ok) {
     throw new Error(loaded.error.map((item) => `${item.code}: ${item.message}`).join('\n'));
   }
-  return { plugin: loaded.value, calls, bearers, assertions, sheet };
+  return { plugin: loaded.value, calls, bearers, sheet };
 }
 
 /**

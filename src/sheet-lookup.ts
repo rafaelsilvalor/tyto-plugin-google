@@ -31,10 +31,7 @@ const ARGUMENTS: readonly ArgumentSpec[] = [
   { name: 'notes', type: 'text' },
 ];
 
-export type SheetLookupHost = Pick<
-  PluginHost,
-  'credentials' | 'fetch' | 'signin' | 'cache' | 'log'
->;
+export type SheetLookupHost = Pick<PluginHost, 'fetch' | 'signin' | 'cache' | 'log'>;
 
 /**
  * `google.sheet-lookup tab=<tab> key=<column> columns=<a,b>`: adds the named columns of one tab

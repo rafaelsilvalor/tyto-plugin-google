@@ -17,9 +17,9 @@ import { sheetWriteVerb } from './sheet-write.js';
  * `google.sheet-sync` sinks, the `google.drive-move`, `google.drive-folder` and `google.sheet-create` actions, and the
  * `google.drive-count` and `google.sheet-lookup` transforms.
  *
- * Nothing is read at activation: the service account and the project's `google`
- * section are resolved on every call of a verb, so a credential or a folder changed between two
- * runs is what the next run uses.
+ * Nothing is read at activation: the sign-in and the project's `google` section are resolved
+ * on every call of a verb, so a sign-in or a folder changed between two runs is what the next
+ * run uses.
  */
 export function activate(host: PluginHost): Disposable {
   const registered: Disposable[] = [

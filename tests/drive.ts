@@ -3,9 +3,8 @@ import { readFileSync } from 'node:fs';
 import type { FetchedResponse, HostFetchInit } from '@tyto/plugin-api';
 import { testPlugin, type PluginHarness, type TestRecipeOptions } from '@tyto/plugin-api/testing';
 
-import { response } from './host.js';
+import { PERSON_TOKEN, response } from './host.js';
 import { withoutSigninPort } from './sheets.js';
-import { testClock, testKey, tokenEndpoint, type TestKey } from './google.js';
 
 /**
  * A synthetic Drive for `google.drive-list` and `google.drive-read`, answered through the
@@ -67,38 +66,29 @@ export interface FakeGoogleDrive {
   readonly drive: FakeDrive;
 }
 
-let key: TestKey | undefined;
-
 export async function fakeDrive(
   drive: FakeDrive,
   options: {
     readonly section?: unknown;
     /**
-     * Left out, the host is a headless terminal's (no sign-in port: the service account acts).
-     * Given, it is the desktop's with these people signed in, and the person acts.
+     * The people signed in (`{}` for nobody). Left out, a person is, with {@link PERSON_TOKEN}:
+     * every verb acts only as a signed-in person (TYTO-701).
      */
     readonly signins?: Readonly<Record<string, string>>;
-    /** Whether a service account is stored; `true` when left out. */
-    readonly serviceAccount?: boolean;
+    /** `false` for a terminal with no system keychain: `E_SIGNIN_UNAVAILABLE`, no verb runs. */
+    readonly keychain?: boolean;
   } = {},
 ): Promise<FakeGoogleDrive> {
-  key ??= await testKey();
-  const endpoint = tokenEndpoint(key.publicKey, testClock(Date.now()));
   const calls: DriveCall[] = [];
   const loaded = await testPlugin({
     manifest,
     load: () => import(entry),
-    secrets: options.serviceAccount === false ? {} : { 'service-account': key.json },
-    ...(options.signins === undefined
+    ...(options.keychain === false
       ? { capabilities: withoutSigninPort() }
-      : { signins: options.signins }),
+      : { signins: options.signins ?? { google: PERSON_TOKEN } }),
     ...(options.section === undefined ? {} : { section: options.section }),
     async fetch(url: string, init: HostFetchInit) {
       const parsed = new URL(url);
-      if (parsed.host === 'oauth2.googleapis.com') {
-        const answer = await endpoint.answer(init);
-        return response(answer.status, await answer.text());
-      }
       const call: DriveCall = {
         method: init.method ?? 'GET',
         path: decodeURIComponent(parsed.pathname),

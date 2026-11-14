@@ -1,4 +1,4 @@
-import { base64Decode, base64Url } from './jwt.js';
+import { base64Decode, base64Url } from './base64.js';
 
 /**
  * Where a `google.sheet-rows` read left off, handed to the host and back with the next page.

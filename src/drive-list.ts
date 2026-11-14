@@ -44,7 +44,7 @@ export const LIST_COLUMNS: readonly Column[] = [
   { name: 'parent_id', type: 'text', origin: ORIGIN },
 ];
 
-export type DriveListHost = Pick<PluginHost, 'credentials' | 'fetch' | 'signin'>;
+export type DriveListHost = Pick<PluginHost, 'fetch' | 'signin'>;
 
 /**
  * `google.drive-list`: a folder's children, one row per file or folder, keyed by Drive id,

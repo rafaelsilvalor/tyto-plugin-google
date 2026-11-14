@@ -36,50 +36,22 @@ the permissions below and asks for your approval.
 
 ### What it may reach
 
-| Permission                    | Why                                                                           |
-| ----------------------------- | ----------------------------------------------------------------------------- |
-| `net:oauth2.googleapis.com`   | Exchanges the service account's signed assertion for a token (headless runs). |
-| `net:sheets.googleapis.com`   | The Sheets API: reading and writing a spreadsheet.                            |
-| `net:www.googleapis.com`      | The Drive API: listing, reading and moving files.                             |
-| `credentials:service-account` | The service account's JSON key, for headless runs only.                       |
-| `signin:google`               | Your own Google sign-in, run by Tyto in your browser.                         |
+| Permission                  | Why                                                   |
+| --------------------------- | ----------------------------------------------------- |
+| `net:sheets.googleapis.com` | The Sheets API: reading and writing a spreadsheet.    |
+| `net:www.googleapis.com`    | The Drive API: listing, reading, moving and creating. |
+| `signin:google`             | Your own Google sign-in, run by Tyto in your browser. |
 
-**Wherever Tyto can sign you in, every verb acts as you**, with your own Google sign-in, and
-never as a service account, even when one is stored: in the desktop app, and in a terminal
-(`tyto recipe run`, `tyto mcp`) after `tyto signin google`. See
-[Signing in as yourself](#signing-in-as-yourself). Only a terminal with no system keychain
-(headless, CI) cannot sign in; there the verbs that read, write and move act as a service
-account instead, and the two verbs that create, `google.drive-folder` and `google.sheet-create`,
-do not run: see
-[The service account: only for headless runs](#the-service-account-only-for-headless-runs).
+**The plugin acts only as you, the person signed in**, with your own Google sign-in, on every
+verb: in the desktop app, and in a terminal (`tyto recipe run`, `tyto mcp`) after
+`tyto signin google`. It never acts as a robot: there is no service account, no key to store and
+no fallback of any kind (TYTO-701). See [Signing in as yourself](#signing-in-as-yourself).
 
-## The service account: only for headless runs
-
-A terminal with no system keychain (a headless machine, CI) has nowhere to keep a sign-in, so
-Tyto answers there that sign-in is unavailable, and only there do the verbs that read, write and
-move run as a Google Cloud service account, with the account's JSON key. Anywhere Tyto can sign
-you in, the service account is never used: a step in the desktop app, or in a terminal after
-`tyto signin google`, acts as you, and fails with `E_GOOGLE_SIGNIN` when nobody is signed in or
-the sign-in fails, rather than falling back to a stored service account. The verbs that create
-never use it anywhere. On a terminal with no keychain and no key stored, a verb fails with
-`E_GOOGLE_CONFIG`, saying a service account is needed there.
-
-Create one in Google Cloud (IAM, Service accounts, Keys, **Add key**, JSON), enable the Sheets and
-Drive APIs in its project, and share each spreadsheet or folder with the account's email, the
-key's `client_email`, such as `tyto@example-project.iam.gserviceaccount.com`: as an editor for
-anything a sink or an action writes, as a viewer for what is only read. A file the account
-cannot see answers as missing, and the error names the email to share it with.
-
-| Where                        | The whole JSON key, from `{` to `}`                        |
-| ---------------------------- | ---------------------------------------------------------- |
-| Terminal with no keychain    | `TYTO_PLUGIN_GOOGLE_SERVICE_ACCOUNT`                       |
-| Terminal after `tyto signin` | not read: a key stored there is ignored, every verb is you |
-| Desktop app                  | not read: a key stored there is ignored, every verb is you |
-
-The key must be a `service_account` key with a PKCS#8 `private_key`. Its assertion goes only to
-`https://oauth2.googleapis.com/token`, whatever the key's `token_uri` says; a key naming another
-endpoint is refused. The access token it buys is kept in the plugin's memory only, never in a
-file or in Tyto's cache, and is renewed a minute before it expires.
+**A machine with no system keychain cannot run the plugin's verbs.** A terminal there (a headless
+machine, CI) has nowhere to keep a sign-in, so it cannot sign in, and every verb fails with
+`E_GOOGLE_SIGNIN`, saying the terminal cannot sign in and that Tyto's Google verbs act only as a
+signed-in person. Run the step in the desktop app, or in a terminal on a machine with a keychain
+after `tyto signin google`.
 
 ## Signing in as yourself
 
@@ -90,9 +62,7 @@ cannot open answers as missing, with an error that says it is not shared with th
 in on the plugins screen. `google.drive-folder` and `google.sheet-create` create what is yours,
 in your Drive or a shared drive you can write to, shared only with the people a row lists. Every
 verb needs Tyto's desktop app 0.21 or later (plugin API 0.20), which runs the sign-in; signing
-in from a terminal needs Tyto 0.22 or later. A service
-account owns no storage in a person's Drive, so what the plugin creates there it creates as you,
-with your own Google sign-in. Tyto runs that sign-in, not the plugin: the
+in from a terminal needs Tyto 0.22 or later. Tyto runs that sign-in, not the plugin: the
 browser opens only when you click **Sign in** on the plugins screen, and the plugin receives a
 short-lived access token and never the refresh token, which Tyto keeps in the system keychain
 (Tyto ADR 0174).
@@ -126,15 +96,12 @@ Saving another client, or clearing it, ends the sign-in made with the previous o
 are write-only: Tyto keeps the client in the keychain and never shows it again.
 
 In a terminal, `tyto signin google` signs you in the same way (Tyto ADR 0194): Tyto keeps the
-sign-in in the system keychain, and `tyto recipe run` and `tyto mcp` then act as you, with no
-service account stored.
+sign-in in the system keychain, and `tyto recipe run` and `tyto mcp` then act as you.
 
 When nobody is signed in, every verb fails with `E_GOOGLE_SIGNIN` and says to sign in on the
-plugins screen or with `tyto signin google`; none falls back to a stored service account. Only a
-terminal with no system keychain cannot sign in: there `google.drive-folder` and
-`google.sheet-create` fail with `E_GOOGLE_SIGNIN` saying the terminal cannot sign in, and the
-other verbs act as the service account. Your access token is redacted from every message, as
-the service account's is.
+plugins screen or with `tyto signin google`. A terminal with no system keychain cannot sign in:
+there every verb fails with `E_GOOGLE_SIGNIN` saying so, and makes no request. Your access token
+is redacted from every message.
 
 ## The `google` section of `.tyto/project.json`
 
@@ -199,9 +166,8 @@ google.sheet-rows tab=Tasks key=ID links=Brief notes=Owner
   copy, so a sheet edited during a run is never two tables stitched together (a later page that
   finds another copy fails and asks you to run again). The next run uses the cached copy only
   while Drive still gives the same `version`, and running again without cache reads Google.
-  When Drive does not give a version, the tab is read live and nothing is cached. A copy read as
-  you and one read as a headless terminal's service account are kept apart, so neither is ever
-  served to the other.
+  When Drive does not give a version, the tab is read live and nothing is cached. Only copies
+  read as you are kept; one an earlier version kept for a service account is never served.
 
 ## `google.sheet-write`
 
@@ -441,10 +407,8 @@ google.drive-folder name=Client parent=Clients share=Access
 | `notify=` | `yes` emails each person Drive's sharing notice; `no`, the default, does not.                                            |
 
 - **As you, and shared only with whom the row lists.** Every request of the plan and of its
-  Apply is signed with your sign-in; nobody signed in is `E_GOOGLE_SIGNIN`. The service account
-  is not used and is shared nothing: a recipe that reads the new folder in the desktop app reads
-  it as you, and one run on a headless terminal needs the folder shared with the service account
-  by hand, or a `share=` entry naming it.
+  Apply is signed with your sign-in; nobody signed in is `E_GOOGLE_SIGNIN`. A recipe that reads
+  the new folder reads it as you too.
 - **The parent stays under `root`**, which is required: a parent outside it, missing, or
   ambiguous stops the plan. This version creates no parent.
 - **A second run creates nothing twice.** The plan asks Drive for a folder of the row's name
@@ -556,20 +520,20 @@ have been done. Each retry waits Google's `Retry-After`, or 10 s and then 20 s, 
 
 ## Errors
 
-| Code                | What happened                                                                                      |
-| ------------------- | -------------------------------------------------------------------------------------------------- |
-| `E_GOOGLE_CONFIG`   | No key, a key that is not a service account's, a wrong `google` section, or an API not enabled.    |
-| `E_GOOGLE_SIGNIN`   | Nobody is signed in, or the sign-in failed; on a terminal with no keychain, a verb that creates.   |
-| `E_GOOGLE_AUTH`     | Google refused the key (`invalid_grant`: revoked, or the clock is off), or the file is not shared. |
-| `E_GOOGLE_REDIRECT` | Google answered a redirect, which is never followed.                                               |
-| `E_GOOGLE_HTTP`     | Any other failed answer, such as a missing file or a 5xx still failing after its retry.            |
-| `E_GOOGLE_RATE`     | Google kept asking to slow down for the whole retry budget.                                        |
-| `E_GOOGLE_NETWORK`  | No answer: Tyto refused the request, or the network failed.                                        |
-| `E_GOOGLE_RESPONSE` | A 2xx that is not the JSON Google promises.                                                        |
-| `E_GOOGLE_PLAN`     | A planned row that cannot be written as planned: run the cell again for a new plan.                |
-| `E_GOOGLE_CHANGED`  | The tab or the file changed since the plan: run the cell again for a new plan.                     |
+| Code                | What happened                                                                                 |
+| ------------------- | --------------------------------------------------------------------------------------------- |
+| `E_GOOGLE_CONFIG`   | A wrong `google` section, or an API not enabled in the OAuth client's Cloud project.          |
+| `E_GOOGLE_SIGNIN`   | Nobody is signed in, the sign-in failed, or this terminal has no keychain and cannot sign in. |
+| `E_GOOGLE_AUTH`     | Google refused your token, or the file is not shared with the account signed in.              |
+| `E_GOOGLE_REDIRECT` | Google answered a redirect, which is never followed.                                          |
+| `E_GOOGLE_HTTP`     | Any other failed answer, such as a missing file or a 5xx still failing after its retry.       |
+| `E_GOOGLE_RATE`     | Google kept asking to slow down for the whole retry budget.                                   |
+| `E_GOOGLE_NETWORK`  | No answer: Tyto refused the request, or the network failed.                                   |
+| `E_GOOGLE_RESPONSE` | A 2xx that is not the JSON Google promises.                                                   |
+| `E_GOOGLE_PLAN`     | A planned row that cannot be written as planned: run the cell again for a new plan.           |
+| `E_GOOGLE_CHANGED`  | The tab or the file changed since the plan: run the cell again for a new plan.                |
 
-No message carries the token, the signed assertion or the key, even when Google echoes them.
+No message carries your access token, even when Google echoes it.
 
 ## Development
 
@@ -593,22 +557,21 @@ ADR 0150): build before you test.
 
 ### The live suite
 
-`tests/live.test.ts` runs the plugin against the real Google, read-only: it buys a token, reads
-one sheet with `google.sheet-rows` and lists one folder with `google.drive-list`, asserts only
-the shape of what came back, and prints only counts. It is skipped unless all three variables
-are set, so CI skips it:
+`tests/live.test.ts` runs the plugin against the real Google, read-only, as you: it reads one
+sheet with `google.sheet-rows` and lists one folder with `google.drive-list`, signed with
+`GOOGLE_LIVE_ACCESS_TOKEN` (an access token of your own sign-in, with the Drive scope), asserts
+only the shape of what came back, and prints only counts. It is skipped unless all three
+variables are set, so CI skips it:
 
 ```sh
 pnpm build
-GOOGLE_LIVE_SA_FILE=<path to the service account's JSON key> GOOGLE_LIVE_SHEET=<spreadsheet id or address> GOOGLE_LIVE_FOLDER=<folder id or address> pnpm test:live
+GOOGLE_LIVE_ACCESS_TOKEN=<access token> GOOGLE_LIVE_SHEET=<spreadsheet id or address> GOOGLE_LIVE_FOLDER=<folder id or address> pnpm test:live
 ```
 
-Share the sheet and the folder with the key's `client_email` first. Keep the key outside this
-repository. The suite runs the plugin as a headless terminal does, on a host without a sign-in
-port, which is the only place the verbs act as the service account.
+Use a sheet and a folder your own account can open. Keep the token out of this repository.
 
 The same file holds a second, separate suite for the verbs that create, as you. It is skipped
-unless `GOOGLE_LIVE_ACCESS_TOKEN` (an access token of your own sign-in, with the Drive scope) and
+unless `GOOGLE_LIVE_ACCESS_TOKEN` and
 `GOOGLE_LIVE_PARENT` (the folder to create in, as its id or address) are set. It creates one
 folder with `google.drive-folder` and one spreadsheet with `google.sheet-create`, each named
 with the run's date and time, applies them, and checks that a second run plans nothing. With

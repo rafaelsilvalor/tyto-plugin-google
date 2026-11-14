@@ -3,8 +3,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { formulaSeparator, localFormula } from '../src/sheet-cells.js';
 import { applySheetWrites, NOT_REACHED } from '../src/sheet-write-apply.js';
-import { testClock, testKey, tokenEndpoint } from './google.js';
-import { googleHost, response } from './host.js';
+import { testClock } from './google.js';
+import { googleHost, response, signedIn } from './host.js';
 import {
   fakeGoogle,
   memoryCache,
@@ -463,16 +463,9 @@ describe('google.sheet-write outcomes', () => {
 
 describe('applySheetWrites budget', () => {
   it('sends nothing past its 20 s and answers what it did not reach as skipped', async () => {
-    const key = await testKey();
     const clock = testClock(Date.now());
-    const endpoint = tokenEndpoint(key.publicKey, clock);
-    const { host, requests } = googleHost({
-      secrets: { 'service-account': key.json },
-      fetch: async (url, init) => {
-        if (url.startsWith('https://oauth2.googleapis.com/')) {
-          const answer = await endpoint.answer(init);
-          return response(answer.status, await answer.text());
-        }
+    const { host: terminal, requests } = googleHost({
+      fetch: async () => {
         // The grid read is slow: the budget is gone when it answers.
         clock.advance(21_000);
         return response(200, {
@@ -491,7 +484,7 @@ describe('applySheetWrites budget', () => {
     const h = '0123456789abcdef';
     const s = `${SPREADSHEET_ID}/7`;
     const answer = await applySheetWrites(
-      host,
+      signedIn(terminal),
       {
         arguments: {},
         target: 'the tab',

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import { createGoogleClient, RETRY_BUDGET_MILLISECONDS, type Tokens } from '../src/http.js';
 import { hostResponse } from './host.js';
-import { CLIENT_EMAIL, testClock, type Request } from './google.js';
+import { testClock, type Request } from './google.js';
 
 const SHEET = 'https://sheets.googleapis.com/v4/spreadsheets/sheet-0123456789/values/A1';
 const DRIVE = 'https://www.googleapis.com/drive/v3/files';
@@ -33,7 +33,6 @@ function setup(
   const requests: Request[] = [];
   const tokens = fakeTokens();
   const client = createGoogleClient({
-    identity: { kind: 'service-account', clientEmail: CLIENT_EMAIL },
     tokens,
     transport: {
       now: clock.now,
@@ -188,7 +187,7 @@ describe('createGoogleClient', () => {
     expect(answer.ok ? '' : answer.error.code).toBe('E_GOOGLE_AUTH');
   });
 
-  it('names the service account when a file is not shared with it', async () => {
+  it('names the signed-in account when a file is not shared with it', async () => {
     const { client } = setup(() =>
       hostResponse(403, {
         error: {
@@ -200,7 +199,9 @@ describe('createGoogleClient', () => {
     );
     const answer = await client.get(SHEET);
     expect(answer.ok ? '' : answer.error.code).toBe('E_GOOGLE_AUTH');
-    expect(answer.ok ? '' : answer.error.message).toContain(`share it with ${CLIENT_EMAIL}`);
+    expect(answer.ok ? '' : answer.error.message).toContain(
+      'is not shared with the Google account signed in on the plugins screen',
+    );
   });
 
   it('never quotes the token, even when Google echoes it', async () => {
