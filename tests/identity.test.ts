@@ -15,9 +15,10 @@ import {
 } from './sheets.js';
 
 /**
- * Who every existing verb acts as (TYTO-677): on a host with a sign-in port (the desktop), the
- * signed-in person, never the service account, even when one is stored; on a host without one
- * (the command line), the service account. Every token, id and email is invented.
+ * Who every existing verb acts as (TYTO-677, TYTO-700): on a host that signs in (the desktop,
+ * or a terminal after `tyto signin google`), the signed-in person, never the service account,
+ * even when one is stored; on a host that cannot (a terminal with no system keychain), the
+ * service account. Every token, id and email is invented.
  */
 type InputTable = NonNullable<TestRecipeOptions['input']>;
 
@@ -216,7 +217,7 @@ describe('in the window (a host with a sign-in port)', () => {
   });
 });
 
-describe('on the command line (a host without a sign-in port)', () => {
+describe('on a terminal with no keychain (a host without a sign-in port)', () => {
   it('reads and syncs a sheet as the service account', async () => {
     const google = await sheets();
     const answer = await readAndSync(google);
@@ -226,11 +227,11 @@ describe('on the command line (a host without a sign-in port)', () => {
     // No count of token requests: a token the module already holds for the account is reused.
   });
 
-  it('says the command line needs a service account until it can sign in, never to sign in', async () => {
+  it('says a terminal with no keychain needs a service account, never to sign in', async () => {
     const google = await sheets({ serviceAccount: false });
     const said = JSON.stringify(await google.plugin.runRecipe('google.sheet-rows'));
     expect(said).toContain('E_GOOGLE_CONFIG');
-    expect(said).toContain('the command line needs one until it can sign in');
+    expect(said).toContain('this terminal cannot sign in to Google as a person');
     expect(said).not.toContain(SIGN_IN_HINT);
     expect(google.bearers).toEqual([]);
   });

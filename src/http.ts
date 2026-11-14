@@ -203,7 +203,7 @@ export interface GoogleClientOptions {
 
 /**
  * A client for the Sheets and Drive APIs, over the host's `fetch`, signed with the token of
- * whoever it acts as: the signed-in person, or the command line's service account. A 401 asks for a new token once and tries again: a token Google dropped
+ * whoever it acts as: the signed-in person, or a headless terminal's service account. A 401 asks for a new token once and tries again: a token Google dropped
  * before its time is not the person's to fix.
  */
 export function createGoogleClient(options: GoogleClientOptions): GoogleClient {

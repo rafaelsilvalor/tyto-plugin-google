@@ -171,7 +171,7 @@ function base64Decode(text) {
 var TOKEN_URI = "https://oauth2.googleapis.com/token";
 var SERVICE_ACCOUNT_CREDENTIAL = "service-account";
 var SERVICE_ACCOUNT_VARIABLE = "TYTO_PLUGIN_GOOGLE_SERVICE_ACCOUNT";
-var NO_ACCOUNT = `No Google service account is stored, and the command line needs one until it can sign in to Google as a person. Store its whole JSON key in ${SERVICE_ACCOUNT_VARIABLE}, or run this step in the desktop app, signed in to Google on its plugins screen.`;
+var NO_ACCOUNT = `No Google service account is stored, and this terminal cannot sign in to Google as a person: it has no system keychain. Store the whole JSON key in ${SERVICE_ACCOUNT_VARIABLE}, run \`tyto signin google\` on a machine with a keychain, or run this step in the desktop app, signed in to Google on its plugins screen.`;
 async function resolveGoogleConfig(host, sectionValue) {
   const section = readSection(sectionValue);
   if (!section.ok) return section;
@@ -660,8 +660,8 @@ function tokenRefusal(text) {
 
 // src/signin.ts
 var SIGNIN_ID = "google";
-var SIGNED_OUT = "Nobody is signed in to Google for this plugin. Sign in to Google on the plugins screen of Tyto's desktop app (set the OAuth client there first if the row asks for one), then run again.";
-var NO_BROWSER = "The command line cannot sign in to Google as a person: it has no window to sign in from. Run this step in the desktop app, after signing in to Google on its plugins screen.";
+var SIGNED_OUT = "Nobody is signed in to Google for this plugin. Sign in to Google on the plugins screen of Tyto's desktop app (set the OAuth client there first if the row asks for one), or in a terminal with `tyto signin google`, then run again.";
+var NO_KEYCHAIN = "This terminal cannot sign in to Google as a person: it has no system keychain to keep the sign-in in. Run this step in the desktop app, or in a terminal on a machine with a keychain after `tyto signin google`.";
 function createSigninTokens(host, first) {
   let held = first;
   const handedOut = /* @__PURE__ */ new Set();
@@ -690,7 +690,7 @@ async function askSignin(host) {
       return googleError("E_GOOGLE_SIGNIN", SIGNED_OUT, { hostCode });
     }
     if (hostCode === "E_SIGNIN_UNAVAILABLE") {
-      return googleError("E_GOOGLE_SIGNIN", NO_BROWSER, { hostCode });
+      return googleError("E_GOOGLE_SIGNIN", NO_KEYCHAIN, { hostCode });
     }
     return googleError(
       "E_GOOGLE_SIGNIN",

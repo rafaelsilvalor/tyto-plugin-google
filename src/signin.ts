@@ -14,12 +14,13 @@ export type SigninHost = Pick<PluginHost, 'signin'>;
 
 const SIGNED_OUT =
   'Nobody is signed in to Google for this plugin. Sign in to Google on the plugins screen ' +
-  "of Tyto's desktop app (set the OAuth client there first if the row asks for one), then " +
-  'run again.';
+  "of Tyto's desktop app (set the OAuth client there first if the row asks for one), or in " +
+  'a terminal with `tyto signin google`, then run again.';
 
-const NO_BROWSER =
-  'The command line cannot sign in to Google as a person: it has no window to sign in from. ' +
-  'Run this step in the desktop app, after signing in to Google on its plugins screen.';
+const NO_KEYCHAIN =
+  'This terminal cannot sign in to Google as a person: it has no system keychain to keep the ' +
+  'sign-in in. Run this step in the desktop app, or in a terminal on a machine with a ' +
+  'keychain after `tyto signin google`.';
 
 /**
  * The signed-in person's access token, as {@link Tokens}, so the same client that signs its
@@ -57,8 +58,9 @@ export function createSigninTokens(host: SigninHost, first?: string): Tokens {
 
 /**
  * The host's answer, with its refusals turned into a sentence the person can act on. A host
- * without the sign-in port (the CLI) is `E_GOOGLE_SIGNIN` with the host code
- * `E_SIGNIN_UNAVAILABLE`, which `connect` reads as "act as the service account".
+ * that cannot sign a person in (a terminal with no system keychain: headless, CI) is
+ * `E_GOOGLE_SIGNIN` with the host code `E_SIGNIN_UNAVAILABLE`, which `connect` reads as "act as
+ * the service account"; no other refusal is.
  */
 export async function askSignin(host: SigninHost): Promise<GoogleResult<string>> {
   try {
@@ -69,7 +71,7 @@ export async function askSignin(host: SigninHost): Promise<GoogleResult<string>>
       return googleError('E_GOOGLE_SIGNIN', SIGNED_OUT, { hostCode });
     }
     if (hostCode === 'E_SIGNIN_UNAVAILABLE') {
-      return googleError('E_GOOGLE_SIGNIN', NO_BROWSER, { hostCode });
+      return googleError('E_GOOGLE_SIGNIN', NO_KEYCHAIN, { hostCode });
     }
     // A refusal for any other reason, or a broken host: the host's own words, which never
     // carry a token (the wire holds the access token and nothing else, ADR 0174 decision 7).

@@ -43,8 +43,9 @@ export type GoogleResult<T> =
   { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: GoogleError };
 
 /**
- * Who a client acts as: the person signed in on the desktop's plugins screen, or the service
- * account the command line falls back to until it can sign in (TYTO-677). A failure names it
+ * Who a client acts as: the signed-in person (the desktop's plugins screen, or `tyto signin
+ * google` in a terminal), or the service account a terminal with no system keychain acts as
+ * (TYTO-677, TYTO-700). A failure names it
  * when it says what a file must be shared with, and the sheet cache keeps the two apart.
  */
 export type Identity =

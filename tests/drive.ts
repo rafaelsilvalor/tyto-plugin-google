@@ -74,7 +74,7 @@ export async function fakeDrive(
   options: {
     readonly section?: unknown;
     /**
-     * Left out, the host is the command line's (no sign-in port: the service account acts).
+     * Left out, the host is a headless terminal's (no sign-in port: the service account acts).
      * Given, it is the desktop's with these people signed in, and the person acts.
      */
     readonly signins?: Readonly<Record<string, string>>;
