@@ -428,7 +428,7 @@ function childByNameAndTypeQuery(parentId, name, mimeType) {
   return `name = '${child}' and '${parent}' in parents and mimeType = '${type}' and trashed = false`;
 }
 var DRIVE_TYPES = ["folder", "file", "image", "json"];
-var FILE_FIELDS = `${ITEM_FIELDS}, size, createdTime, modifiedTime, webViewLink, parents`;
+var FILE_FIELDS = `${ITEM_FIELDS}, size, createdTime, modifiedTime, webViewLink, parents, imageMediaMetadata(width, height)`;
 var LIST_FIELDS = `nextPageToken, files(${FILE_FIELDS})`;
 var NATIVE_PREFIX = "application/vnd.google-apps.";
 function childrenQuery(folderId, type) {
@@ -571,6 +571,9 @@ function fileOf(value) {
   const modifiedTime = text("modifiedTime");
   const webViewLink = text("webViewLink");
   const parents = Array.isArray(record["parents"]) ? record["parents"].filter((parent) => typeof parent === "string") : [];
+  const image = recordOf2(record["imageMediaMetadata"]);
+  const width = pixelsOf(image?.["width"]);
+  const height = pixelsOf(image?.["height"]);
   return {
     id,
     name,
@@ -579,8 +582,13 @@ function fileOf(value) {
     ...createdTime === void 0 ? {} : { createdTime },
     ...modifiedTime === void 0 ? {} : { modifiedTime },
     ...webViewLink === void 0 ? {} : { webViewLink },
-    parents
+    parents,
+    ...width === void 0 ? {} : { width },
+    ...height === void 0 ? {} : { height }
   };
+}
+function pixelsOf(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : void 0;
 }
 function malformed(what, why) {
   return googleError("E_GOOGLE_RESPONSE", `Google answered ${what} with ${why}.`);
@@ -2367,7 +2375,10 @@ var LIST_COLUMNS = [
   { name: "created", type: "datetime", origin: ORIGIN },
   { name: "modified", type: "datetime", origin: ORIGIN },
   { name: "url", type: "link", origin: ORIGIN },
-  { name: "parent_id", type: "text", origin: ORIGIN }
+  { name: "parent_id", type: "text", origin: ORIGIN },
+  // Last, so a recipe that reads the columns by position keeps reading the same ones.
+  { name: "width", type: "number", origin: ORIGIN },
+  { name: "height", type: "number", origin: ORIGIN }
 ];
 function driveListVerb(host) {
   return {
@@ -2421,7 +2432,9 @@ function rowOf2(file, folderId, fetchedAt) {
       modified: file.modifiedTime ?? null,
       url: file.webViewLink ?? null,
       // The folder asked for: a file Drive lists under it is its child, whatever else holds it.
-      parent_id: folderId
+      parent_id: folderId,
+      width: file.width ?? null,
+      height: file.height ?? null
     },
     provenance: { source: ORIGIN, id: file.id, fetchedAt }
   };

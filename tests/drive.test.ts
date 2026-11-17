@@ -68,6 +68,8 @@ describe('google.drive-list', () => {
       'modified:datetime',
       'url:link',
       'parent_id:text',
+      'width:number',
+      'height:number',
     ]);
     expect(answer.table?.rows.map((row) => `${row.key} ${String(row.values['kind'])}`)).toEqual([
       'doc0123456789xx file',
@@ -87,6 +89,8 @@ describe('google.drive-list', () => {
       modified: '2026-11-05T09:00:00.000Z',
       url: 'https://drive.google.com/file/d/fileA0123456789/view',
       parent_id: INBOX_ID,
+      width: null,
+      height: null,
     });
     expect(answer.table?.rows[1]?.values['size']).toBeNull();
     expect(answer.table?.rows[0]?.provenance).toMatchObject({
@@ -98,13 +102,39 @@ describe('google.drive-list', () => {
         q: `'${INBOX_ID}' in parents and trashed = false`,
         fields:
           'nextPageToken, files(id, name, mimeType, size, createdTime, modifiedTime, ' +
-          'webViewLink, parents)',
+          'webViewLink, parents, imageMediaMetadata(width, height))',
         orderBy: 'createdTime,name',
         pageSize: '1000',
         supportsAllDrives: 'true',
         includeItemsFromAllDrives: 'true',
       },
     ]);
+  });
+
+  it("adds an image's width and height from the same listing, empty for a PSD", async () => {
+    const drive = await google({
+      items: [
+        {
+          ...inboxFile('grid0123456789x', 'grid-01.png', 1, undefined, 'image/png'),
+          image: { width: 1080, height: 1350 },
+        },
+        inboxFile('psd0123456789xx', 'grid-01.psd', 2, undefined, 'image/vnd.adobe.photoshop'),
+      ],
+    });
+    const answer = await run(drive, 'google.drive-list');
+    expect(answer.diagnostics).toEqual([]);
+    expect(
+      answer.table?.rows.map((row) => [
+        row.values['name'],
+        row.values['width'],
+        row.values['height'],
+      ]),
+    ).toEqual([
+      ['grid-01.png', 1080, 1350],
+      ['grid-01.psd', null, null],
+    ]);
+    // One listing, no request per file.
+    expect(drive.calls).toHaveLength(1);
   });
 
   it("walks Drive's pages through nextPageToken, one call per page", async () => {

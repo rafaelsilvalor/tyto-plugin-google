@@ -32,6 +32,8 @@ export interface FakeItem {
   size?: number;
   createdTime: string;
   modifiedTime?: string;
+  /** Drive's `imageMediaMetadata`, which it answers only for a file it reads as an image. */
+  image?: { width: number; height: number };
   trashed?: boolean;
   /** The people the item is shared with, as `permissions.create` added them. */
   permissions?: { email: string; role: string; notified: boolean }[];
@@ -336,6 +338,7 @@ function described(item: FakeItem): Record<string, unknown> {
     modifiedTime: item.modifiedTime ?? item.createdTime,
     webViewLink: `https://drive.google.com/file/d/${item.id}/view`,
     parents: item.parents,
+    ...(item.image === undefined ? {} : { imageMediaMetadata: { ...item.image } }),
   };
 }
 

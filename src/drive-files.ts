@@ -28,6 +28,9 @@ export interface DriveFile {
   readonly modifiedTime?: string;
   readonly webViewLink?: string;
   readonly parents: readonly string[];
+  /** Pixels, from Drive's `imageMediaMetadata`; absent for anything that is not an image. */
+  readonly width?: number;
+  readonly height?: number;
 }
 
 export interface ListPage {
@@ -160,6 +163,9 @@ function fileOf(value: unknown): DriveFile | undefined {
   const parents = Array.isArray(record['parents'])
     ? record['parents'].filter((parent): parent is string => typeof parent === 'string')
     : [];
+  const image = recordOf(record['imageMediaMetadata']);
+  const width = pixelsOf(image?.['width']);
+  const height = pixelsOf(image?.['height']);
   return {
     id,
     name,
@@ -169,7 +175,14 @@ function fileOf(value: unknown): DriveFile | undefined {
     ...(modifiedTime === undefined ? {} : { modifiedTime }),
     ...(webViewLink === undefined ? {} : { webViewLink }),
     parents,
+    ...(width === undefined ? {} : { width }),
+    ...(height === undefined ? {} : { height }),
   };
+}
+
+/** A dimension Drive reported: a positive whole number, or nothing. */
+function pixelsOf(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 function malformed(what: string, why: string): GoogleResult<never> {
