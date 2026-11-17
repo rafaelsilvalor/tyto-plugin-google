@@ -42,6 +42,9 @@ export const LIST_COLUMNS: readonly Column[] = [
   { name: 'modified', type: 'datetime', origin: ORIGIN },
   { name: 'url', type: 'link', origin: ORIGIN },
   { name: 'parent_id', type: 'text', origin: ORIGIN },
+  // Last, so a recipe that reads the columns by position keeps reading the same ones.
+  { name: 'width', type: 'number', origin: ORIGIN },
+  { name: 'height', type: 'number', origin: ORIGIN },
 ];
 
 export type DriveListHost = Pick<PluginHost, 'fetch' | 'signin'>;
@@ -130,6 +133,8 @@ function rowOf(file: DriveFile, folderId: string, fetchedAt: string): Row {
       url: file.webViewLink ?? null,
       // The folder asked for: a file Drive lists under it is its child, whatever else holds it.
       parent_id: folderId,
+      width: file.width ?? null,
+      height: file.height ?? null,
     },
     provenance: { source: ORIGIN, id: file.id, fetchedAt },
   };

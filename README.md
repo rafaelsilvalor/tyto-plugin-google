@@ -313,8 +313,12 @@ google.drive-list type=json
 
 - **Columns**: `id`, `name`, `mime_type`, `kind` (`folder`, `image`, `json` or `file`), `size`
   (bytes; empty for a folder or a native Google file), `created` and `modified` (date and
-  time), `url` (the item's page in Drive, a link) and `parent_id` (the folder listed). Each
-  row's key and provenance is the item's Drive id.
+  time), `url` (the item's page in Drive, a link), `parent_id` (the folder listed), and
+  `width` and `height` (an image's pixels, as Drive reports them; empty for anything Drive
+  does not read as an image, a `.psd` included). Each row's key and provenance is the item's
+  Drive id.
+- **Dimensions** come in the same listing, from Drive's `imageMediaMetadata`: no request per
+  file. The two columns are last, so a recipe written before them reads what it read.
 - **What is listed**: the folder's direct children, never its trash. A JSON file is one whose
   type is `application/json` or whose name ends in `.json`, as a routine's inbox writes them.
 - **Shared drives** are read as well as My Drive: every request carries `supportsAllDrives`

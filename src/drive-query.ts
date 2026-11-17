@@ -51,8 +51,15 @@ export function childByNameAndTypeQuery(parentId: string, name: string, mimeType
 export type DriveType = 'folder' | 'file' | 'image' | 'json';
 export const DRIVE_TYPES: readonly DriveType[] = ['folder', 'file', 'image', 'json'];
 
-/** `ITEM_FIELDS` and what a listed row shows: size, times, its page in Drive, its parents. */
-export const FILE_FIELDS = `${ITEM_FIELDS}, size, createdTime, modifiedTime, webViewLink, parents`;
+/**
+ * `ITEM_FIELDS` and what a listed row shows: size, times, its page in Drive, its parents, and
+ * an image's width and height. The dimensions ride in the same mask, so a listing costs no
+ * request per file; Drive leaves `imageMediaMetadata` out for anything it does not read as an
+ * image.
+ */
+export const FILE_FIELDS =
+  `${ITEM_FIELDS}, size, createdTime, modifiedTime, webViewLink, parents, ` +
+  'imageMediaMetadata(width, height)';
 /** `CHILD_LIST_FIELDS` widened the same way, with the next page's token. */
 export const LIST_FIELDS = `nextPageToken, files(${FILE_FIELDS})`;
 
