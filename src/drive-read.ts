@@ -11,7 +11,14 @@ import {
   textArgument,
   type DriveFile,
 } from './drive-files.js';
-import { jsonColumns, jsonRows, type JsonColumns } from './drive-json.js';
+import {
+  ColumnUnion,
+  jsonColumns,
+  jsonRecords,
+  jsonRows,
+  type JsonColumns,
+  type JsonRecords,
+} from './drive-json.js';
 import { FOLDER_MIME_TYPE, NATIVE_PREFIX, isJson } from './drive-query.js';
 import type { GoogleClient } from './http.js';
 import {
@@ -26,6 +33,7 @@ import {
   type PageAnswer,
   type PageRequest,
   type Row,
+  type Table,
 } from './verb.js';
 
 export const DRIVE_READ = 'google.drive-read';
@@ -45,6 +53,7 @@ const ARGUMENTS: readonly ArgumentSpec[] = [
   { name: 'file', type: 'text' },
   { name: 'folder', type: 'text' },
   { name: 'type', type: 'text' },
+  { name: 'rows', type: 'text' },
 ];
 
 const TEXT_COLUMNS: readonly Column[] = [
@@ -58,8 +67,10 @@ export type DriveReadHost = Pick<PluginHost, 'fetch' | 'signin'>;
 
 /**
  * `google.drive-read`: what a JSON or text file holds, as rows. `file=` reads one file;
- * `folder=` reads every JSON file directly in a folder, oldest first, one file per page, so
- * each call downloads one file however many the folder holds.
+ * `folder=` reads every JSON file directly in a folder, oldest first. The first page of a folder
+ * reads every file once, to judge each alone and gather the columns of those it keeps; each
+ * later page downloads one file. `rows=<key>` spreads the list under that key of a JSON object
+ * into rows.
  */
 export function driveReadVerb(host: DriveReadHost): RecipeVerbContribution {
   return {
@@ -73,15 +84,21 @@ export function driveReadVerb(host: DriveReadHost): RecipeVerbContribution {
 type Format = 'json' | 'text';
 
 type Asked =
-  | { readonly mode: 'file'; readonly fileId: string; readonly type?: Format }
-  | { readonly mode: 'folder'; readonly folderId: string };
+  | {
+      readonly mode: 'file';
+      readonly fileId: string;
+      readonly type?: Format;
+      readonly rows?: string;
+    }
+  | { readonly mode: 'folder'; readonly folderId: string; readonly rows?: string };
 
 /**
  * Where a read left off. `i` is the file's place in the folder's JSON files (0 for `file=`)
  * and `id` its Drive id; `o` the offset of the next row in it; `d` fingerprints the file's
- * size and modified time, and `l` the folder's list of files, so a file or a folder changed
- * between two pages is refused rather than stitched; `c` holds the first file's columns, which
- * every later file is read into; `f` fingerprints the step.
+ * size and modified time, and `l` the folder's files with theirs, so a file or a folder changed
+ * between two pages is refused rather than stitched; `c` holds the columns the first page
+ * answered, which every later page is read into; `s` the places of the folder's files the first
+ * page skipped; `f` fingerprints the step.
  */
 interface ReadCursor {
   readonly v: 1;
@@ -91,6 +108,7 @@ interface ReadCursor {
   readonly d: string;
   readonly l: string;
   readonly c?: JsonColumns;
+  readonly s?: readonly number[];
   readonly f: string;
 }
 
@@ -134,18 +152,35 @@ export async function driveReadPage(
     const listed = await jsonFilesOf(client, asked.folderId);
     if ('severity' in listed) return failed(listed);
     files = listed;
-    listing = fingerprint(JSON.stringify(files.map((file) => file.id)));
+    // The first page's columns hold only while no file changes, so each file's size and
+    // modified time are part of the folder's fingerprint.
+    listing = fingerprint(
+      JSON.stringify(files.map((file) => [file.id, file.size ?? null, file.modifiedTime ?? null])),
+    );
     if (cursor !== undefined && cursor.l !== listing) return changed('the folder');
-    if (files.length === 0) {
-      return {
-        ok: true,
-        value: { table: { columns: jsonColumns([]), rows: [] } },
-        diagnostics: [],
-      };
-    }
   }
 
-  const index = cursor?.i ?? 0;
+  let columns: JsonColumns | undefined = cursor?.c;
+  let skipped: readonly number[] = cursor?.s ?? [];
+  let warnings: readonly Diagnostic[] = [];
+  let index = cursor?.i ?? 0;
+  let surveyed: JsonRecords | undefined;
+  if (asked.mode === 'folder' && cursor === undefined) {
+    const survey = await surveyFolder(client, files, asked);
+    if ('severity' in survey) return failed(survey);
+    ({ columns, skipped, warnings } = survey);
+    const first = nextKept(files, -1, skipped);
+    if (first === undefined) {
+      return {
+        ok: true,
+        value: { table: { columns: jsonColumns(columns), rows: [] } },
+        diagnostics: warnings,
+      };
+    }
+    index = first;
+    surveyed = survey.first;
+  }
+
   const file = files[index];
   if (file === undefined || (cursor !== undefined && cursor.id !== file.id)) {
     return changed('the folder');
@@ -157,46 +192,137 @@ export async function driveReadPage(
     return changed(`the file '${file.name}'`);
   }
   const format = formatOf(file, asked);
-  if (typeof format !== 'string') return failed(format);
-
-  const body = await downloadFile(client, file.id);
-  if (!body.ok) return failed(verbFailed(DRIVE_READ, body.error));
-  const bytes = new TextEncoder().encode(body.value).byteLength;
-  if (bytes > MAX_FILE_BYTES) return failed(tooLarge(file, bytes));
+  if (typeof format !== 'string') return failed(problem(format.problem));
 
   const fetchedAt = new Date().toISOString();
-  let columns: readonly Column[];
+  let tableColumns: readonly Column[];
   let rows: readonly Row[];
-  let carried: JsonColumns | undefined;
   if (format === 'text') {
-    columns = TEXT_COLUMNS;
-    rows = textRows(file, body.value, fetchedAt);
+    const body = await download(client, file);
+    if ('severity' in body) return failed(body);
+    if ('problem' in body) return failed(problem(body.problem));
+    tableColumns = TEXT_COLUMNS;
+    rows = textRows(file, body.body, fetchedAt);
   } else {
-    const read = jsonRows(file, body.value, fetchedAt, cursor?.c);
-    if (typeof read === 'string') return readFailed(read);
-    columns = jsonColumns(read.columns);
-    rows = read.rows;
-    carried = read.columns;
+    let read = surveyed;
+    if (read === undefined) {
+      const body = await download(client, file);
+      if ('severity' in body) return failed(body);
+      if ('problem' in body) return failed(problem(body.problem));
+      const parsed = jsonRecords(file, body.body, asked.rows);
+      if (typeof parsed === 'string') return readFailed(parsed);
+      read = parsed;
+    }
+    if (columns === undefined) {
+      const own = new ColumnUnion();
+      own.add(file.name, read);
+      columns = own.columns();
+    }
+    const built = jsonRows(file, read, columns, fetchedAt);
+    if (typeof built === 'string') return readFailed(built);
+    tableColumns = jsonColumns(columns);
+    rows = built;
   }
 
   const start = cursor?.o ?? 0;
   const page = pageOf(rows, start);
-  const table = { columns, rows: page };
+  const table: Table = { columns: tableColumns, rows: page };
   const end = start + page.length;
-  const rest = (next: Omit<ReadCursor, 'v' | 'l' | 'f' | 'c'>): PageAnswer => {
+  const carried = format === 'json' ? columns : undefined;
+  const rest = (next: Omit<ReadCursor, 'v' | 'l' | 'f' | 'c' | 's'>): PageAnswer => {
     const written: ReadCursor = {
       v: 1,
       ...next,
       l: listing,
       ...(carried === undefined ? {} : { c: carried }),
+      ...(skipped.length === 0 ? {} : { s: skipped }),
       f: print,
     };
-    return { ok: true, value: { table, cursor: encodeOpaque(written) }, diagnostics: [] };
+    return { ok: true, value: { table, cursor: encodeOpaque(written) }, diagnostics: warnings };
   };
   if (end < rows.length) return rest({ i: index, id: file.id, o: end, d: digest });
-  const following = files[index + 1];
-  if (following === undefined) return { ok: true, value: { table }, diagnostics: [] };
-  return rest({ i: index + 1, id: following.id, o: 0, d: '' });
+  const following = nextKept(files, index, skipped);
+  const followingFile = following === undefined ? undefined : files[following];
+  if (following === undefined || followingFile === undefined) {
+    return { ok: true, value: { table }, diagnostics: warnings };
+  }
+  return rest({ i: following, id: followingFile.id, o: 0, d: '' });
+}
+
+interface Survey {
+  readonly columns: JsonColumns;
+  readonly skipped: readonly number[];
+  readonly warnings: readonly Diagnostic[];
+  /** The records of the first file kept, so the first page does not download it twice. */
+  readonly first?: JsonRecords;
+}
+
+/**
+ * Reads every file of the folder once and judges each alone: a file that is not JSON, that
+ * lacks the `rows=` list, that is over 8 MiB, or whose keys cannot join the others' is named in
+ * a warning and skipped, and the columns are the union of the kept files' keys. Only a failed
+ * request fails the run, since it says nothing about the file.
+ */
+async function surveyFolder(
+  client: GoogleClient,
+  files: readonly DriveFile[],
+  asked: Asked,
+): Promise<Survey | Diagnostic> {
+  const union = new ColumnUnion();
+  const skipped: number[] = [];
+  const warnings: Diagnostic[] = [];
+  let first: JsonRecords | undefined;
+  for (const [index, file] of files.entries()) {
+    const judged = await judgeFile(client, file, asked, union);
+    if ('severity' in judged) return judged;
+    if ('problem' in judged) {
+      skipped.push(index);
+      warnings.push(skippedFile(file, judged.problem));
+    } else first ??= judged.read;
+  }
+  return {
+    columns: union.columns(),
+    skipped,
+    warnings,
+    ...(first === undefined ? {} : { first }),
+  };
+}
+
+/** The file's records once its keys joined the others', or why it is skipped. */
+async function judgeFile(
+  client: GoogleClient,
+  file: DriveFile,
+  asked: Asked,
+  union: ColumnUnion,
+): Promise<{ readonly read: JsonRecords } | { readonly problem: string } | Diagnostic> {
+  const format = formatOf(file, asked);
+  if (typeof format !== 'string') return format;
+  const body = await download(client, file);
+  if (!('body' in body)) return body;
+  const read = jsonRecords(file, body.body, asked.rows);
+  if (typeof read === 'string') return { problem: read };
+  const refused = union.add(file.name, read);
+  return refused === undefined ? { read } : { problem: refused };
+}
+
+function skippedFile(file: DriveFile, reason: string): Diagnostic {
+  return {
+    severity: 'warning',
+    code: 'E_RECIPE_VERB',
+    message: `'${DRIVE_READ}' skipped the file ${file.id} and read the others: ${reason}.`,
+  };
+}
+
+/** The place of the first file after `after` that the first page did not skip. */
+function nextKept(
+  files: readonly DriveFile[],
+  after: number,
+  skipped: readonly number[],
+): number | undefined {
+  for (let index = after + 1; index < files.length; index += 1) {
+    if (!skipped.includes(index)) return index;
+  }
+  return undefined;
 }
 
 /** Every JSON file directly in the folder, oldest first, through every page of the listing. */
@@ -222,32 +348,46 @@ async function jsonFilesOf(
 }
 
 /** How the file is read, or why it cannot be. */
-function formatOf(file: DriveFile, asked: Asked): Format | Diagnostic {
+function formatOf(file: DriveFile, asked: Asked): Format | { readonly problem: string } {
   if (file.mimeType === FOLDER_MIME_TYPE) {
-    return problem(`file= names '${file.name}', which is a folder; read a folder with folder=`);
+    return { problem: `file= names '${file.name}', which is a folder; read a folder with folder=` };
   }
   if (file.mimeType.startsWith(NATIVE_PREFIX)) {
-    return problem(
-      `cannot read '${file.name}', a native Google file (${file.mimeType}), which has no ` +
+    return {
+      problem:
+        `cannot read '${file.name}', a native Google file (${file.mimeType}), which has no ` +
         'content to download; read a spreadsheet with google.sheet-rows, or save the file ' +
         'as JSON or text in Drive',
-    );
+    };
   }
-  if (file.size !== undefined && file.size > MAX_FILE_BYTES) return tooLarge(file, file.size);
+  if (file.size !== undefined && file.size > MAX_FILE_BYTES) {
+    return { problem: tooLarge(file, file.size) };
+  }
   if (asked.mode === 'folder') return 'json';
   if (asked.type !== undefined) return asked.type;
   if (isJson(file.mimeType, file.name)) return 'json';
   if (file.mimeType.startsWith('text/')) return 'text';
-  return problem(
-    `cannot tell how to read '${file.name}' (${file.mimeType || 'no type'}), which is neither ` +
+  return {
+    problem:
+      `cannot tell how to read '${file.name}' (${file.mimeType || 'no type'}), which is neither ` +
       'JSON nor text; type=text reads it as lines of text',
-  );
+  };
 }
 
-function tooLarge(file: DriveFile, bytes: number): Diagnostic {
-  return problem(
-    `reads files of at most ${MAX_FILE_BYTES} bytes (8 MiB), and '${file.name}' has ${bytes}`,
-  );
+/** The file's text; or, when it is over {@link MAX_FILE_BYTES}, why it is not read. */
+async function download(
+  client: GoogleClient,
+  file: DriveFile,
+): Promise<{ readonly body: string } | { readonly problem: string } | Diagnostic> {
+  const body = await downloadFile(client, file.id);
+  if (!body.ok) return verbFailed(DRIVE_READ, body.error);
+  const bytes = new TextEncoder().encode(body.value).byteLength;
+  if (bytes > MAX_FILE_BYTES) return { problem: tooLarge(file, bytes) };
+  return { body: body.value };
+}
+
+function tooLarge(file: DriveFile, bytes: number): string {
+  return `reads files of at most ${MAX_FILE_BYTES} bytes (8 MiB), and '${file.name}' has ${bytes}`;
 }
 
 /** One row per line, numbered from 1; the empty line after a final line break is no line. */
@@ -283,6 +423,7 @@ function isReadCursor(value: unknown): value is ReadCursor {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const record = value as Readonly<Record<string, unknown>>;
   const columns = record['c'];
+  const skipped = record['s'];
   return (
     record['v'] === 1 &&
     Number.isSafeInteger(record['i']) &&
@@ -293,6 +434,9 @@ function isReadCursor(value: unknown): value is ReadCursor {
     typeof record['d'] === 'string' &&
     typeof record['l'] === 'string' &&
     typeof record['f'] === 'string' &&
+    (skipped === undefined ||
+      (Array.isArray(skipped) &&
+        skipped.every((place) => Number.isSafeInteger(place) && (place as number) >= 0))) &&
     (columns === undefined ||
       (Array.isArray(columns) &&
         columns.every(
@@ -312,6 +456,10 @@ export function readReadArguments(values: ArgumentValues, section: unknown): Ask
   if (type !== undefined && type !== 'json' && type !== 'text') {
     return problem(`type= must be json or text, not '${type}'`);
   }
+  const rows = textArgument(values, 'rows');
+  if (rows !== undefined && type === 'text') {
+    return problem('rows= spreads a list of a JSON object into rows; type=text reads lines');
+  }
   if (fileWritten !== undefined) {
     if (textArgument(values, 'folder') !== undefined) {
       return problem('takes file= or folder=, not both');
@@ -323,12 +471,17 @@ export function readReadArguments(values: ArgumentValues, section: unknown): Ask
           'as https://drive.google.com/file/d/<id>/view',
       );
     }
-    return { mode: 'file', fileId, ...(type === undefined ? {} : { type: type as Format }) };
+    return {
+      mode: 'file',
+      fileId,
+      ...(type === undefined ? {} : { type: type as Format }),
+      ...(rows === undefined ? {} : { rows }),
+    };
   }
   if (type === 'text') {
     return problem('reads a folder as its JSON files only; type=text needs file=');
   }
   const folderId = folderArgument(DRIVE_READ, values, section);
   if (typeof folderId !== 'string') return folderId;
-  return { mode: 'folder', folderId };
+  return { mode: 'folder', folderId, ...(rows === undefined ? {} : { rows }) };
 }
