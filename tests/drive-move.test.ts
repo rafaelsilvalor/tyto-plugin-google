@@ -543,4 +543,108 @@ describe('google.drive-count', () => {
     const bad = await plan(drive, 'google.drive-count folder=Folder', table(['Folder'], [['x']]));
     expect(bad.diagnostics[0]?.message).toMatch(/holds 'x', which is neither a Drive folder id/);
   });
+
+  describe('shapes=yes', () => {
+    const at = (width: number, height: number) => ({ width, height });
+    const sized = (
+      id: string,
+      parent: string,
+      size?: { width: number; height: number },
+    ): FakeItem => ({
+      ...inboxFile(id, `${id}.png`, 3, undefined, 'image/png'),
+      parents: [parent],
+      ...(size === undefined ? {} : { image: size }),
+    });
+
+    function shaped(): FakeDrive {
+      return {
+        pageSize: 2,
+        items: [
+          folder('feedA01234567x', 'Feed', [ROOT_ID]),
+          folder('mixB01234567xx', 'Mixed', [ROOT_ID]),
+          folder('emptyC0123456x', 'Empty', [ROOT_ID]),
+          sized('feed1xxxxxxxxx', 'feedA01234567x', at(1080, 1350)),
+          sized('feed2xxxxxxxxx', 'feedA01234567x', at(1080, 1350)),
+          sized('feed3xxxxxxxxx', 'feedA01234567x', at(1081, 1350)),
+          sized('story1xxxxxxxx', 'feedA01234567x', at(1080, 1920)),
+          sized('wide1xxxxxxxxx', 'mixB01234567xx', at(2100, 1000)),
+          sized('wide2xxxxxxxxx', 'mixB01234567xx', at(3000, 1000)),
+          sized('odd1xxxxxxxxxx', 'mixB01234567xx', at(1000, 700)),
+          sized('none1xxxxxxxxx', 'mixB01234567xx'),
+          sized('sq1xxxxxxxxxxx', 'mixB01234567xx', at(500, 500)),
+        ],
+      };
+    }
+
+    it('gives 4:5:3,9:16:1 for three 1080x1350 images and one 1080x1920', async () => {
+      const drive = await google(shaped());
+      const answer = await plan(
+        drive,
+        'google.drive-count folder=Folder shapes=yes',
+        table(
+          ['Name', 'Folder'],
+          [
+            ['feed', 'feedA01234567x'],
+            ['mixed', 'mixB01234567xx'],
+            ['empty', 'emptyC0123456x'],
+            ['blank', null],
+          ],
+        ),
+      );
+      expect(answer.diagnostics).toEqual([]);
+      expect(answer.table?.columns.map((each) => `${each.name}:${each.type}`)).toEqual([
+        'Name:text',
+        'Folder:text',
+        'Folder_images:number',
+        'Folder_shapes:text',
+      ]);
+      expect(answer.table?.rows.map((row) => row.values['Folder_images'])).toEqual([4, 5, 0, null]);
+      expect(answer.table?.rows.map((row) => row.values['Folder_shapes'])).toEqual([
+        '4:5:3,9:16:1',
+        // Ties sort as text, so 10:7 comes before 1:1.
+        'wide:2,10:7:1,1:1:1,?:1',
+        '',
+        null,
+      ]);
+      // The dimensions ride on the count's own listing: one call per folder and page, no more.
+      const listings = drive.calls.filter((call) => call.query['q']?.includes("'image/png'"));
+      expect(listings).toHaveLength(2 + 3 + 1);
+      expect(drive.calls).toHaveLength(listings.length);
+      expect(new Set(listings.map((call) => call.query['fields']))).toEqual(
+        new Set(['nextPageToken, files(id, imageMediaMetadata(width, height))']),
+      );
+    });
+
+    it('refuses when the table already has the shapes column', async () => {
+      const drive = await google(shaped());
+      const answer = await plan(
+        drive,
+        'google.drive-count folder=Folder shapes=yes',
+        table(['Folder', 'folder_shapes'], [['feedA01234567x', 'x']]),
+      );
+      expect(answer.diagnostics[0]?.message).toMatch(
+        /would add the column 'Folder_shapes', which the table already has/,
+      );
+      expect(drive.calls).toEqual([]);
+    });
+
+    it('leaves the default untouched: no shapes column, no dimensions asked', async () => {
+      for (const step of [
+        'google.drive-count folder=Folder',
+        'google.drive-count folder=Folder shapes=no',
+      ]) {
+        const drive = await google(shaped());
+        const answer = await plan(drive, step, table(['Folder'], [['feedA01234567x']]));
+        expect(answer.table?.columns.map((each) => each.name)).toEqual(['Folder', 'Folder_images']);
+        expect(answer.table?.rows[0]?.values).toEqual({
+          Folder: 'feedA01234567x',
+          Folder_images: 4,
+        });
+        expect(drive.calls.map((call) => call.query['fields'])).toEqual([
+          'nextPageToken, files(id)',
+          'nextPageToken, files(id)',
+        ]);
+      }
+    });
+  });
 });

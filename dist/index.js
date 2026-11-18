@@ -1729,8 +1729,19 @@ var DRIVE_COUNT = "google.drive-count";
 var MAX_FOLDERS = 100;
 var ARGUMENTS2 = [
   { name: "folder", type: "text", required: true },
-  { name: "type", type: "text", values: ["image"] }
+  { name: "type", type: "text", values: ["image"] },
+  { name: "shapes", type: "text", values: ["yes", "no"] }
 ];
+var SNAPPED_RATIOS = [
+  [1, 1],
+  [4, 5],
+  [9, 16],
+  [16, 9],
+  [3, 2],
+  [2, 3]
+];
+var SNAP_TOLERANCE = 0.02;
+var WIDE_ABOVE = 2;
 function driveCountVerb(host) {
   return {
     id: DRIVE_COUNT,
@@ -1754,8 +1765,12 @@ async function countImages(host, request) {
     );
   }
   const added = `${column.name}_images`;
-  if (table.columns.some((each) => each.name.toLowerCase() === added.toLowerCase())) {
-    return refused2(problem2(`would add the column '${added}', which the table already has`));
+  const withShapes = textArgument(request.arguments, "shapes")?.toLowerCase() === "yes";
+  const shapesAdded = `${column.name}_shapes`;
+  for (const name of withShapes ? [added, shapesAdded] : [added]) {
+    if (table.columns.some((each) => each.name.toLowerCase() === name.toLowerCase())) {
+      return refused2(problem2(`would add the column '${name}', which the table already has`));
+    }
   }
   const folderOfRow = [];
   for (const row of table.rows) {
@@ -1787,7 +1802,7 @@ async function countImages(host, request) {
     const connection = await connect(host, request.section);
     if (!connection.ok) return refused2(verbFailed(DRIVE_COUNT, connection.error));
     for (const folder of folders) {
-      const counted = await countIn(connection.value.client, folder);
+      const counted = await countIn(connection.value.client, folder, withShapes);
       if (!counted.ok) return refused2(verbFailed(DRIVE_COUNT, counted.error));
       counts.set(folder, counted.value);
     }
@@ -1795,23 +1810,50 @@ async function countImages(host, request) {
   return {
     ok: true,
     value: {
-      columns: [...table.columns, { name: added, type: "number", origin: ORIGIN }],
+      columns: [
+        ...table.columns,
+        { name: added, type: "number", origin: ORIGIN },
+        ...withShapes ? [{ name: shapesAdded, type: "text", origin: ORIGIN }] : []
+      ],
       rows: table.rows.map((row, index) => {
         const folder = folderOfRow[index];
-        const count = folder === null || folder === void 0 ? null : counts.get(folder) ?? null;
-        return { ...row, values: { ...row.values, [added]: count } };
+        const counted = folder === null || folder === void 0 ? void 0 : counts.get(folder);
+        const count = counted?.total ?? null;
+        if (!withShapes) return { ...row, values: { ...row.values, [added]: count } };
+        const shapes = counted === void 0 ? null : shapesText(counted.shapes);
+        return { ...row, values: { ...row.values, [added]: count, [shapesAdded]: shapes } };
       })
     },
     diagnostics: []
   };
 }
-async function countIn(client, folderId) {
+function shapeOf(width, height) {
+  if (width === void 0 || height === void 0) return "?";
+  const ratio = width / height;
+  for (const [across, down] of SNAPPED_RATIOS) {
+    const usual = across / down;
+    if (Math.abs(ratio - usual) <= SNAP_TOLERANCE * usual) return `${across}:${down}`;
+  }
+  if (ratio > WIDE_ABOVE) return "wide";
+  const divisor = greatestCommonDivisor(width, height);
+  return `${width / divisor}:${height / divisor}`;
+}
+function shapesText(shapes) {
+  return [...shapes].sort(
+    ([ratioA, countA], [ratioB, countB]) => countA !== countB ? countB - countA : ratioA < ratioB ? -1 : ratioA > ratioB ? 1 : 0
+  ).map(([ratio, count]) => `${ratio}:${count}`).join(",");
+}
+function greatestCommonDivisor(a, b) {
+  return b === 0 ? a : greatestCommonDivisor(b, a % b);
+}
+async function countIn(client, folderId, withShapes) {
   let total = 0;
+  const shapes = /* @__PURE__ */ new Map();
   let pageToken;
   do {
     const answer = await client.get(DRIVE_FILES, {
       q: imageCountQuery(folderId),
-      fields: "nextPageToken, files(id)",
+      fields: withShapes ? "nextPageToken, files(id, imageMediaMetadata(width, height))" : "nextPageToken, files(id)",
       pageSize: LIST_PAGE_SIZE,
       supportsAllDrives: true,
       includeItemsFromAllDrives: true,
@@ -1824,10 +1866,22 @@ async function countIn(client, folderId) {
       return googleError("E_GOOGLE_RESPONSE", "Google answered the image count with no files.");
     }
     total += files.length;
+    if (withShapes) {
+      for (const file of files) {
+        const shape = shapeOf(...dimensionsOf(file));
+        shapes.set(shape, (shapes.get(shape) ?? 0) + 1);
+      }
+    }
     const next = record?.["nextPageToken"];
     pageToken = typeof next === "string" && next !== "" ? next : void 0;
   } while (pageToken !== void 0);
-  return googleOk(total);
+  return googleOk({ total, shapes });
+}
+function dimensionsOf(file) {
+  const record = file;
+  const image = record?.["imageMediaMetadata"];
+  const pixels = (value) => typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : void 0;
+  return [pixels(image?.["width"]), pixels(image?.["height"])];
 }
 
 // src/drive-root.ts
