@@ -533,4 +533,98 @@ describe('google.drive-read', () => {
     expect(answer.diagnostics).toEqual([]);
     expect(answer.table?.rows).toEqual([]);
   });
+
+  it('answers the columns= columns for an empty folder, so a later step finds them', async () => {
+    const drive = await google({ items: [] });
+    const answer = await run(drive, 'google.drive-read columns=task_filha,status');
+    expect(answer.diagnostics).toEqual([]);
+    expect(answer.table?.columns.map((column) => `${column.name}:${column.type}`)).toEqual([
+      'file_id:text',
+      'file_name:text',
+      'task_filha:text',
+      'status:text',
+    ]);
+    expect(answer.table?.rows).toEqual([]);
+  });
+
+  it('puts columns= first, in its order, and lets the files type and extend them', async () => {
+    const drive = await google({
+      items: [
+        inboxFile('fileA0123456789', 'a.json', 1, '[{"task":"EX-1","done":true}]'),
+        inboxFile('fileB0123456789', 'b.json', 2, '[{"Status":"x","done":false}]'),
+      ],
+    });
+    const answer = await run(drive, 'google.drive-read columns=done,missing,task');
+    expect(answer.diagnostics).toEqual([]);
+    expect(answer.table?.columns.map((column) => `${column.name}:${column.type}`)).toEqual([
+      'file_id:text',
+      'file_name:text',
+      'done:boolean',
+      'missing:text',
+      'task:text',
+      'Status:text',
+    ]);
+    expect(answer.table?.rows.map((row) => row.values)).toEqual([
+      {
+        file_id: 'fileA0123456789',
+        file_name: 'a.json',
+        done: true,
+        missing: null,
+        task: 'EX-1',
+        Status: null,
+      },
+      {
+        file_id: 'fileB0123456789',
+        file_name: 'b.json',
+        done: false,
+        missing: null,
+        task: null,
+        Status: 'x',
+      },
+    ]);
+  });
+
+  it('skips a file whose key differs from a columns= name only in case', async () => {
+    const drive = await google({
+      items: [
+        inboxFile('fileA0123456789', 'a.json', 1, '[{"task":"EX-1"}]'),
+        inboxFile('fileB0123456789', 'b.json', 2, '[{"Status":"x"}]'),
+      ],
+    });
+    const answer = await run(drive, 'google.drive-read columns=status');
+    expect(answer.diagnostics.map((each) => each.message)).toEqual([
+      "'google.drive-read' skipped the file fileB0123456789 and read the others: 'b.json' has " +
+        "the key 'Status', which differs only in case from 'status' in columns=.",
+    ]);
+    expect(answer.table?.rows.map((row) => row.values)).toEqual([
+      { file_id: 'fileA0123456789', file_name: 'a.json', status: null, task: 'EX-1' },
+    ]);
+  });
+
+  it('reads columns= for one file too, and refuses names that cannot be columns', async () => {
+    const drive = await google(inbox());
+    const one = await run(drive, 'google.drive-read file=fileB0123456789 columns=status');
+    expect(one.table?.columns.map((column) => column.name)).toEqual([
+      'file_id',
+      'file_name',
+      'status',
+      'task',
+      'done',
+    ]);
+    const calls = drive.calls.length;
+    const message = async (step: string) => (await run(drive, step)).diagnostics[0]?.message;
+    expect(await message('google.drive-read columns=file_id')).toBe(
+      "'google.drive-read' columns= names 'file_id', which every row gets already.",
+    );
+    expect(await message('google.drive-read columns=Task,task')).toBe(
+      "'google.drive-read' columns= names 'Task' and 'task', which differ only in case.",
+    );
+    expect(await message('google.drive-read columns=,')).toBe(
+      "'google.drive-read' columns= names no column; write them comma-separated.",
+    );
+    expect(await message('google.drive-read file=note0123456789x type=text columns=a')).toBe(
+      "'google.drive-read' columns= names a JSON file's columns; type=text reads lines.",
+    );
+    expect(drive.calls).toHaveLength(calls);
+  });
 });

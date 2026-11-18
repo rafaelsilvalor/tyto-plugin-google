@@ -16,6 +16,7 @@ import {
   jsonColumns,
   jsonRecords,
   jsonRows,
+  MAX_JSON_COLUMNS,
   type JsonColumns,
   type JsonRecords,
 } from './drive-json.js';
@@ -54,6 +55,7 @@ const ARGUMENTS: readonly ArgumentSpec[] = [
   { name: 'folder', type: 'text' },
   { name: 'type', type: 'text' },
   { name: 'rows', type: 'text' },
+  { name: 'columns', type: 'text' },
 ];
 
 const TEXT_COLUMNS: readonly Column[] = [
@@ -70,7 +72,8 @@ export type DriveReadHost = Pick<PluginHost, 'fetch' | 'signin'>;
  * `folder=` reads every JSON file directly in a folder, oldest first. The first page of a folder
  * reads every file once, to judge each alone and gather the columns of those it keeps; each
  * later page downloads one file. `rows=<key>` spreads the list under that key of a JSON object
- * into rows.
+ * into rows. `columns=<a,b>` names columns that exist whatever the files hold, so an empty folder
+ * still answers the columns a later step names.
  */
 export function driveReadVerb(host: DriveReadHost): RecipeVerbContribution {
   return {
@@ -89,8 +92,14 @@ type Asked =
       readonly fileId: string;
       readonly type?: Format;
       readonly rows?: string;
+      readonly columns?: readonly string[];
     }
-  | { readonly mode: 'folder'; readonly folderId: string; readonly rows?: string };
+  | {
+      readonly mode: 'folder';
+      readonly folderId: string;
+      readonly rows?: string;
+      readonly columns?: readonly string[];
+    };
 
 /**
  * Where a read left off. `i` is the file's place in the folder's JSON files (0 for `file=`)
@@ -214,8 +223,9 @@ export async function driveReadPage(
       read = parsed;
     }
     if (columns === undefined) {
-      const own = new ColumnUnion();
-      own.add(file.name, read);
+      const own = new ColumnUnion(asked.columns);
+      const refused = own.add(file.name, read);
+      if (refused !== undefined) return readFailed(refused);
       columns = own.columns();
     }
     const built = jsonRows(file, read, columns, fetchedAt);
@@ -268,7 +278,7 @@ async function surveyFolder(
   files: readonly DriveFile[],
   asked: Asked,
 ): Promise<Survey | Diagnostic> {
-  const union = new ColumnUnion();
+  const union = new ColumnUnion(asked.columns);
   const skipped: number[] = [];
   const warnings: Diagnostic[] = [];
   let first: JsonRecords | undefined;
@@ -460,6 +470,12 @@ export function readReadArguments(values: ArgumentValues, section: unknown): Ask
   if (rows !== undefined && type === 'text') {
     return problem('rows= spreads a list of a JSON object into rows; type=text reads lines');
   }
+  const columns = declaredColumns(textArgument(values, 'columns'));
+  if (typeof columns === 'string') return problem(columns);
+  if (columns !== undefined && type === 'text') {
+    return problem("columns= names a JSON file's columns; type=text reads lines");
+  }
+  const declared = columns === undefined ? {} : { columns };
   if (fileWritten !== undefined) {
     if (textArgument(values, 'folder') !== undefined) {
       return problem('takes file= or folder=, not both');
@@ -476,6 +492,7 @@ export function readReadArguments(values: ArgumentValues, section: unknown): Ask
       fileId,
       ...(type === undefined ? {} : { type: type as Format }),
       ...(rows === undefined ? {} : { rows }),
+      ...declared,
     };
   }
   if (type === 'text') {
@@ -483,5 +500,31 @@ export function readReadArguments(values: ArgumentValues, section: unknown): Ask
   }
   const folderId = folderArgument(DRIVE_READ, values, section);
   if (typeof folderId !== 'string') return folderId;
-  return { mode: 'folder', folderId, ...(rows === undefined ? {} : { rows }) };
+  return { mode: 'folder', folderId, ...(rows === undefined ? {} : { rows }), ...declared };
+}
+
+/** `columns=` as names, in the order written, or why one of them cannot be a column. */
+function declaredColumns(written: string | undefined): readonly string[] | string | undefined {
+  if (written === undefined) return undefined;
+  const names: string[] = [];
+  const lowered = new Map<string, string>();
+  for (const name of written.split(',').map((each) => each.trim())) {
+    if (name === '') continue;
+    const lower = name.toLowerCase();
+    if (lower === 'file_id' || lower === 'file_name') {
+      return `columns= names '${name}', which every row gets already`;
+    }
+    const seen = lowered.get(lower);
+    if (seen === name) continue;
+    if (seen !== undefined) {
+      return `columns= names '${seen}' and '${name}', which differ only in case`;
+    }
+    lowered.set(lower, name);
+    names.push(name);
+  }
+  if (names.length === 0) return 'columns= names no column; write them comma-separated';
+  if (names.length > MAX_JSON_COLUMNS) {
+    return `columns= names ${names.length} columns, over ${MAX_JSON_COLUMNS}`;
+  }
+  return names;
 }

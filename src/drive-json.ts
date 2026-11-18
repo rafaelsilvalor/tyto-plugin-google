@@ -128,6 +128,20 @@ export class ColumnUnion {
   private readonly names: string[] = [];
   private readonly lowered = new Map<string, string>();
   private readonly kinds = new Map<string, Set<ColumnType>>();
+  private readonly declared: ReadonlySet<string>;
+
+  /**
+   * `declared` are columns that exist whatever the files hold, first and in that order: an
+   * empty folder still answers them, and a file's key of the same name joins them.
+   */
+  constructor(declared: readonly string[] = []) {
+    for (const name of declared) {
+      this.lowered.set(name.toLowerCase(), name);
+      this.names.push(name);
+      this.kinds.set(name, new Set());
+    }
+    this.declared = new Set(declared);
+  }
 
   /** Adds the file's keys and values, or says why the file cannot join, changing nothing. */
   add(fileName: string, read: JsonRecords): string | undefined {
@@ -136,7 +150,8 @@ export class ColumnUnion {
       const seen = this.lowered.get(name.toLowerCase());
       if (seen === name) continue;
       if (seen !== undefined) {
-        return `'${fileName}' has the key '${name}', which differs only in case from '${seen}' in an earlier file`;
+        const where = this.declared.has(seen) ? 'columns=' : 'an earlier file';
+        return `'${fileName}' has the key '${name}', which differs only in case from '${seen}' in ${where}`;
       }
       added.push(name);
     }

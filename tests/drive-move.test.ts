@@ -324,6 +324,100 @@ describe('google.drive-move', () => {
   });
 });
 
+describe('google.drive-move to-column=', () => {
+  const REJECTED_ID = 'rejected0123456';
+  /** The studio with a second destination, and a table naming each row's own folder. */
+  async function sorted() {
+    const drive = studio();
+    drive.items.push(folder(REJECTED_ID, '_rejected', [INBOX_ID]));
+    return google(drive);
+  }
+  const routed = (rows: readonly (readonly (string | null)[])[]): InputTable =>
+    table(
+      ['id', 'parent_id', 'destination'],
+      rows.map(([id, destination]) => [id ?? null, INBOX_ID, destination ?? null]),
+    );
+
+  it("moves each row into its own row's folder in one plan, and counts rows with none", async () => {
+    const drive = await sorted();
+    const answer = await plan(
+      drive,
+      'google.drive-move to-column=destination',
+      routed([
+        ['fileA0123456789', PROCESSED_ID],
+        ['fileB0123456789', REJECTED_ID],
+        ['looped01234567', ''],
+        ['outside0123456', null],
+      ]),
+    );
+    expect(answer.diagnostics).toEqual([
+      {
+        code: 'E_RECIPE_VERB',
+        message: "'google.drive-move' left out 2 rows with no destination in destination.",
+      },
+    ]);
+    expect(answer.plan?.target).toBe(
+      `Drive folder 'processed' (${PROCESSED_ID}), '_rejected' (${REJECTED_ID})`,
+    );
+    expect(answer.plan?.operations.map((each) => [each.rowKey, each.payload])).toEqual([
+      ['fileA0123456789', { f: 'fileA0123456789', from: [INBOX_ID], to: PROCESSED_ID }],
+      ['fileB0123456789', { f: 'fileB0123456789', from: [INBOX_ID], to: REJECTED_ID }],
+    ]);
+    expect(await apply(drive, answer.plan!)).toEqual([
+      { status: 'applied' },
+      { status: 'applied' },
+    ]);
+    expect(parentsOf(drive, 'fileA0123456789')).toEqual([PROCESSED_ID]);
+    expect(parentsOf(drive, 'fileB0123456789')).toEqual([REJECTED_ID]);
+  });
+
+  it('fails only the row whose destination cannot be used, and reads each destination once', async () => {
+    const drive = await sorted();
+    drive.drive.items.push({ ...inboxFile('fileC0123456789', 'return-c.json', 9, '[]') });
+    const answer = await plan(
+      drive,
+      'google.drive-move to-column=destination',
+      routed([
+        ['fileA0123456789', 'archive'],
+        ['fileB0123456789', '_rejected'],
+        ['fileC0123456789', '_rejected'],
+      ]),
+    );
+    expect(answer.plan?.operations.map((each) => each.payload)).toEqual([
+      {
+        x:
+          "E_GOOGLE_PLAN: fileA0123456789: destination names 'archive', and no folder of that " +
+          `name is in ${INBOX_ID}; creating folders comes in a later version`,
+      },
+      { f: 'fileB0123456789', from: [INBOX_ID], to: REJECTED_ID },
+      { f: 'fileC0123456789', from: [INBOX_ID], to: REJECTED_ID },
+    ]);
+    const byName = drive.calls.filter((call) => call.query['q']?.includes("name = '_rejected'"));
+    expect(byName).toHaveLength(1);
+  });
+
+  it('refuses to= with to-column=, neither of them, or a column the table lacks', async () => {
+    const drive = await sorted();
+    const message = async (step: string) =>
+      (await plan(drive, step, routed([['fileA0123456789', PROCESSED_ID]]))).diagnostics.map(
+        (each) => each.message,
+      );
+    expect(await message('google.drive-move to=processed to-column=destination')).toEqual([
+      "'google.drive-move' takes to=, one folder for every row, or to-column=, a folder per " +
+        'row; not both.',
+    ]);
+    expect(await message('google.drive-move')).toEqual([
+      "'google.drive-move' needs to=, the folder the files move into, or to-column=, the " +
+        'column naming it.',
+    ]);
+    expect(await message('google.drive-move to-column=where')).toEqual([
+      "'google.drive-move' to-column= names the column 'where', which the table does not " +
+        "have; its columns are 'id', 'parent_id', 'destination'.",
+    ]);
+    expect(drive.calls).toEqual([]);
+  });
+});
+
 describe('applyDriveMoves budget', () => {
   it('sends no PATCH past its 20 s and answers what it did not reach as skipped', async () => {
     const clock = testClock(Date.now());
