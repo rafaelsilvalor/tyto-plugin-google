@@ -333,6 +333,7 @@ A source: what a JSON or text file holds, as rows.
 ```
 google.drive-read
 google.drive-read file=https://drive.google.com/file/d/<id>/view
+google.drive-read folder=https://drive.google.com/drive/folders/<inbox id> rows=itens
 ```
 
 | Argument  | What it does                                                                                    |
@@ -340,22 +341,34 @@ google.drive-read file=https://drive.google.com/file/d/<id>/view
 | `file=`   | One file, as its id or its address.                                                             |
 | `folder=` | Every JSON file directly in the folder, oldest first; the section's `root` when neither is set. |
 | `type=`   | `json` or `text`, how `file=` is read; by default its type or name decides. A folder is JSON.   |
+| `rows=`   | A key of a JSON object: each element of the list under it is a row.                             |
 
 - **JSON**: an array gives one row per element, keyed `<file id>:<index>` from 0; an object
   gives one row, `<file id>:0`. An element's keys are its columns, after `file_id` and
   `file_name`; an element that is not an object goes into `value`. A column is a number, a
   boolean or a list only when every filled value in it is one, otherwise text; a nested object
   is kept as its JSON text.
+- **`rows=<key>`** reads each file as an object holding a list under `<key>`: each element of
+  the list is a row, keyed `<file id>:<index>` from 0, and the object's other keys that hold a
+  single value (text, a number, a boolean, null) are copied onto every row, before the
+  element's own keys; an element's key of the same name wins. The object's other lists and
+  objects are not copied. A file that is not an object, has no such key, or holds something
+  other than a list under it is refused.
 - **Text**: one row per line, keyed `<file id>:<line>` from 1, with `file_id`, `file_name`,
   `line` and `text`.
-- **A folder** is read one file per page, so each call downloads one file. Every file is read
-  into the first file's columns: a later file's missing key is empty, a key the first file did
-  not have is refused, and so is a value its column cannot hold. A folder or a file that
-  changes between two pages of one run is refused; run again.
-- **Refused**: a native Google file (Docs, Sheets, Slides), which has no content to download
-  (read a spreadsheet with `google.sheet-rows`); a folder named as `file=`; a file over 8 MiB,
-  by Drive's size before the download and by its bytes after; a folder of more than 1,000 JSON
-  files.
+- **A folder** judges each file alone. The first page reads every JSON file once: a file that
+  is not JSON, that `rows=` refuses, that is over 8 MiB or a native Google file, or whose keys
+  cannot join the others' (a key that differs from another file's only in case, or more than
+  200 keys between the files) is named in a warning and skipped, and the run goes on. The
+  columns are every kept file's keys, in the order they first appear; a file's missing key is
+  an empty cell, and a column is typed by the values of every file. The first page answers the
+  first kept file; each later page downloads one more. Every row carries its file's
+  `file_id` and `file_name`, so a later step can move the file. A folder whose files change
+  between two pages of one run is refused; run again.
+- **Refused**: a native Google file (Docs, Sheets, Slides) named as `file=`, which has no
+  content to download (read a spreadsheet with `google.sheet-rows`); a folder named as
+  `file=`; a file over 8 MiB, by Drive's size before the download and by its bytes after; a
+  folder of more than 1,000 JSON files.
 
 ## `google.drive-move`
 

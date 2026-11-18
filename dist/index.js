@@ -2752,28 +2752,52 @@ function jsonColumns(columns) {
     ...columns.map(([name, type]) => ({ name, type, origin: ORIGIN }))
   ];
 }
-function jsonRows(file, text, fetchedAt, carried) {
+function jsonRecords(file, text, rowsKey) {
   let parsed;
   try {
     parsed = JSON.parse(text.replace(/^\uFEFF/, ""));
   } catch {
     return `'${file.name}' is not JSON`;
   }
+  const isObject = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed);
   let elements;
-  if (Array.isArray(parsed)) elements = parsed;
-  else if (typeof parsed === "object" && parsed !== null) elements = [parsed];
+  let shared = {};
+  if (rowsKey !== void 0) {
+    if (!isObject) {
+      return `'${file.name}' is not a JSON object, and rows=${rowsKey} reads a list in one`;
+    }
+    const object = parsed;
+    if (!Object.hasOwn(object, rowsKey)) return `'${file.name}' has no key '${rowsKey}'`;
+    const list = object[rowsKey];
+    if (!Array.isArray(list)) {
+      return `'${file.name}' holds ${kindOf2(list)} under '${rowsKey}', not a list`;
+    }
+    elements = list;
+    shared = Object.fromEntries(
+      Object.entries(object).filter(([key, value]) => key !== rowsKey && (value === null || typeof value !== "object")).map(([key, value]) => [key, cellOf2(value)])
+    );
+  } else if (Array.isArray(parsed)) elements = parsed;
+  else if (isObject) elements = [parsed];
   else return `'${file.name}' holds neither a JSON array nor an object`;
   const records = elements.map((element) => {
     if (typeof element === "object" && element !== null && !Array.isArray(element)) {
-      return Object.fromEntries(
-        Object.entries(element).map(([key, value]) => [
-          key,
-          cellOf2(value)
-        ])
-      );
+      return {
+        ...shared,
+        ...Object.fromEntries(
+          Object.entries(element).map(([key, value]) => [
+            key,
+            cellOf2(value)
+          ])
+        )
+      };
     }
-    return { [VALUE_COLUMN]: cellOf2(element) };
+    return { ...shared, [VALUE_COLUMN]: cellOf2(element) };
   });
+  const names = namesOf([shared, ...records], file.name);
+  if (typeof names === "string") return names;
+  return { records, names };
+}
+function namesOf(records, fileName) {
   const names = [];
   const lowered = /* @__PURE__ */ new Map();
   for (const record of records) {
@@ -2781,42 +2805,78 @@ function jsonRows(file, text, fetchedAt, carried) {
       const lower = name.toLowerCase();
       const seen = lowered.get(lower);
       if (seen === name) continue;
-      if (name.trim() === "") return `'${file.name}' has a key with no name`;
+      if (name.trim() === "") return `'${fileName}' has a key with no name`;
       if (FILE_COLUMNS.includes(lower)) {
-        return `'${file.name}' has the key '${name}', which names the column every row of the file gets`;
+        return `'${fileName}' has the key '${name}', which names the column every row of the file gets`;
       }
       if (seen !== void 0) {
-        return `'${file.name}' has the keys '${seen}' and '${name}', which differ only in case`;
+        return `'${fileName}' has the keys '${seen}' and '${name}', which differ only in case`;
       }
       lowered.set(lower, name);
       names.push(name);
     }
   }
   if (names.length > MAX_JSON_COLUMNS) {
-    return `'${file.name}' has ${names.length} keys, over ${MAX_JSON_COLUMNS}`;
+    return `'${fileName}' has ${names.length} keys, over ${MAX_JSON_COLUMNS}`;
   }
-  const columns = carried ?? names.map((name) => [name, typeOf(records.map((record) => record[name]))]);
-  if (carried !== void 0) {
-    const known = new Set(carried.map(([name]) => name));
-    const extra = names.find((name) => !known.has(name));
-    if (extra !== void 0) {
-      return `'${file.name}' has the key '${extra}', which the folder's first JSON file did not; a folder is read into its first file's columns, so read this file alone with file=`;
+  return names;
+}
+var ColumnUnion = class {
+  names = [];
+  lowered = /* @__PURE__ */ new Map();
+  kinds = /* @__PURE__ */ new Map();
+  /** Adds the file's keys and values, or says why the file cannot join, changing nothing. */
+  add(fileName, read) {
+    const added = [];
+    for (const name of read.names) {
+      const seen = this.lowered.get(name.toLowerCase());
+      if (seen === name) continue;
+      if (seen !== void 0) {
+        return `'${fileName}' has the key '${name}', which differs only in case from '${seen}' in an earlier file`;
+      }
+      added.push(name);
     }
+    const total = this.names.length + added.length;
+    if (total > MAX_JSON_COLUMNS) {
+      return `'${fileName}' would bring the folder's keys to ${total}, over ${MAX_JSON_COLUMNS}`;
+    }
+    for (const name of added) {
+      this.lowered.set(name.toLowerCase(), name);
+      this.names.push(name);
+      this.kinds.set(name, /* @__PURE__ */ new Set());
+    }
+    for (const record of read.records) {
+      for (const [name, value] of Object.entries(record)) {
+        if (value !== null) this.kinds.get(name)?.add(kindOfCell(value));
+      }
+    }
+    return void 0;
+  }
+  /** A column is a number, a boolean or a list only when every filled value agrees; else text. */
+  columns() {
+    return this.names.map((name) => [name, typeOfKinds(this.kinds.get(name))]);
+  }
+};
+function jsonRows(file, read, columns, fetchedAt) {
+  const known = new Set(columns.map(([name]) => name));
+  const extra = read.names.find((name) => !known.has(name));
+  if (extra !== void 0) {
+    return `'${file.name}' has the key '${extra}', which it did not have when the run began`;
   }
   const rows = [];
-  for (const [index, record] of records.entries()) {
+  for (const [index, record] of read.records.entries()) {
     const key = `${file.id}:${index}`;
     const values = { file_id: file.id, file_name: file.name };
     for (const [name, type] of columns) {
       const value = fit(record[name] ?? null, type);
       if (value === void 0) {
-        return `'${file.name}' holds ${describe(record[name] ?? null)} under '${name}' in element ${index}, where the folder's first JSON file had a ${type} column`;
+        return `'${file.name}' holds ${describe(record[name] ?? null)} under '${name}' in element ${index}, where the run began with a ${type} column`;
       }
       values[name] = value;
     }
     rows.push({ key, values, provenance: { source: ORIGIN, id: key, fetchedAt } });
   }
-  return { columns, rows };
+  return rows;
 }
 function cellOf2(value) {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
@@ -2827,15 +2887,21 @@ function cellOf2(value) {
 function isScalar(value) {
   return value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value);
 }
-function typeOf(values) {
-  const filled2 = values.filter(
-    (value) => value !== void 0 && value !== null
-  );
-  if (filled2.length === 0) return "text";
-  if (filled2.every((value) => typeof value === "number")) return "number";
-  if (filled2.every((value) => typeof value === "boolean")) return "boolean";
-  if (filled2.every((value) => Array.isArray(value))) return "list";
+function kindOf2(value) {
+  if (value === null) return "null";
+  if (typeof value === "object") return "an object";
+  return `the ${typeof value} ${String(value)}`;
+}
+function kindOfCell(value) {
+  if (typeof value === "number") return "number";
+  if (typeof value === "boolean") return "boolean";
+  if (Array.isArray(value)) return "list";
   return "text";
+}
+function typeOfKinds(kinds) {
+  if (kinds === void 0 || kinds.size !== 1) return "text";
+  const [only] = kinds;
+  return only ?? "text";
 }
 function fit(value, type) {
   if (value === null) return null;
@@ -2866,7 +2932,8 @@ var CURSOR_LIMIT2 = 16e3;
 var ARGUMENTS5 = [
   { name: "file", type: "text" },
   { name: "folder", type: "text" },
-  { name: "type", type: "text" }
+  { name: "type", type: "text" },
+  { name: "rows", type: "text" }
 ];
 var TEXT_COLUMNS = [
   { name: "file_id", type: "text", origin: ORIGIN },
@@ -2914,17 +2981,31 @@ async function driveReadPage(host, request) {
     const listed2 = await jsonFilesOf(client, asked.folderId);
     if ("severity" in listed2) return failed(listed2);
     files = listed2;
-    listing = fingerprint(JSON.stringify(files.map((file2) => file2.id)));
+    listing = fingerprint(
+      JSON.stringify(files.map((file2) => [file2.id, file2.size ?? null, file2.modifiedTime ?? null]))
+    );
     if (cursor !== void 0 && cursor.l !== listing) return changed("the folder");
-    if (files.length === 0) {
+  }
+  let columns = cursor?.c;
+  let skipped = cursor?.s ?? [];
+  let warnings = [];
+  let index = cursor?.i ?? 0;
+  let surveyed;
+  if (asked.mode === "folder" && cursor === void 0) {
+    const survey = await surveyFolder(client, files, asked);
+    if ("severity" in survey) return failed(survey);
+    ({ columns, skipped, warnings } = survey);
+    const first = nextKept(files, -1, skipped);
+    if (first === void 0) {
       return {
         ok: true,
-        value: { table: { columns: jsonColumns([]), rows: [] } },
-        diagnostics: []
+        value: { table: { columns: jsonColumns(columns), rows: [] } },
+        diagnostics: warnings
       };
     }
+    index = first;
+    surveyed = survey.first;
   }
-  const index = cursor?.i ?? 0;
   const file = files[index];
   if (file === void 0 || cursor !== void 0 && cursor.id !== file.id) {
     return changed("the folder");
@@ -2936,43 +3017,102 @@ async function driveReadPage(host, request) {
     return changed(`the file '${file.name}'`);
   }
   const format = formatOf(file, asked);
-  if (typeof format !== "string") return failed(format);
-  const body = await downloadFile(client, file.id);
-  if (!body.ok) return failed(verbFailed(DRIVE_READ, body.error));
-  const bytes = new TextEncoder().encode(body.value).byteLength;
-  if (bytes > MAX_FILE_BYTES) return failed(tooLarge(file, bytes));
+  if (typeof format !== "string") return failed(problem4(format.problem));
   const fetchedAt = (/* @__PURE__ */ new Date()).toISOString();
-  let columns;
+  let tableColumns;
   let rows;
-  let carried;
   if (format === "text") {
-    columns = TEXT_COLUMNS;
-    rows = textRows(file, body.value, fetchedAt);
+    const body = await download(client, file);
+    if ("severity" in body) return failed(body);
+    if ("problem" in body) return failed(problem4(body.problem));
+    tableColumns = TEXT_COLUMNS;
+    rows = textRows(file, body.body, fetchedAt);
   } else {
-    const read = jsonRows(file, body.value, fetchedAt, cursor?.c);
-    if (typeof read === "string") return readFailed(read);
-    columns = jsonColumns(read.columns);
-    rows = read.rows;
-    carried = read.columns;
+    let read = surveyed;
+    if (read === void 0) {
+      const body = await download(client, file);
+      if ("severity" in body) return failed(body);
+      if ("problem" in body) return failed(problem4(body.problem));
+      const parsed = jsonRecords(file, body.body, asked.rows);
+      if (typeof parsed === "string") return readFailed(parsed);
+      read = parsed;
+    }
+    if (columns === void 0) {
+      const own = new ColumnUnion();
+      own.add(file.name, read);
+      columns = own.columns();
+    }
+    const built = jsonRows(file, read, columns, fetchedAt);
+    if (typeof built === "string") return readFailed(built);
+    tableColumns = jsonColumns(columns);
+    rows = built;
   }
   const start = cursor?.o ?? 0;
   const page = pageOf(rows, start);
-  const table = { columns, rows: page };
+  const table = { columns: tableColumns, rows: page };
   const end = start + page.length;
+  const carried = format === "json" ? columns : void 0;
   const rest = (next) => {
     const written = {
       v: 1,
       ...next,
       l: listing,
       ...carried === void 0 ? {} : { c: carried },
+      ...skipped.length === 0 ? {} : { s: skipped },
       f: print
     };
-    return { ok: true, value: { table, cursor: encodeOpaque(written) }, diagnostics: [] };
+    return { ok: true, value: { table, cursor: encodeOpaque(written) }, diagnostics: warnings };
   };
   if (end < rows.length) return rest({ i: index, id: file.id, o: end, d: digest });
-  const following = files[index + 1];
-  if (following === void 0) return { ok: true, value: { table }, diagnostics: [] };
-  return rest({ i: index + 1, id: following.id, o: 0, d: "" });
+  const following = nextKept(files, index, skipped);
+  const followingFile = following === void 0 ? void 0 : files[following];
+  if (following === void 0 || followingFile === void 0) {
+    return { ok: true, value: { table }, diagnostics: warnings };
+  }
+  return rest({ i: following, id: followingFile.id, o: 0, d: "" });
+}
+async function surveyFolder(client, files, asked) {
+  const union = new ColumnUnion();
+  const skipped = [];
+  const warnings = [];
+  let first;
+  for (const [index, file] of files.entries()) {
+    const judged = await judgeFile(client, file, asked, union);
+    if ("severity" in judged) return judged;
+    if ("problem" in judged) {
+      skipped.push(index);
+      warnings.push(skippedFile(file, judged.problem));
+    } else first ??= judged.read;
+  }
+  return {
+    columns: union.columns(),
+    skipped,
+    warnings,
+    ...first === void 0 ? {} : { first }
+  };
+}
+async function judgeFile(client, file, asked, union) {
+  const format = formatOf(file, asked);
+  if (typeof format !== "string") return format;
+  const body = await download(client, file);
+  if (!("body" in body)) return body;
+  const read = jsonRecords(file, body.body, asked.rows);
+  if (typeof read === "string") return { problem: read };
+  const refused7 = union.add(file.name, read);
+  return refused7 === void 0 ? { read } : { problem: refused7 };
+}
+function skippedFile(file, reason) {
+  return {
+    severity: "warning",
+    code: "E_RECIPE_VERB",
+    message: `'${DRIVE_READ}' skipped the file ${file.id} and read the others: ${reason}.`
+  };
+}
+function nextKept(files, after, skipped) {
+  for (let index = after + 1; index < files.length; index += 1) {
+    if (!skipped.includes(index)) return index;
+  }
+  return void 0;
 }
 async function jsonFilesOf(client, folderId) {
   const found = [];
@@ -2992,26 +3132,33 @@ async function jsonFilesOf(client, folderId) {
 }
 function formatOf(file, asked) {
   if (file.mimeType === FOLDER_MIME_TYPE) {
-    return problem4(`file= names '${file.name}', which is a folder; read a folder with folder=`);
+    return { problem: `file= names '${file.name}', which is a folder; read a folder with folder=` };
   }
   if (file.mimeType.startsWith(NATIVE_PREFIX)) {
-    return problem4(
-      `cannot read '${file.name}', a native Google file (${file.mimeType}), which has no content to download; read a spreadsheet with google.sheet-rows, or save the file as JSON or text in Drive`
-    );
+    return {
+      problem: `cannot read '${file.name}', a native Google file (${file.mimeType}), which has no content to download; read a spreadsheet with google.sheet-rows, or save the file as JSON or text in Drive`
+    };
   }
-  if (file.size !== void 0 && file.size > MAX_FILE_BYTES) return tooLarge(file, file.size);
+  if (file.size !== void 0 && file.size > MAX_FILE_BYTES) {
+    return { problem: tooLarge(file, file.size) };
+  }
   if (asked.mode === "folder") return "json";
   if (asked.type !== void 0) return asked.type;
   if (isJson(file.mimeType, file.name)) return "json";
   if (file.mimeType.startsWith("text/")) return "text";
-  return problem4(
-    `cannot tell how to read '${file.name}' (${file.mimeType || "no type"}), which is neither JSON nor text; type=text reads it as lines of text`
-  );
+  return {
+    problem: `cannot tell how to read '${file.name}' (${file.mimeType || "no type"}), which is neither JSON nor text; type=text reads it as lines of text`
+  };
+}
+async function download(client, file) {
+  const body = await downloadFile(client, file.id);
+  if (!body.ok) return verbFailed(DRIVE_READ, body.error);
+  const bytes = new TextEncoder().encode(body.value).byteLength;
+  if (bytes > MAX_FILE_BYTES) return { problem: tooLarge(file, bytes) };
+  return { body: body.value };
 }
 function tooLarge(file, bytes) {
-  return problem4(
-    `reads files of at most ${MAX_FILE_BYTES} bytes (8 MiB), and '${file.name}' has ${bytes}`
-  );
+  return `reads files of at most ${MAX_FILE_BYTES} bytes (8 MiB), and '${file.name}' has ${bytes}`;
 }
 function textRows(file, text, fetchedAt) {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
@@ -3042,7 +3189,8 @@ function isReadCursor(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const record = value;
   const columns = record["c"];
-  return record["v"] === 1 && Number.isSafeInteger(record["i"]) && record["i"] >= 0 && typeof record["id"] === "string" && Number.isSafeInteger(record["o"]) && record["o"] >= 0 && typeof record["d"] === "string" && typeof record["l"] === "string" && typeof record["f"] === "string" && (columns === void 0 || Array.isArray(columns) && columns.every(
+  const skipped = record["s"];
+  return record["v"] === 1 && Number.isSafeInteger(record["i"]) && record["i"] >= 0 && typeof record["id"] === "string" && Number.isSafeInteger(record["o"]) && record["o"] >= 0 && typeof record["d"] === "string" && typeof record["l"] === "string" && typeof record["f"] === "string" && (skipped === void 0 || Array.isArray(skipped) && skipped.every((place) => Number.isSafeInteger(place) && place >= 0)) && (columns === void 0 || Array.isArray(columns) && columns.every(
     (column) => Array.isArray(column) && column.length === 2 && typeof column[0] === "string" && typeof column[1] === "string"
   ));
 }
@@ -3051,6 +3199,10 @@ function readReadArguments(values, section) {
   const type = textArgument(values, "type")?.toLowerCase();
   if (type !== void 0 && type !== "json" && type !== "text") {
     return problem4(`type= must be json or text, not '${type}'`);
+  }
+  const rows = textArgument(values, "rows");
+  if (rows !== void 0 && type === "text") {
+    return problem4("rows= spreads a list of a JSON object into rows; type=text reads lines");
   }
   if (fileWritten !== void 0) {
     if (textArgument(values, "folder") !== void 0) {
@@ -3062,14 +3214,19 @@ function readReadArguments(values, section) {
         `file= holds '${fileWritten}', which is neither a Drive file id nor its address, such as https://drive.google.com/file/d/<id>/view`
       );
     }
-    return { mode: "file", fileId, ...type === void 0 ? {} : { type } };
+    return {
+      mode: "file",
+      fileId,
+      ...type === void 0 ? {} : { type },
+      ...rows === void 0 ? {} : { rows }
+    };
   }
   if (type === "text") {
     return problem4("reads a folder as its JSON files only; type=text needs file=");
   }
   const folderId = folderArgument(DRIVE_READ, values, section);
   if (typeof folderId !== "string") return folderId;
-  return { mode: "folder", folderId };
+  return { mode: "folder", folderId, ...rows === void 0 ? {} : { rows } };
 }
 
 // src/sheet-create.ts
