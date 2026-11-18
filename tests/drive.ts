@@ -285,10 +285,15 @@ function listOf(drive: FakeDrive, query: Readonly<Record<string, string>>): Fetc
         item.trashed !== true &&
         (item.mimeType === 'image/png' || item.mimeType === 'image/jpeg'),
     );
+    // Drive answers only the fields asked for: dimensions only when the mask names them.
+    const sized = (query['fields'] ?? '').includes('imageMediaMetadata(width, height)');
     return paged(
       drive,
       query,
-      chosen.map((item) => ({ id: item.id })),
+      chosen.map((item) => ({
+        id: item.id,
+        ...(sized && item.image !== undefined ? { imageMediaMetadata: { ...item.image } } : {}),
+      })),
     );
   }
   const match =

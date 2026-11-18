@@ -504,11 +504,30 @@ google.drive-count folder=Folder
 | --------- | --------------------------------------------------------------------- |
 | `folder=` | The column holding each row's folder, as its id or address; required. |
 | `type=`   | `image`, the only kind counted so far, and the default.               |
+| `shapes=` | `yes` also adds `<column>_shapes`, each image shape and its count.    |
 
 - Only the folder's direct children count, never a subfolder's, and never the trash.
 - A blank cell gets an empty count; a cell that is not a folder id or address is refused.
 - Each distinct folder is counted once. More than 100 distinct folders in one table is refused
   before any request: narrow the table first.
+
+### Image shapes
+
+```
+google.drive-count folder=Folder shapes=yes
+```
+
+`<column>_shapes` is a text cell of `ratio:count` pairs joined by `,`, the most frequent shape
+first and ties in text order: three 1080x1350 images and one 1080x1920 read `4:5:3,9:16:1`.
+
+- A ratio within 2% of 1:1, 4:5, 9:16, 16:9, 3:2 or 2:3 reads as it, so `1081x1350` reads `4:5`.
+- Wider than 2:1 reads `wide`, whatever the exact ratio.
+- Any other image reads its own ratio, reduced: `1000x700` reads `10:7`.
+- An image Drive reports no width or height for reads `?`.
+- A folder with no images gets an empty cell; a blank folder cell gets none.
+- The width and height come from Drive's `imageMediaMetadata` in the same listing the count
+  already makes: no request per file.
+- Without `shapes=yes` the transform is the same as before: one column, and no dimensions asked.
 
 ## `google.sheet-lookup`
 
