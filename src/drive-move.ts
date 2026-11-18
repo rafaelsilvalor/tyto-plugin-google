@@ -44,15 +44,18 @@ const NO_CREATE = 'creating folders comes in a later version';
 
 const ARGUMENTS: readonly ArgumentSpec[] = [
   { name: 'file', type: 'text' },
-  { name: 'to', type: 'text', required: true },
+  { name: 'to', type: 'text' },
+  { name: 'to-column', type: 'text' },
 ];
 
 export type DriveMoveHost = Pick<PluginHost, 'fetch' | 'signin'>;
 
 /**
  * `google.drive-move to=<folder> [file=<column>]`: moves each row's Drive file or folder into
- * one folder, as a plan a person applies. Both must be under the section's `root`: a recipe
- * moves things inside the folder it was given, never out of it, as Buraqueira's `mover`.
+ * one folder, as a plan a person applies; `to-column=<column>` takes each row's destination
+ * from that column instead, so one step sends rows to different folders. Both must be under
+ * the section's `root`: a recipe moves things inside the folder it was given, never out of it,
+ * as Buraqueira's `mover`.
  */
 export function driveMoveVerb(
   host: DriveMoveHost,
@@ -88,10 +91,27 @@ export async function planDriveMove(
   clock: WriteClock = systemClock,
 ): Promise<PlanAnswer> {
   const { table } = request;
-  const column = columnOf(table, textArgument(request.arguments, 'file') ?? DEFAULT_FILE_COLUMN);
+  const column = columnOf(
+    table,
+    textArgument(request.arguments, 'file') ?? DEFAULT_FILE_COLUMN,
+    'file',
+  );
   if (typeof column !== 'string') return refused(column);
   const to = textArgument(request.arguments, 'to');
-  if (to === undefined) return refused(problem('needs to=, the folder the files move into'));
+  const toColumnWritten = textArgument(request.arguments, 'to-column');
+  if (to !== undefined && toColumnWritten !== undefined) {
+    return refused(
+      problem('takes to=, one folder for every row, or to-column=, a folder per row; not both'),
+    );
+  }
+  if (to === undefined && toColumnWritten === undefined) {
+    return refused(
+      problem('needs to=, the folder the files move into, or to-column=, the column naming it'),
+    );
+  }
+  const toColumn =
+    toColumnWritten === undefined ? undefined : columnOf(table, toColumnWritten, 'to-column');
+  if (toColumn !== undefined && typeof toColumn !== 'string') return refused(toColumn);
   const section = readSection(request.section);
   if (!section.ok) return refused(verbFailed(DRIVE_MOVE, section.error));
   const rootId = section.value.root;
@@ -119,20 +139,40 @@ export async function planDriveMove(
     budget.refusedForTime() ? verbRefused(OUT_OF_TIME) : refused(verbFailed(DRIVE_MOVE, error));
 
   const hasParentColumn = table.columns.some((each) => each.name === PARENT_COLUMN);
-  const destinations = new Map<string, DriveFile>();
+  // Keyed by the folder a name is looked up in and the destination as written: a row's own
+  // destination that cannot be used is remembered too, so it is looked up once.
+  const destinations = new Map<string, Destination>();
   const operations: PlannedOperation[] = [];
   const alreadyThere: string[] = [];
+  let noDestination = 0;
   for (const row of table.rows) {
     const parent = hasParentColumn ? (folderIdOf(row.values[PARENT_COLUMN]) ?? rootId) : rootId;
-    let destination = destinations.get(parent);
-    if (destination === undefined) {
-      const found = await destinationOf(walk, rootId, parent, to);
-      if (!found.ok) {
-        return 'error' in found ? failedFor(found.error) : refused(problem(found.problem));
+    let wanted: string;
+    if (toColumn === undefined) wanted = to ?? '';
+    else {
+      const cell = row.values[toColumn];
+      const text = typeof cell === 'string' ? cell.trim() : cell;
+      if (text === null || text === undefined || text === '') {
+        noDestination += 1;
+        continue;
       }
-      destination = found.folder;
-      destinations.set(parent, destination);
+      wanted = String(text);
     }
+    const cacheKey = JSON.stringify([parent, wanted]);
+    let found = destinations.get(cacheKey);
+    if (found === undefined) {
+      found = await destinationOf(walk, rootId, parent, wanted, toColumn ?? 'to=');
+      if (!found.ok && 'error' in found) return failedFor(found.error);
+      destinations.set(cacheKey, found);
+    }
+    if (!found.ok && 'problem' in found) {
+      // One folder for every row stops the plan; a row's own destination fails that row alone.
+      if (toColumn === undefined) return refused(problem(found.problem));
+      operations.push(plannedFailure(row, found.problem));
+      continue;
+    }
+    if (!found.ok) return failedFor(found.error);
+    const destination = found.folder;
 
     const written = row.values[column];
     const fileId =
@@ -181,23 +221,32 @@ export async function planDriveMove(
     });
   }
 
-  const diagnostics: Diagnostic[] =
-    alreadyThere.length === 0
-      ? []
-      : [
-          {
-            severity: 'warning',
-            code: 'E_RECIPE_VERB',
-            message: shortened(
-              `'${DRIVE_MOVE}' plans nothing for ${listed(alreadyThere)}: already in the ` +
-                'destination.',
-            ),
-          },
-        ];
+  const diagnostics: Diagnostic[] = [];
+  if (alreadyThere.length > 0) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'E_RECIPE_VERB',
+      message: shortened(
+        `'${DRIVE_MOVE}' plans nothing for ${listed(alreadyThere)}: already in the destination.`,
+      ),
+    });
+  }
+  if (noDestination > 0) {
+    diagnostics.push({
+      severity: 'warning',
+      code: 'E_RECIPE_VERB',
+      message:
+        `'${DRIVE_MOVE}' left out ${noDestination.toLocaleString('en-US')} ` +
+        `${noDestination === 1 ? 'row' : 'rows'} with no destination in ${toColumn ?? 'to-column='}.`,
+    });
+  }
+  const named = [...destinations.values()].flatMap((each) =>
+    each.ok ? [`'${each.folder.name}' (${each.folder.id})`] : [],
+  );
   return {
     ok: true,
     value: {
-      target: `Drive folder ${[...new Set([...destinations.values()].map((each) => `'${each.name}' (${each.id})`))].join(', ') || to}`,
+      target: `Drive folder ${[...new Set(named)].join(', ') || to || `per row in ${toColumn}`}`,
       operations,
       count: operations.length,
     },
@@ -220,12 +269,16 @@ async function destinationOf(
   rootId: string,
   parent: string,
   to: string,
+  /** How the destination is named in a problem: `to=`, or the column it came from. */
+  source: string,
 ): Promise<Destination> {
+  const says = `${source} holds`;
+  const names = `${source} names`;
   let candidate: DriveFile | undefined;
   if (/^https:\/\//i.test(to)) {
     const id = folderIdOf(to);
     if (id === undefined) {
-      return { ok: false, problem: `to= holds '${to}', which is not a Drive folder's address` };
+      return { ok: false, problem: `${says} '${to}', which is not a Drive folder's address` };
     }
     const read = await walk.describe(id);
     if (!read.ok) return read;
@@ -238,7 +291,7 @@ async function destinationOf(
       return {
         ok: false,
         problem:
-          `to= names '${to}', and ${folders.length} folders of that name are in ${parent}: ` +
+          `${names} '${to}', and ${folders.length} folders of that name are in ${parent}: ` +
           `${listed(folders.map((each) => each.id))}; name one by its id`,
       };
     }
@@ -250,12 +303,12 @@ async function destinationOf(
     if (candidate === undefined) {
       return {
         ok: false,
-        problem: `to= names '${to}', and no folder of that name is in ${parent}; ${NO_CREATE}`,
+        problem: `${names} '${to}', and no folder of that name is in ${parent}; ${NO_CREATE}`,
       };
     }
   }
   if (candidate.mimeType !== FOLDER_MIME_TYPE) {
-    return { ok: false, problem: `to= names '${candidate.name}', which is a file, not a folder` };
+    return { ok: false, problem: `${names} '${candidate.name}', which is a file, not a folder` };
   }
   const verdict = await walk.verdict(candidate.id);
   if (!verdict.ok) return verdict;
@@ -263,7 +316,7 @@ async function destinationOf(
     return {
       ok: false,
       problem:
-        `to= names '${candidate.name}', which is not under the root folder ${rootId}: ` +
+        `${names} '${candidate.name}', which is not under the root folder ${rootId}: ` +
         verdict.value.why,
     };
   }
@@ -388,12 +441,12 @@ function plannedFailure(row: Row, reason: string): PlannedOperation {
 }
 
 /** The column holding the files, by its name; case is ignored when only one column matches. */
-function columnOf(table: Table, name: string): string | Diagnostic {
+function columnOf(table: Table, name: string, argument: string): string | Diagnostic {
   if (table.columns.some((each) => each.name === name)) return name;
   const matches = table.columns.filter((each) => each.name.toLowerCase() === name.toLowerCase());
   if (matches.length === 1 && matches[0] !== undefined) return matches[0].name;
   return problem(
-    `file= names the column '${name}', which the table does not have; its columns are ` +
+    `${argument}= names the column '${name}', which the table does not have; its columns are ` +
       listed(table.columns.map((each) => each.name)),
   );
 }

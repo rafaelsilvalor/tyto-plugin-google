@@ -334,14 +334,16 @@ A source: what a JSON or text file holds, as rows.
 google.drive-read
 google.drive-read file=https://drive.google.com/file/d/<id>/view
 google.drive-read folder=https://drive.google.com/drive/folders/<inbox id> rows=itens
+google.drive-read rows=itens columns=task_filha,status
 ```
 
-| Argument  | What it does                                                                                    |
-| --------- | ----------------------------------------------------------------------------------------------- |
-| `file=`   | One file, as its id or its address.                                                             |
-| `folder=` | Every JSON file directly in the folder, oldest first; the section's `root` when neither is set. |
-| `type=`   | `json` or `text`, how `file=` is read; by default its type or name decides. A folder is JSON.   |
-| `rows=`   | A key of a JSON object: each element of the list under it is a row.                             |
+| Argument   | What it does                                                                                    |
+| ---------- | ----------------------------------------------------------------------------------------------- |
+| `file=`    | One file, as its id or its address.                                                             |
+| `folder=`  | Every JSON file directly in the folder, oldest first; the section's `root` when neither is set. |
+| `type=`    | `json` or `text`, how `file=` is read; by default its type or name decides. A folder is JSON.   |
+| `rows=`    | A key of a JSON object: each element of the list under it is a row.                             |
+| `columns=` | Columns that always exist, comma-separated, whatever the files hold.                            |
 
 - **JSON**: an array gives one row per element, keyed `<file id>:<index>` from 0; an object
   gives one row, `<file id>:0`. An element's keys are its columns, after `file_id` and
@@ -354,6 +356,13 @@ google.drive-read folder=https://drive.google.com/drive/folders/<inbox id> rows=
   element's own keys; an element's key of the same name wins. The object's other lists and
   objects are not copied. A file that is not an object, has no such key, or holds something
   other than a list under it is refused.
+- **`columns=<a,b>`** names columns that exist whatever the files hold: an empty folder, or
+  one whose every file is skipped, answers zero rows with these columns, so a later step that
+  names one of them plans nothing instead of failing. They come first, after `file_id` and
+  `file_name`, in the order written; a file key of the same name fills that column and is typed
+  by its values, and the files' other keys follow. A file key that differs from a declared name
+  only in case skips the file, as between two files. `file_id`, `file_name`, two names that
+  differ only in case, and `type=text` are refused.
 - **Text**: one row per line, keyed `<file id>:<line>` from 1, with `file_id`, `file_name`,
   `line` and `text`.
 - **A folder** judges each file alone. The first page reads every JSON file once: a file that
@@ -372,18 +381,27 @@ google.drive-read folder=https://drive.google.com/drive/folders/<inbox id> rows=
 
 ## `google.drive-move`
 
-An action: moves each row's Drive file or folder into one folder, as a plan you read and then
-apply. Nothing moves until you apply it.
+An action: moves each row's Drive file or folder into one folder, or each into its row's own
+folder, as a plan you read and then apply. Nothing moves until you apply it.
 
 ```
 google.drive-list folder=https://drive.google.com/drive/folders/<inbox id> type=json
 google.drive-move to=processed
+google.drive-move to-column=destination file=file_id
 ```
 
-| Argument | What it does                                                                         |
-| -------- | ------------------------------------------------------------------------------------ |
-| `to=`    | The folder the files move into: its address, its name, or its id; required.          |
-| `file=`  | The column holding each file's id or address; `id`, as `google.drive-list` names it. |
+| Argument     | What it does                                                                         |
+| ------------ | ------------------------------------------------------------------------------------ |
+| `to=`        | The folder every file moves into: its address, its name, or its id.                  |
+| `to-column=` | The column holding each row's own destination, written as `to=` is.                  |
+| `file=`      | The column holding each file's id or address; `id`, as `google.drive-list` names it. |
+
+- **One of `to=` or `to-column=`** is required, and giving both is refused.
+- **`to-column=`** reads each row's destination from that column, so one step sends accepted
+  files to one folder and rejected ones to another. A row whose destination is empty is left
+  out, and a warning counts those rows. A row whose destination is missing, outside the root,
+  or a file is a planned failure of that row alone; the others still move. Each destination is
+  looked up once per plan, however many rows name it.
 
 - **The destination by name** is a folder of that name directly in the folder the row was
   listed from: the row's `parent_id`, as `google.drive-list` writes it, or the section's `root`
@@ -392,8 +410,8 @@ google.drive-move to=processed
 - **Everything stays under `root`.** The section's `root` is required, and the plan reads each
   file's folders upwards, at most six levels, to find it: a file outside it, deeper than six
   folders, or whose folders loop is shown as one that will fail, and is never moved. A
-  destination outside it stops the plan. Folders the files share are read once per plan.
-- **A missing destination stops the plan**: this version never creates a folder.
+  `to=` destination outside it stops the plan. Folders the files share are read once per plan.
+- **A missing `to=` destination stops the plan**: this version never creates a folder.
 - A file already in the destination is left out, with a warning naming it. The root itself and
   the destination itself are planned failures.
 - Each `move` keeps the folders the file was in when planned. Each plan is checked within one

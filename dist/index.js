@@ -2476,7 +2476,8 @@ var PARENT_COLUMN = "parent_id";
 var NO_CREATE = "creating folders comes in a later version";
 var ARGUMENTS4 = [
   { name: "file", type: "text" },
-  { name: "to", type: "text", required: true }
+  { name: "to", type: "text" },
+  { name: "to-column", type: "text" }
 ];
 function driveMoveVerb(host, clock = systemClock) {
   return {
@@ -2494,10 +2495,26 @@ var verbRefused = (text) => refused4({ severity: "error", code: "E_RECIPE_VERB",
 var OUT_OF_TIME2 = "could not check every file in one call's time; narrow the table to fewer rows and run again";
 async function planDriveMove(host, request, clock = systemClock) {
   const { table } = request;
-  const column = columnOf2(table, textArgument(request.arguments, "file") ?? DEFAULT_FILE_COLUMN);
+  const column = columnOf2(
+    table,
+    textArgument(request.arguments, "file") ?? DEFAULT_FILE_COLUMN,
+    "file"
+  );
   if (typeof column !== "string") return refused4(column);
   const to = textArgument(request.arguments, "to");
-  if (to === void 0) return refused4(problem3("needs to=, the folder the files move into"));
+  const toColumnWritten = textArgument(request.arguments, "to-column");
+  if (to !== void 0 && toColumnWritten !== void 0) {
+    return refused4(
+      problem3("takes to=, one folder for every row, or to-column=, a folder per row; not both")
+    );
+  }
+  if (to === void 0 && toColumnWritten === void 0) {
+    return refused4(
+      problem3("needs to=, the folder the files move into, or to-column=, the column naming it")
+    );
+  }
+  const toColumn = toColumnWritten === void 0 ? void 0 : columnOf2(table, toColumnWritten, "to-column");
+  if (toColumn !== void 0 && typeof toColumn !== "string") return refused4(toColumn);
   const section = readSection(request.section);
   if (!section.ok) return refused4(verbFailed(DRIVE_MOVE, section.error));
   const rootId = section.value.root;
@@ -2524,17 +2541,34 @@ async function planDriveMove(host, request, clock = systemClock) {
   const destinations = /* @__PURE__ */ new Map();
   const operations = [];
   const alreadyThere = [];
+  let noDestination = 0;
   for (const row of table.rows) {
     const parent = hasParentColumn ? folderIdOf(row.values[PARENT_COLUMN]) ?? rootId : rootId;
-    let destination = destinations.get(parent);
-    if (destination === void 0) {
-      const found = await destinationOf(walk, rootId, parent, to);
-      if (!found.ok) {
-        return "error" in found ? failedFor(found.error) : refused4(problem3(found.problem));
+    let wanted;
+    if (toColumn === void 0) wanted = to ?? "";
+    else {
+      const cell = row.values[toColumn];
+      const text = typeof cell === "string" ? cell.trim() : cell;
+      if (text === null || text === void 0 || text === "") {
+        noDestination += 1;
+        continue;
       }
-      destination = found.folder;
-      destinations.set(parent, destination);
+      wanted = String(text);
     }
+    const cacheKey2 = JSON.stringify([parent, wanted]);
+    let found = destinations.get(cacheKey2);
+    if (found === void 0) {
+      found = await destinationOf(walk, rootId, parent, wanted, toColumn ?? "to=");
+      if (!found.ok && "error" in found) return failedFor(found.error);
+      destinations.set(cacheKey2, found);
+    }
+    if (!found.ok && "problem" in found) {
+      if (toColumn === void 0) return refused4(problem3(found.problem));
+      operations.push(plannedFailure3(row, found.problem));
+      continue;
+    }
+    if (!found.ok) return failedFor(found.error);
+    const destination = found.folder;
     const written = row.values[column];
     const fileId = typeof written === "string" ? fileIdOf(written) ?? folderIdOf(written) : void 0;
     if (fileId === void 0) {
@@ -2579,31 +2613,44 @@ async function planDriveMove(host, request, clock = systemClock) {
       payload: { ...payload, from: [...payload.from] }
     });
   }
-  const diagnostics = alreadyThere.length === 0 ? [] : [
-    {
+  const diagnostics = [];
+  if (alreadyThere.length > 0) {
+    diagnostics.push({
       severity: "warning",
       code: "E_RECIPE_VERB",
       message: shortened(
         `'${DRIVE_MOVE}' plans nothing for ${listed(alreadyThere)}: already in the destination.`
       )
-    }
-  ];
+    });
+  }
+  if (noDestination > 0) {
+    diagnostics.push({
+      severity: "warning",
+      code: "E_RECIPE_VERB",
+      message: `'${DRIVE_MOVE}' left out ${noDestination.toLocaleString("en-US")} ${noDestination === 1 ? "row" : "rows"} with no destination in ${toColumn ?? "to-column="}.`
+    });
+  }
+  const named = [...destinations.values()].flatMap(
+    (each) => each.ok ? [`'${each.folder.name}' (${each.folder.id})`] : []
+  );
   return {
     ok: true,
     value: {
-      target: `Drive folder ${[...new Set([...destinations.values()].map((each) => `'${each.name}' (${each.id})`))].join(", ") || to}`,
+      target: `Drive folder ${[...new Set(named)].join(", ") || to || `per row in ${toColumn}`}`,
       operations,
       count: operations.length
     },
     diagnostics
   };
 }
-async function destinationOf(walk, rootId, parent, to) {
+async function destinationOf(walk, rootId, parent, to, source) {
+  const says = `${source} holds`;
+  const names = `${source} names`;
   let candidate;
   if (/^https:\/\//i.test(to)) {
     const id = folderIdOf(to);
     if (id === void 0) {
-      return { ok: false, problem: `to= holds '${to}', which is not a Drive folder's address` };
+      return { ok: false, problem: `${says} '${to}', which is not a Drive folder's address` };
     }
     const read = await walk.describe(id);
     if (!read.ok) return read;
@@ -2615,7 +2662,7 @@ async function destinationOf(walk, rootId, parent, to) {
     if (folders.length > 1) {
       return {
         ok: false,
-        problem: `to= names '${to}', and ${folders.length} folders of that name are in ${parent}: ${listed(folders.map((each) => each.id))}; name one by its id`
+        problem: `${names} '${to}', and ${folders.length} folders of that name are in ${parent}: ${listed(folders.map((each) => each.id))}; name one by its id`
       };
     }
     candidate = folders[0];
@@ -2626,19 +2673,19 @@ async function destinationOf(walk, rootId, parent, to) {
     if (candidate === void 0) {
       return {
         ok: false,
-        problem: `to= names '${to}', and no folder of that name is in ${parent}; ${NO_CREATE}`
+        problem: `${names} '${to}', and no folder of that name is in ${parent}; ${NO_CREATE}`
       };
     }
   }
   if (candidate.mimeType !== FOLDER_MIME_TYPE) {
-    return { ok: false, problem: `to= names '${candidate.name}', which is a file, not a folder` };
+    return { ok: false, problem: `${names} '${candidate.name}', which is a file, not a folder` };
   }
   const verdict = await walk.verdict(candidate.id);
   if (!verdict.ok) return verdict;
   if (!verdict.value.under) {
     return {
       ok: false,
-      problem: `to= names '${candidate.name}', which is not under the root folder ${rootId}: ` + verdict.value.why
+      problem: `${names} '${candidate.name}', which is not under the root folder ${rootId}: ` + verdict.value.why
     };
   }
   return { ok: true, folder: candidate };
@@ -2729,12 +2776,12 @@ function plannedFailure3(row, reason) {
     payload: { x: text }
   };
 }
-function columnOf2(table, name) {
+function columnOf2(table, name, argument) {
   if (table.columns.some((each) => each.name === name)) return name;
   const matches = table.columns.filter((each) => each.name.toLowerCase() === name.toLowerCase());
   if (matches.length === 1 && matches[0] !== void 0) return matches[0].name;
   return problem3(
-    `file= names the column '${name}', which the table does not have; its columns are ` + listed(table.columns.map((each) => each.name))
+    `${argument}= names the column '${name}', which the table does not have; its columns are ` + listed(table.columns.map((each) => each.name))
   );
 }
 function shown(value) {
@@ -2825,6 +2872,19 @@ var ColumnUnion = class {
   names = [];
   lowered = /* @__PURE__ */ new Map();
   kinds = /* @__PURE__ */ new Map();
+  declared;
+  /**
+   * `declared` are columns that exist whatever the files hold, first and in that order: an
+   * empty folder still answers them, and a file's key of the same name joins them.
+   */
+  constructor(declared = []) {
+    for (const name of declared) {
+      this.lowered.set(name.toLowerCase(), name);
+      this.names.push(name);
+      this.kinds.set(name, /* @__PURE__ */ new Set());
+    }
+    this.declared = new Set(declared);
+  }
   /** Adds the file's keys and values, or says why the file cannot join, changing nothing. */
   add(fileName, read) {
     const added = [];
@@ -2832,7 +2892,8 @@ var ColumnUnion = class {
       const seen = this.lowered.get(name.toLowerCase());
       if (seen === name) continue;
       if (seen !== void 0) {
-        return `'${fileName}' has the key '${name}', which differs only in case from '${seen}' in an earlier file`;
+        const where = this.declared.has(seen) ? "columns=" : "an earlier file";
+        return `'${fileName}' has the key '${name}', which differs only in case from '${seen}' in ${where}`;
       }
       added.push(name);
     }
@@ -2933,7 +2994,8 @@ var ARGUMENTS5 = [
   { name: "file", type: "text" },
   { name: "folder", type: "text" },
   { name: "type", type: "text" },
-  { name: "rows", type: "text" }
+  { name: "rows", type: "text" },
+  { name: "columns", type: "text" }
 ];
 var TEXT_COLUMNS = [
   { name: "file_id", type: "text", origin: ORIGIN },
@@ -3038,8 +3100,9 @@ async function driveReadPage(host, request) {
       read = parsed;
     }
     if (columns === void 0) {
-      const own = new ColumnUnion();
-      own.add(file.name, read);
+      const own = new ColumnUnion(asked.columns);
+      const refused7 = own.add(file.name, read);
+      if (refused7 !== void 0) return readFailed(refused7);
       columns = own.columns();
     }
     const built = jsonRows(file, read, columns, fetchedAt);
@@ -3072,7 +3135,7 @@ async function driveReadPage(host, request) {
   return rest({ i: following, id: followingFile.id, o: 0, d: "" });
 }
 async function surveyFolder(client, files, asked) {
-  const union = new ColumnUnion();
+  const union = new ColumnUnion(asked.columns);
   const skipped = [];
   const warnings = [];
   let first;
@@ -3204,6 +3267,12 @@ function readReadArguments(values, section) {
   if (rows !== void 0 && type === "text") {
     return problem4("rows= spreads a list of a JSON object into rows; type=text reads lines");
   }
+  const columns = declaredColumns(textArgument(values, "columns"));
+  if (typeof columns === "string") return problem4(columns);
+  if (columns !== void 0 && type === "text") {
+    return problem4("columns= names a JSON file's columns; type=text reads lines");
+  }
+  const declared = columns === void 0 ? {} : { columns };
   if (fileWritten !== void 0) {
     if (textArgument(values, "folder") !== void 0) {
       return problem4("takes file= or folder=, not both");
@@ -3218,7 +3287,8 @@ function readReadArguments(values, section) {
       mode: "file",
       fileId,
       ...type === void 0 ? {} : { type },
-      ...rows === void 0 ? {} : { rows }
+      ...rows === void 0 ? {} : { rows },
+      ...declared
     };
   }
   if (type === "text") {
@@ -3226,7 +3296,31 @@ function readReadArguments(values, section) {
   }
   const folderId = folderArgument(DRIVE_READ, values, section);
   if (typeof folderId !== "string") return folderId;
-  return { mode: "folder", folderId, ...rows === void 0 ? {} : { rows } };
+  return { mode: "folder", folderId, ...rows === void 0 ? {} : { rows }, ...declared };
+}
+function declaredColumns(written) {
+  if (written === void 0) return void 0;
+  const names = [];
+  const lowered = /* @__PURE__ */ new Map();
+  for (const name of written.split(",").map((each) => each.trim())) {
+    if (name === "") continue;
+    const lower = name.toLowerCase();
+    if (lower === "file_id" || lower === "file_name") {
+      return `columns= names '${name}', which every row gets already`;
+    }
+    const seen = lowered.get(lower);
+    if (seen === name) continue;
+    if (seen !== void 0) {
+      return `columns= names '${seen}' and '${name}', which differ only in case`;
+    }
+    lowered.set(lower, name);
+    names.push(name);
+  }
+  if (names.length === 0) return "columns= names no column; write them comma-separated";
+  if (names.length > MAX_JSON_COLUMNS) {
+    return `columns= names ${names.length} columns, over ${MAX_JSON_COLUMNS}`;
+  }
+  return names;
 }
 
 // src/sheet-create.ts
