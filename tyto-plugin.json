@@ -1,7 +1,7 @@
 {
   "name": "google",
   "version": "0.1.0",
-  "engine": ">=0.24",
+  "engine": ">=0.25",
   "contributes": ["recipe-verb"],
   "permissions": [
     "net:sheets.googleapis.com",

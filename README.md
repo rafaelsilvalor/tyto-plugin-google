@@ -610,6 +610,9 @@ first and ties in text order: three 1080x1350 images and one 1080x1920 read `4:5
 - A folder with no images gets an empty cell; a blank folder cell gets none.
 - The width and height come from Drive's `imageMediaMetadata` in the same listing the count
   already makes: no request per file.
+- The plugin keeps its own copy of the snapping, and a test holds it equal to Tyto's
+  `aspectOf` (Tyto ADR 0215), so a shape counted here reads the same as one Tyto finds in a
+  local delivery's exports folder.
 - Without `shapes=yes` the transform is the same as before: one column, and no dimensions asked.
 
 ## `google.sheet-lookup`

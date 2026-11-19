@@ -52,8 +52,10 @@ describe('tyto-plugin.json', () => {
 
   it('declares the Google sign-in with no client, which the person supplies (Tyto ADR 0192)', async () => {
     const plugin = await harness({ google: 'person-token' });
-    // Reading a workspace file in parts came with plugin API 0.24 (Tyto ADR 0212).
-    expect(plugin.manifest.engine).toBe('>=0.24');
+    // The engine moves with the plugin API the plugin is built against (Tyto ADR 0154): 0.25
+    // brought `aspectOf` (Tyto ADR 0215), which tests/drive-count-parity.test.ts holds
+    // `shapeOf` equal to.
+    expect(plugin.manifest.engine).toBe('>=0.25');
     expect(plugin.manifest.signin).toEqual({
       google: {
         authorize:
