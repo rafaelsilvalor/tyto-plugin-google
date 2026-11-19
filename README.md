@@ -246,6 +246,8 @@ google.sheet-sync tab=Queue key=ID move=Filed keep=Notes archived=Archive
 | `move=`        | A column of the table naming the tab a row moves to; blank keeps the row here.      |
 | `keep=`        | Columns, comma-separated, that people write by hand: never overwritten.             |
 | `archived=`    | Tabs, comma-separated, whose keys were filed away: the sync does not add them back. |
+| `notes=`       | Tab columns, comma-separated, whose cell notes the table's `<column>_note` writes.  |
+| `note-mode=`   | `set` (the default) replaces each note; `append` adds the value as a line under it. |
 
 | In the tab | In the table           | Planned                                                   |
 | ---------- | ---------------------- | --------------------------------------------------------- |
@@ -269,6 +271,37 @@ google.sheet-sync tab=Queue key=ID move=Filed keep=Notes archived=Archive
   plan names them. Each cell lands under the column of the same name in the new tab; a column
   the new tab lacks, where the row holds something, fails that move in the plan. A new tab gets
   this tab's header.
+
+### Writing cell notes
+
+```
+google.sheet-sync tab=Queue key=ID notes=Owner note-mode=append
+```
+
+With `notes=Owner`, the table's `Owner_note` column writes the note of each row's `Owner`
+cell: the name `google.sheet-rows notes=Owner` reads it back as. The note column is not a
+column of the tab, and a `keep=` column's note is written too, because a note leaves the cell's
+value alone. A note change rides the row's `update`, `move` or `add`, and the plan shows it:
+
+```
+update EX-1 (row 2): Owner note: "Ana took it" → "Ana, since Monday"
+update EX-2 (row 3): Owner note: + "Bruno → Caio"
+```
+
+- **`note-mode=set`** writes the value as the whole note, and plans nothing when the note is
+  that already.
+- **`note-mode=append`** adds the value as a new line under the note, and plans nothing when
+  the note's last line is the value already, so running the recipe again does not write the
+  same line twice. Only the last line counts: a value that went back to an earlier one, such
+  as an assignee changed back, is added again.
+- **A blank value leaves the note as it is**, in both modes: a read that failed before this
+  step must not erase a note a person wrote. So `set` cannot clear a note.
+- The note is written with a field mask of `note` alone, so the cell's value, link and format
+  stay. The row's digest covers the notes `notes=` names: a note a person changed between the
+  plan and Apply fails the row with `E_GOOGLE_CHANGED`, so an append never lands on a note it
+  did not read.
+- A `notes=` column the table has no `<column>_note` for, or the tab has no column for, is
+  refused before anything is planned.
 
 ### Formatting a tab
 

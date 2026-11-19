@@ -895,3 +895,189 @@ describe('google.sheet-sync link drift', () => {
     expect(tabNamed(sheet, 'Queue')?.values[1]?.[2]).toBe('Ana');
   });
 });
+
+describe('google.sheet-sync notes', () => {
+  /** A tab whose Owner cells carry notes a person wrote. */
+  const owners = (): FakeTab => ({
+    sheetId: 5,
+    title: 'Queue',
+    values: [
+      ['ID', 'Title', 'Owner'],
+      ['EX-1', 'One', 'Ana'],
+      ['EX-2', 'Two', 'Bruno'],
+    ],
+    notes: { C2: 'Ana took it', C3: 'by hand' },
+  });
+  function noted(rows: readonly (readonly string[])[], extra: readonly string[] = []): InputTable {
+    const names = ['ID', 'Title', 'Owner', 'Owner_note', ...extra];
+    return {
+      columns: names.map((name) => ({ name, type: 'text' as const, origin: 'test' })),
+      rows: rows.map((cells, index) => ({
+        key: cells[0] ?? `r${index + 1}`,
+        values: Object.fromEntries(names.map((name, at) => [name, cells[at] || null])),
+        provenance: { source: 'test', id: `r${index + 1}`, fetchedAt: '2026-11-19T00:00:00.000Z' },
+      })),
+    };
+  }
+  const shown = (answer: Awaited<ReturnType<typeof planAndApply>>) =>
+    answer.plan?.operations.map((each) => [each.write, each.description]);
+  /** Each updateCells sent, as the cell it starts at and its field mask. */
+  const masks = (sheet: FakeGoogle): string[] =>
+    sheet.calls
+      .filter((call) => call.method === 'POST' && call.path === BATCH)
+      .flatMap(
+        (call) => (call.body as { requests: Record<string, Record<string, unknown>>[] }).requests,
+      )
+      .flatMap((request) => {
+        const update = request['updateCells'];
+        if (update === undefined) return [];
+        const range = update['range'] as Record<string, number>;
+        const at = `${(range['startRowIndex'] ?? 0) + 1}:${range['startColumnIndex']}`;
+        return [`${at} ${String(update['fields'])}`];
+      });
+  const messagesOf = async (sheet: FakeGoogle, step: string, table: InputTable) => {
+    const run = await sheet.plugin.runRecipe(step, { input: table });
+    return (run.ok ? run.value.cells.flatMap((cell) => cell.diagnostics) : run.error).map(
+      (each) => each.message,
+    );
+  };
+
+  it('sets a note under a mask of note alone, and leaves a blank one as it is', async () => {
+    const sheet = await google({ tabs: [owners()], version: '1' });
+    const answer = await planAndApply(
+      sheet,
+      'google.sheet-sync tab=Queue key=ID notes=Owner',
+      noted([
+        ['EX-1', 'One', 'Ana', 'Ana, since Monday'],
+        ['EX-2', 'Two', 'Bruno', ''],
+      ]),
+    );
+    expect(shown(answer)).toEqual([
+      ['update', 'update EX-1 (row 2): Owner note: "Ana took it" → "Ana, since Monday"'],
+    ]);
+    expect(answer.plan?.operations[0]?.payload).toMatchObject({ n: [[2, 'Ana, since Monday']] });
+    expect(answer.applied).toEqual([{ status: 'applied' }]);
+    expect(masks(sheet)).toEqual(['2:2 note']);
+    const tab = tabNamed(sheet, 'Queue');
+    expect(tab?.notes).toEqual({ C2: 'Ana, since Monday', C3: 'by hand' });
+    expect(tab?.values[1]).toEqual(['EX-1', 'One', 'Ana']);
+  });
+
+  it('appends a line under the note, and plans nothing when the note ends with it', async () => {
+    const sheet = await google({ tabs: [owners()], version: '1' });
+    const step = 'google.sheet-sync tab=Queue key=ID notes=Owner note-mode=append';
+    const table = noted([
+      ['EX-1', 'One', 'Ana', 'Ana → Bia'],
+      ['EX-2', 'Two', 'Bruno', 'Bruno → Caio'],
+    ]);
+    const first = await planAndApply(sheet, step, table);
+    expect(shown(first)).toEqual([
+      ['update', 'update EX-1 (row 2): Owner note: + "Ana → Bia"'],
+      ['update', 'update EX-2 (row 3): Owner note: + "Bruno → Caio"'],
+    ]);
+    expect(first.applied).toEqual([{ status: 'applied' }, { status: 'applied' }]);
+    expect(tabNamed(sheet, 'Queue')?.notes).toEqual({
+      C2: 'Ana took it\nAna → Bia',
+      C3: 'by hand\nBruno → Caio',
+    });
+
+    const again = await planAndApply(sheet, step, table);
+    expect(again.plan?.operations).toEqual([]);
+
+    // Only the last line counts: a line seen before another one is added again.
+    const back = await planAndApply(
+      sheet,
+      step,
+      noted([
+        ['EX-1', 'One', 'Ana', 'Ana took it'],
+        ['EX-2', 'Two', 'Bruno', 'Bruno → Caio'],
+      ]),
+    );
+    expect(shown(back)).toEqual([['update', 'update EX-1 (row 2): Owner note: + "Ana took it"']]);
+  });
+
+  it('shows a note beside the cells an update, a move and an add write', async () => {
+    const sheet = await google({ tabs: [owners()], version: '1' });
+    const answer = await planAndApply(
+      sheet,
+      'google.sheet-sync tab=Queue key=ID move=Filed notes=Owner',
+      noted(
+        [
+          ['EX-1', 'One again', 'Ana', 'Ana, since Monday', ''],
+          ['EX-2', 'Two', 'Bruno', 'done by Bruno', 'Done'],
+          ['EX-3', 'Three', 'Caio', 'new, for Caio', ''],
+        ],
+        ['Filed'],
+      ),
+    );
+    expect(shown(answer)).toEqual([
+      ['add-tab', "add the tab 'Done', with the header ID, Title, Owner"],
+      [
+        'update',
+        'update EX-1 (row 2): Title: One → One again; ' +
+          'Owner note: "Ana took it" → "Ana, since Monday"',
+      ],
+      [
+        'move',
+        'move EX-2 (row 3) to the tab \'Done\', writing Owner note: "by hand" → "done by Bruno"',
+      ],
+      ['add', 'add EX-3: EX-3 | Three | Caio; Owner note: (none) → "new, for Caio"'],
+    ]);
+    expect(answer.applied?.every((each) => each.status === 'applied')).toBe(true);
+    expect(tabNamed(sheet, 'Queue')?.values).toEqual([
+      ['ID', 'Title', 'Owner'],
+      ['EX-1', 'One again', 'Ana'],
+      ['EX-3', 'Three', 'Caio'],
+    ]);
+    expect(tabNamed(sheet, 'Queue')?.notes).toEqual({
+      C2: 'Ana, since Monday',
+      C3: 'new, for Caio',
+    });
+    expect(tabNamed(sheet, 'Done')?.notes).toEqual({ C2: 'done by Bruno' });
+  });
+
+  it('fails a row whose note a person changed between the plan and Apply', async () => {
+    const step = 'google.sheet-sync tab=Queue key=ID notes=Owner note-mode=append';
+    const table = noted([
+      ['EX-1', 'One', 'Ana', 'Ana → Bia'],
+      ['EX-2', 'Two', 'Bruno', ''],
+    ]);
+    const sheet = await google({ tabs: [owners()], version: '1' });
+    const answer = await planAndApply(sheet, step, table, () => {
+      const tab = tabNamed(sheet, 'Queue');
+      if (tab?.notes !== undefined) tab.notes['C2'] = 'Ana took it\ncall Ana first';
+    });
+    expect(answer.applied).toEqual([
+      {
+        status: 'failed',
+        reason:
+          'E_GOOGLE_CHANGED: EX-1 (row 2): the row changed since the plan; run the cell again ' +
+          'for a new plan',
+      },
+    ]);
+    expect(tabNamed(sheet, 'Queue')?.notes?.['C2']).toBe('Ana took it\ncall Ana first');
+  });
+
+  it('refuses notes= naming a column the table has no note for, or the tab lacks', async () => {
+    const sheet = await google({ tabs: [owners()], version: '1' });
+    const row = [['EX-1', 'One', 'Ana', 'x', 'y']];
+    expect(
+      await messagesOf(sheet, 'google.sheet-sync tab=Queue key=ID notes=Title', noted(row)),
+    ).toEqual([
+      expect.stringContaining(
+        "notes= names 'Title', but the table has no column 'Title_note' to write",
+      ) as string,
+    ]);
+    expect(
+      await messagesOf(
+        sheet,
+        'google.sheet-sync tab=Queue key=ID notes=Owner,Due',
+        noted(row, ['Due_note']),
+      ),
+    ).toEqual([
+      expect.stringContaining(
+        "notes= names 'Due', which the tab 'Queue' has no column for",
+      ) as string,
+    ]);
+  });
+});

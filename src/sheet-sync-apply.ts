@@ -11,6 +11,7 @@ import {
 import { readCellExtras, readGridTabs, readValues, type GridTab } from './sheet-snapshot.js';
 import { fingerprint } from './cursor.js';
 import { headerOf, type RawCell } from './sheet-grid.js';
+import type { NoteChange } from './sheet-notes.js';
 import {
   batchFailed,
   budgetedTransport,
@@ -36,13 +37,16 @@ const SHEETS = 'https://sheets.googleapis.com/v4/spreadsheets';
  * The row's cells and links as the plan read them, so Apply can tell the row changed since: a
  * link a person changed between the plan and Apply fails the row as a changed value does. A
  * row with no link digests as its values alone, as plans made before links were digested did.
+ * The notes of the columns `notes=` names count the same way, and only when the row has one.
  */
 export function rowDigest(
   cells: readonly RawCell[],
   links: readonly (readonly [number, string])[] = [],
+  notes: readonly (readonly [number, string])[] = [],
 ): string {
   const values = [...cells];
   while (values.length > 0 && values.at(-1) === '') values.pop();
+  if (notes.length > 0) return fingerprint(JSON.stringify([values, links, notes]));
   return fingerprint(JSON.stringify(links.length === 0 ? values : [values, links]));
 }
 
@@ -95,6 +99,8 @@ interface Anchored {
   readonly kc: number;
   readonly hd: string;
   readonly k: string;
+  /** The columns whose notes the digest covers. */
+  readonly nc?: readonly number[];
 }
 
 type Change = readonly [number, WriteCell];
@@ -109,14 +115,21 @@ interface Move {
   readonly m: readonly (readonly [number, number])[];
   /** Cells the table changes, written over the row before it is copied. */
   readonly u: readonly Change[];
+  /** Notes the table changes, written over the row before it is copied, so the copy has them. */
+  readonly n: readonly NoteChange[];
 }
 
 type RowOperation = Anchored &
   (
-    | { readonly kind: 'update'; readonly d: string; readonly u: readonly Change[] }
+    | {
+        readonly kind: 'update';
+        readonly d: string;
+        readonly u: readonly Change[];
+        readonly n: readonly NoteChange[];
+      }
     | Move
     | { readonly kind: 'delete'; readonly d: string }
-    | { readonly kind: 'add'; readonly c: readonly WriteCell[] }
+    | { readonly kind: 'add'; readonly c: readonly WriteCell[]; readonly n: readonly NoteChange[] }
   );
 
 type Decoded = (AddTab | FormatTab | RowOperation) & { readonly ck?: string };
@@ -252,18 +265,27 @@ export async function applySheetSync(
     }
   }
   let links: Readonly<Record<string, Readonly<Record<string, string>>>> = {};
+  let notes: Readonly<Record<string, Readonly<Record<string, string>>>> = {};
   const digested = pending().filter((index) => isRow(index) && at(index).kind !== 'add');
   if (digested.length > 0) {
+    const noted = new Set(digested.flatMap((index) => (at(index) as RowOperation).nc ?? []));
     const extras = await readCellExtras(
       client,
       spreadsheetId,
       tab,
-      { links: Array.from({ length: width }, (_, index) => index), notes: [] },
+      { links: Array.from({ length: width }, (_, index) => index), notes: [...noted] },
       lastRow,
     );
     if (!extras.ok) return refusedOr(digested, failedWith(extras.error));
     links = extras.value.links;
+    notes = extras.value.notes;
   }
+  /** The notes of row `number` in the columns `columns` names, as the plan digested them. */
+  const notesOf = (columns: readonly number[] | undefined, number: number) =>
+    rowLinks(
+      Object.fromEntries((columns ?? []).map((column) => [column, notes[String(column)] ?? {}])),
+      number,
+    );
 
   const rowOf = new Map<number, number>();
   for (const index of pending()) {
@@ -282,7 +304,12 @@ export async function applySheetSync(
       settle([index], failed('E_GOOGLE_CHANGED', `${each.k} ${why}: ${CHANGED}`));
       continue;
     }
-    if (rowDigest(cellsAt.get(number) ?? [], rowLinks(links, number)) !== each.d) {
+    const digest = rowDigest(
+      cellsAt.get(number) ?? [],
+      rowLinks(links, number),
+      notesOf(each.nc, number),
+    );
+    if (digest !== each.d) {
       settle([index], failed('E_GOOGLE_CHANGED', `${each.k} (row ${number}): ${CHANGED}`));
       continue;
     }
@@ -460,6 +487,7 @@ function rowRequests(
   for (const [each, row] of operations) {
     if ((each.kind !== 'update' && each.kind !== 'move') || row === undefined) continue;
     for (const [at, cell] of each.u) requests.push(cellsRequest(sheetId, row, at, [cell]));
+    for (const [at, note] of each.n) requests.push(noteRequest(sheetId, row, at, note));
   }
 
   // Moves: each row copied whole, value, formula, format and link, under its destination's
@@ -525,13 +553,15 @@ function rowRequests(
       },
     });
   }
-  const added = operations.flatMap(([each]) => (each.kind === 'add' ? [each.c] : []));
+  const added = operations.flatMap(([each]) => (each.kind === 'add' ? [each] : []));
   if (added.length > 0) {
+    const noted = added.some((each) => each.n.length > 0);
     requests.push({
       appendCells: {
         sheetId,
-        rows: added.map((cells) => ({ values: cells.map(cellData) })),
-        fields: WRITTEN_FIELDS,
+        rows: added.map((each) => ({ values: addedCells(each.c, each.n) })),
+        // A new row has no note to keep, so the mask asks for notes only when one is written.
+        fields: noted ? `${WRITTEN_FIELDS},note` : WRITTEN_FIELDS,
       },
     });
   }
@@ -570,6 +600,39 @@ function cellsRequest(
   };
 }
 
+/**
+ * One cell's note, under a mask of `note` alone: the cell's value, links and format are left as
+ * they are, which a mask naming the written fields would clear.
+ */
+function noteRequest(sheetId: number, row: number, column: number, note: string): unknown {
+  return {
+    updateCells: {
+      range: {
+        sheetId,
+        startRowIndex: row - 1,
+        endRowIndex: row,
+        startColumnIndex: column,
+        endColumnIndex: column + 1,
+      },
+      rows: [{ values: [{ note }] }],
+      fields: 'note',
+    },
+  };
+}
+
+/** A new row's cells as `CellData`, each planned note on its cell, past the last value too. */
+function addedCells(
+  cells: readonly WriteCell[],
+  notes: readonly NoteChange[],
+): Readonly<Record<string, unknown>>[] {
+  const width = Math.max(cells.length, ...notes.map(([at]) => at + 1));
+  return Array.from({ length: width }, (_, at) => {
+    const data = cellData(cells[at] ?? null);
+    const note = notes.find(([column]) => column === at)?.[1];
+    return note === undefined ? data : { ...data, note };
+  });
+}
+
 /** A planned failure's reason, an operation this version writes, or why it reads none. */
 async function decodeOperation(
   host: ApplyHost,
@@ -596,7 +659,7 @@ function readOperation(
   write: string,
   object: Readonly<Record<string, JsonValue>>,
 ): AddTab | FormatTab | RowOperation | undefined {
-  const { h, s, kc, hd, k, d, t, c, u, dh, m } = object;
+  const { h, s, kc, hd, k, d, t, c, u, dh, m, n, nc } = object;
   if (!isDigest(h) || !isSheet(s)) return undefined;
   if (write === 'add-tab') {
     const names = Array.isArray(c) ? c : [];
@@ -622,24 +685,45 @@ function readOperation(
   ) {
     return undefined;
   }
-  const anchor = { h, s, kc, hd, k };
+  const columns = nc === undefined ? [] : indexesOf(nc);
+  const notes = n === undefined ? [] : notesOf(n);
+  if (columns === undefined || notes === undefined) return undefined;
+  const anchor = { h, s, kc, hd, k, ...(columns.length === 0 ? {} : { nc: columns }) };
   if (write === 'add') {
     const cells = cellsOf(c);
-    return cells === undefined ? undefined : { ...anchor, kind: 'add', c: cells };
+    return cells === undefined ? undefined : { ...anchor, kind: 'add', c: cells, n: notes };
   }
   if (!isDigest(d)) return undefined;
   if (write === 'delete') return { ...anchor, kind: 'delete', d };
-  const changes = u === undefined && write === 'move' ? [] : changesOf(u);
+  // An update may change notes alone, and a move nothing at all.
+  const changes = u === undefined && (write === 'move' || notes.length > 0) ? [] : changesOf(u);
   if (changes === undefined) return undefined;
   if (write === 'move') {
     const pairs = pairsOf(m);
     if (pairs === undefined || typeof t !== 'string' || t === '' || !isDigest(dh)) {
       return undefined;
     }
-    return { ...anchor, kind: 'move', d, t, dh, m: pairs, u: changes };
+    return { ...anchor, kind: 'move', d, t, dh, m: pairs, u: changes, n: notes };
   }
-  if (write !== 'update' || changes.length === 0) return undefined;
-  return { ...anchor, kind: 'update', d, u: changes };
+  if (write !== 'update' || changes.length + notes.length === 0) return undefined;
+  return { ...anchor, kind: 'update', d, u: changes, n: notes };
+}
+
+function indexesOf(value: JsonValue): number[] | undefined {
+  if (!Array.isArray(value) || !value.every(isIndex)) return undefined;
+  return value as number[];
+}
+
+function notesOf(value: JsonValue): NoteChange[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const notes: NoteChange[] = [];
+  for (const change of value) {
+    if (!Array.isArray(change) || change.length !== 2) return undefined;
+    const [at, note] = change as [JsonValue, JsonValue];
+    if (!isIndex(at) || typeof note !== 'string') return undefined;
+    notes.push([at, note]);
+  }
+  return notes;
 }
 
 function changesOf(value: JsonValue | undefined): Change[] | undefined {

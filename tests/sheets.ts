@@ -255,6 +255,7 @@ function batchUpdate(sheet: FakeSpreadsheet, body: unknown): FetchedResponse {
       tab.rowCount = rowsOf(tab) - (range.endIndex - range.startIndex);
       tab.links = shifted(tab.links, range.startIndex, range.endIndex);
       tab.formulas = shifted(tab.formulas, range.startIndex, range.endIndex);
+      tab.notes = shifted(tab.notes, range.startIndex, range.endIndex);
       continue;
     }
     if (kind === 'copyPaste' && detail !== undefined) {
@@ -274,7 +275,7 @@ function batchUpdate(sheet: FakeSpreadsheet, body: unknown): FetchedResponse {
       }
       const top = tab.values.length;
       const rows = detail['rows'] as { values: Record<string, unknown>[] }[];
-      writeRows(tab, top, 0, rows);
+      writeRows(tab, top, 0, rows, String(detail['fields']));
       tab.rowCount = Math.max(rowsOf(tab), top + rows.length);
       continue;
     }
@@ -296,7 +297,7 @@ function batchUpdate(sheet: FakeSpreadsheet, body: unknown): FetchedResponse {
         error: { code: 400, message: 'Range exceeds grid limits.', status: 'INVALID_ARGUMENT' },
       });
     }
-    writeRows(tab, top, range['startColumnIndex'] ?? 0, rows);
+    writeRows(tab, top, range['startColumnIndex'] ?? 0, rows, String(detail['fields']));
   }
   for (const tab of created) copyOf(tab.sheetId);
   for (const copy of copies.values()) {
@@ -307,19 +308,31 @@ function batchUpdate(sheet: FakeSpreadsheet, body: unknown): FetchedResponse {
   return response(200, { spreadsheetId: SPREADSHEET_ID, replies: requests.map(() => ({})) });
 }
 
-/** Cells written from `top` (a row index from 0) and `left`, as Sheets keeps them. */
+/**
+ * Cells written from `top` (a row index from 0) and `left`, as Sheets keeps them: only the
+ * fields the mask names change, so a mask of `note` alone leaves the value and its link.
+ */
 function writeRows(
   tab: FakeTab,
   top: number,
   left: number,
   rows: readonly { values: Record<string, unknown>[] }[],
+  fields: string,
 ): void {
+  const masked = fields.split(',');
   rows.forEach((row, offset) => {
     while (tab.values.length < top + offset) tab.values.push([]);
     const values = tab.values[top + offset] ?? [];
     row.values.forEach((cell, index) => {
       const column = left + index;
       while (values.length < column) values.push('');
+      if (masked.includes('note')) {
+        const note = cell['note'];
+        tab.notes ??= {};
+        if (typeof note === 'string' && note !== '') tab.notes[a1(column, top + offset + 1)] = note;
+        else delete tab.notes[a1(column, top + offset + 1)];
+      }
+      if (!masked.includes('userEnteredValue')) return;
       const entered = (cell['userEnteredValue'] ?? {}) as Record<string, unknown>;
       values[column] =
         entered['stringValue'] ??
@@ -395,6 +408,9 @@ function copyPaste(
     const formula = source.formulas?.[a1(column, row + 1)];
     if (formula === undefined) delete target.formulas?.[a1(into, top + 1)];
     else (target.formulas ??= {})[a1(into, top + 1)] = formula;
+    const note = source.notes?.[a1(column, row + 1)];
+    if (note === undefined) delete target.notes?.[a1(into, top + 1)];
+    else (target.notes ??= {})[a1(into, top + 1)] = note;
   }
   while (values.length > 0 && values.at(-1) === '') values.pop();
   target.values[top] = values;
