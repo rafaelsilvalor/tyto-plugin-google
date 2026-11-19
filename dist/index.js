@@ -3857,9 +3857,10 @@ function listOf3(value) {
 
 // src/sheet-sync-apply.ts
 var SHEETS4 = "https://sheets.googleapis.com/v4/spreadsheets";
-function rowDigest(cells, links = []) {
+function rowDigest(cells, links = [], notes = []) {
   const values = [...cells];
   while (values.length > 0 && values.at(-1) === "") values.pop();
+  if (notes.length > 0) return fingerprint(JSON.stringify([values, links, notes]));
   return fingerprint(JSON.stringify(links.length === 0 ? values : [values, links]));
 }
 function rowLinks(links, row) {
@@ -3976,18 +3977,25 @@ async function applySheetSync(host, request, clock = systemClock) {
     }
   }
   let links = {};
+  let notes = {};
   const digested = pending().filter((index) => isRow(index) && at(index).kind !== "add");
   if (digested.length > 0) {
+    const noted = new Set(digested.flatMap((index) => at(index).nc ?? []));
     const extras = await readCellExtras(
       client,
       spreadsheetId,
       tab,
-      { links: Array.from({ length: width }, (_, index) => index), notes: [] },
+      { links: Array.from({ length: width }, (_, index) => index), notes: [...noted] },
       lastRow
     );
     if (!extras.ok) return refusedOr(digested, failedWith(extras.error));
     links = extras.value.links;
+    notes = extras.value.notes;
   }
+  const notesOf2 = (columns, number) => rowLinks(
+    Object.fromEntries((columns ?? []).map((column) => [column, notes[String(column)] ?? {}])),
+    number
+  );
   const rowOf3 = /* @__PURE__ */ new Map();
   for (const index of pending()) {
     const each = at(index);
@@ -4005,7 +4013,12 @@ async function applySheetSync(host, request, clock = systemClock) {
       settle([index], failed2("E_GOOGLE_CHANGED", `${each.k} ${why}: ${CHANGED}`));
       continue;
     }
-    if (rowDigest(cellsAt.get(number) ?? [], rowLinks(links, number)) !== each.d) {
+    const digest = rowDigest(
+      cellsAt.get(number) ?? [],
+      rowLinks(links, number),
+      notesOf2(each.nc, number)
+    );
+    if (digest !== each.d) {
       settle([index], failed2("E_GOOGLE_CHANGED", `${each.k} (row ${number}): ${CHANGED}`));
       continue;
     }
@@ -4158,6 +4171,7 @@ function rowRequests(tab, operations, newTabs, sheetIdOf, destinations) {
   for (const [each, row] of operations) {
     if (each.kind !== "update" && each.kind !== "move" || row === void 0) continue;
     for (const [at, cell] of each.u) requests.push(cellsRequest(sheetId, row, at, [cell]));
+    for (const [at, note] of each.n) requests.push(noteRequest(sheetId, row, at, note));
   }
   const copied = /* @__PURE__ */ new Map();
   const copies = [];
@@ -4213,13 +4227,15 @@ function rowRequests(tab, operations, newTabs, sheetIdOf, destinations) {
       }
     });
   }
-  const added = operations.flatMap(([each]) => each.kind === "add" ? [each.c] : []);
+  const added = operations.flatMap(([each]) => each.kind === "add" ? [each] : []);
   if (added.length > 0) {
+    const noted = added.some((each) => each.n.length > 0);
     requests.push({
       appendCells: {
         sheetId,
-        rows: added.map((cells) => ({ values: cells.map(cellData) })),
-        fields: WRITTEN_FIELDS
+        rows: added.map((each) => ({ values: addedCells(each.c, each.n) })),
+        // A new row has no note to keep, so the mask asks for notes only when one is written.
+        fields: noted ? `${WRITTEN_FIELDS},note` : WRITTEN_FIELDS
       }
     });
   }
@@ -4249,6 +4265,29 @@ function cellsRequest(sheetId, row, column, cells) {
     }
   };
 }
+function noteRequest(sheetId, row, column, note) {
+  return {
+    updateCells: {
+      range: {
+        sheetId,
+        startRowIndex: row - 1,
+        endRowIndex: row,
+        startColumnIndex: column,
+        endColumnIndex: column + 1
+      },
+      rows: [{ values: [{ note }] }],
+      fields: "note"
+    }
+  };
+}
+function addedCells(cells, notes) {
+  const width = Math.max(cells.length, ...notes.map(([at]) => at + 1));
+  return Array.from({ length: width }, (_, at) => {
+    const data = cellData(cells[at] ?? null);
+    const note = notes.find(([column]) => column === at)?.[1];
+    return note === void 0 ? data : { ...data, note };
+  });
+}
 async function decodeOperation2(host, write, payload) {
   let object = recordOf4(payload);
   if (object === void 0) return UNREADABLE;
@@ -4266,7 +4305,7 @@ async function decodeOperation2(host, write, payload) {
   return ck === void 0 ? read : { ...read, ck };
 }
 function readOperation(write, object) {
-  const { h, s, kc, hd, k, d, t, c, u, dh, m } = object;
+  const { h, s, kc, hd, k, d, t, c, u, dh, m, n, nc } = object;
   if (!isDigest(h) || !isSheet(s)) return void 0;
   if (write === "add-tab") {
     const names = Array.isArray(c) ? c : [];
@@ -4285,24 +4324,42 @@ function readOperation(write, object) {
   if (typeof kc !== "number" || !Number.isSafeInteger(kc) || kc < 0 || !isDigest(hd) || typeof k !== "string" || k === "") {
     return void 0;
   }
-  const anchor = { h, s, kc, hd, k };
+  const columns = nc === void 0 ? [] : indexesOf(nc);
+  const notes = n === void 0 ? [] : notesOf(n);
+  if (columns === void 0 || notes === void 0) return void 0;
+  const anchor = { h, s, kc, hd, k, ...columns.length === 0 ? {} : { nc: columns } };
   if (write === "add") {
     const cells = cellsOf(c);
-    return cells === void 0 ? void 0 : { ...anchor, kind: "add", c: cells };
+    return cells === void 0 ? void 0 : { ...anchor, kind: "add", c: cells, n: notes };
   }
   if (!isDigest(d)) return void 0;
   if (write === "delete") return { ...anchor, kind: "delete", d };
-  const changes = u === void 0 && write === "move" ? [] : changesOf(u);
+  const changes = u === void 0 && (write === "move" || notes.length > 0) ? [] : changesOf(u);
   if (changes === void 0) return void 0;
   if (write === "move") {
     const pairs = pairsOf(m);
     if (pairs === void 0 || typeof t !== "string" || t === "" || !isDigest(dh)) {
       return void 0;
     }
-    return { ...anchor, kind: "move", d, t, dh, m: pairs, u: changes };
+    return { ...anchor, kind: "move", d, t, dh, m: pairs, u: changes, n: notes };
   }
-  if (write !== "update" || changes.length === 0) return void 0;
-  return { ...anchor, kind: "update", d, u: changes };
+  if (write !== "update" || changes.length + notes.length === 0) return void 0;
+  return { ...anchor, kind: "update", d, u: changes, n: notes };
+}
+function indexesOf(value) {
+  if (!Array.isArray(value) || !value.every(isIndex)) return void 0;
+  return value;
+}
+function notesOf(value) {
+  if (!Array.isArray(value)) return void 0;
+  const notes = [];
+  for (const change of value) {
+    if (!Array.isArray(change) || change.length !== 2) return void 0;
+    const [at, note] = change;
+    if (!isIndex(at) || typeof note !== "string") return void 0;
+    notes.push([at, note]);
+  }
+  return notes;
 }
 function changesOf(value) {
   if (!Array.isArray(value)) return void 0;
@@ -4617,6 +4674,24 @@ function readArguments(values, section) {
   };
 }
 
+// src/sheet-notes.ts
+function plannedNote(mode, current, value) {
+  const text = keyText(value);
+  if (text === "") return void 0;
+  const now = current ?? "";
+  if (mode === "set") return now === text ? void 0 : text;
+  const kept = now.trimEnd();
+  if (kept === text || kept.endsWith(`
+${text}`)) return void 0;
+  return kept === "" ? text : `${kept}
+${text}`;
+}
+function shownNote(name, mode, current, value, next) {
+  if (mode === "append") return `${name} note: + ${JSON.stringify(keyText(value))}`;
+  const before = current === void 0 || current === "" ? "(none)" : JSON.stringify(current);
+  return `${name} note: ${before} \u2192 ${JSON.stringify(next)}`;
+}
+
 // src/sheet-sync.ts
 var SHEET_SYNC = "google.sheet-sync";
 var SYNC_WRITES = ["add-tab", "update", "move", "delete", "add", "format-tab"];
@@ -4626,7 +4701,9 @@ var ARGUMENTS8 = [
   { name: "key", type: "text", required: true },
   { name: "move", type: "text" },
   { name: "keep", type: "text" },
-  { name: "archived", type: "text" }
+  { name: "archived", type: "text" },
+  { name: "notes", type: "text" },
+  { name: "note-mode", type: "text", values: ["set", "append"] }
 ];
 function sheetSyncVerb(host, clock = systemClock) {
   return {
@@ -4657,8 +4734,24 @@ async function planSheetSync(host, request) {
     request.section
   );
   if (typeof spreadsheetId !== "string") return refused6(spreadsheetId);
-  const columns = writeColumns(table, "");
-  if (!Array.isArray(columns)) return refused6(columns);
+  const written = writeColumns(table, "");
+  if (!Array.isArray(written)) return refused6(written);
+  const noteMode = text("note-mode") === "append" ? "append" : "set";
+  const noteSources = [];
+  for (const name of listOf5(text("notes"))) {
+    const source = written.find(
+      (column) => column.name.toLowerCase() === `${name.toLowerCase()}_note`
+    );
+    if (source === void 0) {
+      return refused6(
+        problem7(`notes= names '${name}', but the table has no column '${name}_note' to write`)
+      );
+    }
+    noteSources.push({ name, source: source.name });
+  }
+  const columns = written.filter(
+    (column) => !noteSources.some(({ source }) => source === column.name)
+  );
   const tableColumn = (name) => columns.find((column) => column.name.toLowerCase() === name.toLowerCase());
   const keyColumn = tableColumn(text("key"));
   if (keyColumn === void 0) {
@@ -4692,6 +4785,16 @@ async function planSheetSync(host, request) {
     );
   }
   const keepIndexes = new Set(keep.map(([, index]) => index));
+  const noted = [];
+  for (const { name, source } of noteSources) {
+    const at = columnIndexOf(names, name);
+    if (at === void 0) {
+      return refused6(
+        problem7(`notes= names '${name}', which the tab '${tab.title}' has no column for`)
+      );
+    }
+    noted.push({ at, source });
+  }
   const placed2 = [];
   const unplaced = [];
   for (const column of columns) {
@@ -4804,12 +4907,29 @@ async function planSheetSync(host, request) {
     client,
     spreadsheetId,
     tab,
-    { links: names.map((_, index) => index), notes: [] },
+    { links: names.map((_, index) => index), notes: noted.map(({ at }) => at) },
     lastRow
   );
   if (!extras.ok) return refused6(verbFailed(SHEET_SYNC, extras.error));
   const linkAt = (at, number) => extras.value.links[String(at)]?.[String(number)];
-  const digestOf2 = (row) => rowDigest(row.cells, rowLinks(extras.value.links, row.number));
+  const digestOf2 = (row) => rowDigest(
+    row.cells,
+    rowLinks(extras.value.links, row.number),
+    rowLinks(extras.value.notes, row.number)
+  );
+  const notesOf2 = (input, row) => {
+    const changes = [];
+    const shown2 = [];
+    for (const { at, source } of noted) {
+      const current = row === void 0 ? void 0 : extras.value.notes[String(at)]?.[String(row.number)];
+      const value = input.values[source];
+      const next = plannedNote(noteMode, current, value);
+      if (next === void 0) continue;
+      changes.push([at, next]);
+      shown2.push(shownNote(names[at] ?? "", noteMode, current, value, next));
+    }
+    return { changes, shown: shown2 };
+  };
   const changedOf = (cells, row) => {
     const changed2 = [];
     for (const [at, cell] of cells) {
@@ -4822,7 +4942,8 @@ async function planSheetSync(host, request) {
   };
   const s = `${spreadsheetId}/${tab.sheetId}`;
   const hd = headerDigest(names);
-  const anchor = (key) => ({ s, kc, hd, k: key });
+  const nc = noted.map(({ at }) => at);
+  const anchor = (key) => ({ s, kc, hd, k: key, ...nc.length === 0 ? {} : { nc } });
   const shownChanges = (changed2, row) => changed2.map(([at, cell]) => `${names[at] ?? ""}: ${shownRaw(row.cells[at])} \u2192 ${shownCell(cell)}`).join("; ");
   const preserved = [];
   let unchanged = 0;
@@ -4859,11 +4980,15 @@ async function planSheetSync(host, request) {
       continue;
     }
     const changed2 = changedOf(cells, row);
-    if (changed2.length === 0) {
+    const notes = notesOf2(input, row);
+    if (changed2.length === 0 && notes.changes.length === 0) {
       unchanged += 1;
       continue;
     }
-    const shown2 = shownChanges(changed2, row);
+    const shown2 = [
+      ...changed2.length === 0 ? [] : [shownChanges(changed2, row)],
+      ...notes.shown
+    ].join("; ");
     drafts.push({
       write: "update",
       rowKey: input.key,
@@ -4871,7 +4996,8 @@ async function planSheetSync(host, request) {
       payload: {
         ...anchor(key),
         d: digestOf2(row),
-        u: changed2.map(([at, cell]) => [at, cell])
+        ...changed2.length === 0 ? {} : { u: changed2.map(([at, cell]) => [at, cell]) },
+        ...notePayload(notes.changes)
       }
     });
   }
@@ -4909,10 +5035,16 @@ async function planSheetSync(host, request) {
   const moveDrafts = moves.map(({ key, row, destination, cells }) => {
     const header = destinations.get(destination) ?? names;
     const changed2 = changedOf(cells, row);
+    const input = inTable.get(key);
+    const notes = input === void 0 ? { changes: [], shown: [] } : notesOf2(input, row);
+    const writing = [
+      ...changed2.length === 0 ? [] : [shownChanges(changed2, row)],
+      ...notes.shown
+    ].join("; ");
     const base = {
       write: "move",
-      rowKey: inTable.get(key)?.key ?? key,
-      description: `move ${key} (row ${row.number}) to the tab '${destination}'` + (changed2.length === 0 ? "" : `, writing ${shownChanges(changed2, row)}`)
+      rowKey: input?.key ?? key,
+      description: `move ${key} (row ${row.number}) to the tab '${destination}'` + (writing === "" ? "" : `, writing ${writing}`)
     };
     if (typeof header === "string") return { ...base, failure: `E_GOOGLE_PLAN: ${header}` };
     const filled2 = (at) => {
@@ -4942,7 +5074,8 @@ async function planSheetSync(host, request) {
         t: typeof title === "string" ? destination : title.title,
         dh: headerDigest(header),
         m: pairs,
-        ...changed2.length === 0 ? {} : { u: changed2.map(([at, cell]) => [at, cell]) }
+        ...changed2.length === 0 ? {} : { u: changed2.map(([at, cell]) => [at, cell]) },
+        ...notePayload(notes.changes)
       }
     };
   });
@@ -4970,11 +5103,12 @@ async function planSheetSync(host, request) {
       continue;
     }
     const line = trimmed(names.map((_, at) => cells.get(at) ?? null));
+    const notes = notesOf2(row, void 0);
     addDrafts.push({
       write: "add",
       rowKey: row.key,
-      description: `add ${key}: ${line.map(shownCell).join(" | ")}`,
-      payload: { ...anchor(key), c: line }
+      description: `add ${key}: ${line.map(shownCell).join(" | ")}` + notes.shown.map((each) => `; ${each}`).join(""),
+      payload: { ...anchor(key), c: line, ...notePayload(notes.changes) }
     });
   }
   const writes = (list) => list.filter((each) => each.payload !== void 0 && each.failure === void 0).length;
@@ -5110,6 +5244,9 @@ function sameCell(cell, raw, link) {
   if (typeof cell !== "object")
     return value === cell && (typeof cell !== "string" || link === void 0);
   return "t" in cell && value === cell.t && link === cell.u;
+}
+function notePayload(changes) {
+  return changes.length === 0 ? {} : { n: changes.map(([at, note]) => [at, note]) };
 }
 function formatPayload(want) {
   return {

@@ -20,6 +20,7 @@ import {
   readValues,
   type GridTab,
 } from './sheet-snapshot.js';
+import { plannedNote, shownNote, type NoteChange, type NoteMode } from './sheet-notes.js';
 import { applySheetSync, headerDigest, keyText, rowDigest, rowLinks } from './sheet-sync-apply.js';
 import {
   forgetOldPlans,
@@ -54,13 +55,17 @@ const ARGUMENTS: readonly ArgumentSpec[] = [
   { name: 'move', type: 'text' },
   { name: 'keep', type: 'text' },
   { name: 'archived', type: 'text' },
+  { name: 'notes', type: 'text' },
+  { name: 'note-mode', type: 'text', values: ['set', 'append'] },
 ];
 
 export type SheetSyncHost = Pick<PluginHost, 'fetch' | 'signin' | 'cache' | 'log'>;
 
 /**
- * `google.sheet-sync key=<col> tab=<tab> [move=<col>] [keep=<cols>] [archived=<tabs>]`: makes
- * one tab hold the table's rows, matched by key, as a plan a person applies.
+ * `google.sheet-sync key=<col> tab=<tab> [move=<col>] [keep=<cols>] [archived=<tabs>]
+ * [notes=<cols> [note-mode=set|append]]`: makes one tab hold the table's rows, matched by key,
+ * as a plan a person applies. Each `notes=` column's note is written from the table's
+ * `<column>_note`, the name `google.sheet-rows notes=` reads it back as.
  *
  * The decisions are Buraqueira's `sync.py` (2026-08-09), with its company columns turned into
  * arguments. For each key:
@@ -106,6 +111,8 @@ export interface RowAnchor {
   readonly hd: string;
   /** The row's key. */
   readonly k: string;
+  /** The columns whose notes the row's digest covers, when `notes=` names any. */
+  readonly nc?: readonly number[];
 }
 
 interface SheetRow {
@@ -150,8 +157,25 @@ export async function planSheetSync(
     request.section,
   );
   if (typeof spreadsheetId !== 'string') return refused(spreadsheetId);
-  const columns = writeColumns(table, '');
-  if (!Array.isArray(columns)) return refused(columns);
+  const written = writeColumns(table, '');
+  if (!Array.isArray(written)) return refused(written);
+  // Each notes= column's note comes from the table's `<column>_note`, which is no cell.
+  const noteMode: NoteMode = text('note-mode') === 'append' ? 'append' : 'set';
+  const noteSources: { readonly name: string; readonly source: string }[] = [];
+  for (const name of listOf(text('notes'))) {
+    const source = written.find(
+      (column) => column.name.toLowerCase() === `${name.toLowerCase()}_note`,
+    );
+    if (source === undefined) {
+      return refused(
+        problem(`notes= names '${name}', but the table has no column '${name}_note' to write`),
+      );
+    }
+    noteSources.push({ name, source: source.name });
+  }
+  const columns = written.filter(
+    (column) => !noteSources.some(({ source }) => source === column.name),
+  );
   const tableColumn = (name: string): WriteColumn | undefined =>
     columns.find((column) => column.name.toLowerCase() === name.toLowerCase());
   const keyColumn = tableColumn(text('key'));
@@ -187,6 +211,17 @@ export async function planSheetSync(
     );
   }
   const keepIndexes = new Set(keep.map(([, index]) => index as number));
+  // A note is not the cell's value: a keep= column's note is written too.
+  const noted: { readonly at: number; readonly source: string }[] = [];
+  for (const { name, source } of noteSources) {
+    const at = columnIndexOf(names, name);
+    if (at === undefined) {
+      return refused(
+        problem(`notes= names '${name}', which the tab '${tab.title}' has no column for`),
+      );
+    }
+    noted.push({ at, source });
+  }
 
   // Where each table column lands; keep= columns are the person's, never overwritten.
   const placed: { readonly column: WriteColumn; readonly at: number }[] = [];
@@ -313,14 +348,34 @@ export async function planSheetSync(
     client,
     spreadsheetId,
     tab,
-    { links: names.map((_, index) => index), notes: [] },
+    { links: names.map((_, index) => index), notes: noted.map(({ at }) => at) },
     lastRow,
   );
   if (!extras.ok) return refused(verbFailed(SHEET_SYNC, extras.error));
   const linkAt = (at: number, number: number): string | undefined =>
     extras.value.links[String(at)]?.[String(number)];
+  // Notes are read by column then row, as links are: a note changed before Apply fails the row.
   const digestOf = (row: SheetRow): string =>
-    rowDigest(row.cells, rowLinks(extras.value.links, row.number));
+    rowDigest(
+      row.cells,
+      rowLinks(extras.value.links, row.number),
+      rowLinks(extras.value.notes, row.number),
+    );
+  /** The notes the table changes, and how the plan shows each; a row not in the tab has none. */
+  const notesOf = (input: (typeof table.rows)[number], row: SheetRow | undefined) => {
+    const changes: NoteChange[] = [];
+    const shown: string[] = [];
+    for (const { at, source } of noted) {
+      const current =
+        row === undefined ? undefined : extras.value.notes[String(at)]?.[String(row.number)];
+      const value = input.values[source];
+      const next = plannedNote(noteMode, current, value);
+      if (next === undefined) continue;
+      changes.push([at, next]);
+      shown.push(shownNote(names[at] ?? '', noteMode, current, value, next));
+    }
+    return { changes, shown };
+  };
   /** The table's cells that would change the sheet's, with the sheet's link where it reads one. */
   const changedOf = (cells: ReadonlyMap<number, WriteCell>, row: SheetRow) => {
     const changed: [number, WriteCell][] = [];
@@ -335,7 +390,8 @@ export async function planSheetSync(
 
   const s = `${spreadsheetId}/${tab.sheetId}`;
   const hd = headerDigest(names);
-  const anchor = (key: string) => ({ s, kc, hd, k: key });
+  const nc = noted.map(({ at }) => at);
+  const anchor = (key: string) => ({ s, kc, hd, k: key, ...(nc.length === 0 ? {} : { nc }) });
   const shownChanges = (changed: readonly (readonly [number, WriteCell])[], row: SheetRow) =>
     changed
       .map(([at, cell]) => `${names[at] ?? ''}: ${shownRaw(row.cells[at])} → ${shownCell(cell)}`)
@@ -380,11 +436,15 @@ export async function planSheetSync(
       continue;
     }
     const changed = changedOf(cells, row);
-    if (changed.length === 0) {
+    const notes = notesOf(input, row);
+    if (changed.length === 0 && notes.changes.length === 0) {
       unchanged += 1;
       continue;
     }
-    const shown = shownChanges(changed, row);
+    const shown = [
+      ...(changed.length === 0 ? [] : [shownChanges(changed, row)]),
+      ...notes.shown,
+    ].join('; ');
     drafts.push({
       write: 'update',
       rowKey: input.key,
@@ -392,7 +452,8 @@ export async function planSheetSync(
       payload: {
         ...anchor(key),
         d: digestOf(row),
-        u: changed.map(([at, cell]) => [at, cell]),
+        ...(changed.length === 0 ? {} : { u: changed.map(([at, cell]) => [at, cell]) }),
+        ...notePayload(notes.changes),
       },
     });
   }
@@ -435,12 +496,18 @@ export async function planSheetSync(
   const moveDrafts: Draft[] = moves.map(({ key, row, destination, cells }) => {
     const header = destinations.get(destination) ?? names;
     const changed = changedOf(cells, row);
+    const input = inTable.get(key);
+    const notes = input === undefined ? { changes: [], shown: [] } : notesOf(input, row);
+    const writing = [
+      ...(changed.length === 0 ? [] : [shownChanges(changed, row)]),
+      ...notes.shown,
+    ].join('; ');
     const base = {
       write: 'move' as const,
-      rowKey: inTable.get(key)?.key ?? key,
+      rowKey: input?.key ?? key,
       description:
         `move ${key} (row ${row.number}) to the tab '${destination}'` +
-        (changed.length === 0 ? '' : `, writing ${shownChanges(changed, row)}`),
+        (writing === '' ? '' : `, writing ${writing}`),
     };
     if (typeof header === 'string') return { ...base, failure: `E_GOOGLE_PLAN: ${header}` };
     // The row travels by copyPaste, cell by cell under the column of its name: what the
@@ -473,6 +540,7 @@ export async function planSheetSync(
         dh: headerDigest(header),
         m: pairs,
         ...(changed.length === 0 ? {} : { u: changed.map(([at, cell]) => [at, cell]) }),
+        ...notePayload(notes.changes),
       },
     };
   });
@@ -501,11 +569,14 @@ export async function planSheetSync(
       continue;
     }
     const line = trimmed(names.map((_, at) => cells.get(at) ?? null));
+    const notes = notesOf(row, undefined);
     addDrafts.push({
       write: 'add',
       rowKey: row.key,
-      description: `add ${key}: ${line.map(shownCell).join(' | ')}`,
-      payload: { ...anchor(key), c: line },
+      description:
+        `add ${key}: ${line.map(shownCell).join(' | ')}` +
+        notes.shown.map((each) => `; ${each}`).join(''),
+      payload: { ...anchor(key), c: line, ...notePayload(notes.changes) },
     });
   }
 
@@ -667,6 +738,10 @@ function sameCell(cell: WriteCell, raw: RawCell | undefined, link: string | unde
   if (typeof cell !== 'object')
     return value === cell && (typeof cell !== 'string' || link === undefined);
   return 't' in cell && value === cell.t && link === cell.u;
+}
+
+function notePayload(changes: readonly NoteChange[]): Readonly<Record<string, JsonValue>> {
+  return changes.length === 0 ? {} : { n: changes.map(([at, note]) => [at, note]) };
 }
 
 function formatPayload(want: FormatWant): Readonly<Record<string, JsonValue>> {
