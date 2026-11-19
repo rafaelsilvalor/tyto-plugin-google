@@ -41,7 +41,12 @@ export interface Outgoing {
   readonly method: Method;
   readonly url: string;
   readonly headers: Readonly<Record<string, string>>;
-  readonly body?: string;
+  readonly body?: string | Uint8Array;
+  /**
+   * A resumable upload's request (Drive's `uploadType=resumable`), whose 308 means "resume
+   * incomplete" and carries no `Location`: answered as it is, never read as a redirect.
+   */
+  readonly resumable?: boolean;
   /** `GET sheets/values`: what a message names. Never carries a secret. */
   readonly label: string;
 }
@@ -112,7 +117,7 @@ export async function send(
     }
 
     const { status, headers } = response;
-    if (status >= 300 && status < 400) {
+    if (status >= 300 && status < 400 && !(outgoing.resumable === true && status === 308)) {
       const location = headerOf(headers, 'location');
       return googleError(
         'E_GOOGLE_REDIRECT',
@@ -189,6 +194,19 @@ export interface GoogleClient {
   put(url: string, body: unknown, query?: Query): Promise<GoogleResult<unknown>>;
   patch(url: string, body: unknown, query?: Query): Promise<GoogleResult<unknown>>;
   delete(url: string, query?: Query): Promise<GoogleResult<unknown>>;
+  /**
+   * One request of a resumable upload: a 2xx or a 308 is the answer, with its headers (the
+   * session's `Location`, the `Range` Drive holds); anything else is a classified failure.
+   */
+  upload(method: Method, url: string, request: UploadRequest): Promise<GoogleResult<Answer>>;
+}
+
+/** What a resumable upload's request adds to a plain one: its own headers and a raw body. */
+export interface UploadRequest {
+  readonly query?: Query;
+  readonly headers?: Readonly<Record<string, string>>;
+  /** JSON metadata (an object), or the bytes of one chunk. */
+  readonly body?: Uint8Array | object;
 }
 
 export interface GoogleClientOptions {
@@ -210,7 +228,7 @@ export function createGoogleClient(options: GoogleClientOptions): GoogleClient {
     query: Query | undefined,
     body: unknown,
   ): Promise<GoogleResult<unknown>> {
-    const answer = await exchange(method, address, query, body);
+    const answer = await exchange(method, address, query, { body });
     if (!answer.ok) return answer;
     const { status, text, label } = answer.value;
     if (text.trim() === '') return googleOk(null);
@@ -230,11 +248,15 @@ export function createGoogleClient(options: GoogleClientOptions): GoogleClient {
     method: Method,
     address: string,
     query: Query | undefined,
-    body: unknown,
-    accept = 'application/json',
-  ): Promise<
-    GoogleResult<{ readonly status: number; readonly text: string; readonly label: string }>
-  > {
+    options: {
+      readonly body?: unknown;
+      readonly accept?: string;
+      readonly headers?: Readonly<Record<string, string>>;
+      readonly resumable?: boolean;
+    },
+  ): Promise<GoogleResult<Answer & { readonly label: string }>> {
+    const { body, accept = 'application/json', resumable = false } = options;
+    const raw = body instanceof Uint8Array;
     const url = urlOf(address, query);
     if (!url.ok) return url;
     const label = `${method} ${url.value.host}${url.value.pathname}`;
@@ -252,36 +274,40 @@ export function createGoogleClient(options: GoogleClientOptions): GoogleClient {
           headers: {
             Accept: accept,
             Authorization: `Bearer ${token.value}`,
-            ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+            ...(body === undefined || raw ? {} : { 'Content-Type': 'application/json' }),
+            ...options.headers,
           },
-          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          ...(body === undefined ? {} : { body: raw ? body : JSON.stringify(body) }),
+          ...(resumable ? { resumable } : {}),
         },
         redact,
       );
       if (!answer.ok) return answer;
-      const { status, text } = answer.value;
+      const { status, text, headers } = answer.value;
       if (status === 401 && attempt === 0) {
         tokens.invalidate();
         continue;
       }
-      if (status < 200 || status >= 300) {
+      if ((status < 200 || status >= 300) && !(resumable && status === 308)) {
         const failure = classifyFailure(label, status, text);
         return { ok: false, error: { ...failure, message: redact(failure.message) } };
       }
-      return googleOk({ status, text, label });
+      return googleOk({ status, text, headers, label });
     }
   }
 
   return {
     get: (url, query) => request('GET', url, query, undefined),
     async getText(url, query) {
-      const answer = await exchange('GET', url, query, undefined, '*/*');
+      const answer = await exchange('GET', url, query, { accept: '*/*' });
       return answer.ok ? googleOk(answer.value.text) : answer;
     },
     post: (url, body, query) => request('POST', url, query, body),
     put: (url, body, query) => request('PUT', url, query, body),
     patch: (url, body, query) => request('PATCH', url, query, body),
     delete: (url, query) => request('DELETE', url, query, undefined),
+    upload: (method, url, request) =>
+      exchange(method, url, request.query, { ...request, resumable: true }),
   };
 }
 
@@ -306,7 +332,10 @@ function urlOf(address: string, query: Query | undefined): GoogleResult<URL> {
   return googleOk(url);
 }
 
-function headerOf(headers: Readonly<Record<string, string>>, name: string): string | undefined {
+export function headerOf(
+  headers: Readonly<Record<string, string>>,
+  name: string,
+): string | undefined {
   for (const [key, value] of Object.entries(headers)) {
     if (key.toLowerCase() === name) return value;
   }

@@ -383,7 +383,7 @@ async function parentOf(
 }
 
 /** `count` new ids for the person's Drive, at most 1,000 a call. */
-async function generateIds(
+export async function generateIds(
   client: GoogleClient,
   count: number,
 ): Promise<GoogleResult<readonly string[]>> {
@@ -420,7 +420,7 @@ function malformedIds(): GoogleError {
   };
 }
 
-const warning = (message: string): Diagnostic => ({
+export const warning = (message: string): Diagnostic => ({
   severity: 'warning',
   code: 'E_RECIPE_VERB',
   message: shortened(message),
@@ -618,7 +618,7 @@ export async function applyCreates(
 }
 
 /** One create, or `undefined` when the call's time ran out before it was answered. */
-async function create(
+export async function create(
   client: GoogleClient,
   payload: CreatePayload,
 ): Promise<AppliedOperation | undefined> {
@@ -648,7 +648,7 @@ async function create(
   return failed(describeGoogleError(made.error));
 }
 
-function isPlannedFailure(value: unknown): value is { readonly x: string } {
+export function isPlannedFailure(value: unknown): value is { readonly x: string } {
   return (
     typeof value === 'object' &&
     value !== null &&
@@ -664,7 +664,7 @@ function recordOf(value: unknown): Readonly<Record<string, unknown>> | undefined
 
 const filled = (value: unknown): value is string => typeof value === 'string' && value !== '';
 
-function isCreatePayload(value: unknown): value is CreatePayload {
+export function isCreatePayload(value: unknown): value is CreatePayload {
   const record = recordOf(value);
   return (
     record !== undefined &&
@@ -688,8 +688,8 @@ function isSharePayload(value: unknown): value is SharePayload {
   );
 }
 
-/** A row the plan knows cannot be created: shown with the others, `failed` with no request. */
-function plannedFailure(row: Row, reason: string): PlannedOperation {
+/** A row the plan knows cannot be written: shown with the others, `failed` with no request. */
+export function plannedFailure(row: Row, reason: string): PlannedOperation {
   const text = shortened(`E_GOOGLE_PLAN: ${row.key}: ${reason}`);
   return {
     write: CREATE_WRITE,
@@ -702,7 +702,7 @@ function plannedFailure(row: Row, reason: string): PlannedOperation {
 const refused = (diagnostic: Diagnostic): PlanAnswer => ({ ok: false, error: [diagnostic] });
 
 /** A column by its name; case is ignored when only one column matches. */
-function columnOf(
+export function columnOf(
   table: Table,
   argument: string,
   name: string,
