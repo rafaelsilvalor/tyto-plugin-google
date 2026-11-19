@@ -3558,6 +3558,7 @@ async function forgetPlannedFolder(host, parentId, name) {
 var DRIVE_UPLOADS = "https://www.googleapis.com/upload/drive/v3/files";
 var CHUNK_BYTES = 8 * 1024 * 1024;
 var RESUMES_PER_FILE = 3;
+var NOT_REACHED2 = { status: "continue" };
 async function applyDriveUploads(host, request, clock = systemClock) {
   const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
   const outcomes = request.operations.map(() => void 0);
@@ -3601,7 +3602,7 @@ async function applyDriveUploads(host, request, clock = systemClock) {
   return {
     ok: true,
     value: {
-      operations: outcomes.map((outcome) => outcome ?? { status: "skipped", reason: NOT_REACHED })
+      operations: outcomes.map((outcome) => outcome ?? NOT_REACHED2)
     },
     diagnostics: []
   };
@@ -3772,10 +3773,7 @@ function expired(error) {
   return error.status === 404 || error.status === 410;
 }
 function progress(offset, size) {
-  return {
-    status: "skipped",
-    reason: `sent ${sizeText(offset)} of ${sizeText(size)} in this call's time; run the cell and Apply again to go on from there`
-  };
+  return { status: "continue", progress: `sent ${sizeText(offset)} of ${sizeText(size)}` };
 }
 
 // src/drive-upload.ts

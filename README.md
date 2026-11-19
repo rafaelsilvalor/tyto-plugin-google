@@ -572,11 +572,14 @@ a 100 MB editable never sits in memory whole. A chunk Drive loses (a 5xx, no ans
 by asking the session how far it got, and the upload goes on from there; a 429 waits as every
 request does (see [Retries](#retries)).
 
-**A big file takes more than one Apply.** One Apply spends at most 20 s, under Tyto's 30 s for a
-plugin call, and starts a chunk only when the last one's time still fits. A file not finished is
-`skipped`, saying how much was sent: run the cell and Apply again, and it goes on from there,
-because the session is kept in the plugin's cache (Drive keeps one for a week). Until Tyto calls
-an Apply again on its own for such a file (TYTO-791), you apply until it reads `applied`.
+**A big file finishes in one Apply, over several calls.** One call spends at most 20 s, under
+Tyto's 30 s for a plugin call, and starts a chunk only when the last one's time still fits. A file
+not finished answers `continue` with how much was sent (`sent 16.8 MB of 40.0 MB`), and Tyto asks
+again within the same Apply (Tyto ADR 0216), showing that line while it runs; a file the call did
+not reach answers `continue` too. Each call goes on where the last stopped, because the session
+is kept in the plugin's cache (Drive keeps one for a week). **Cancel** stops between calls: a file
+still in progress is `failed` as unfinished, and the next run's Apply goes on from its session.
+It needs a Tyto on plugin API 0.26 or later, which the manifest's `engine` requires.
 
 A local file changed since the plan, or while it was sent, fails with `E_GOOGLE_CHANGED`. An
 Apply run twice sends nothing again: a file already in Drive as planned counts as `applied`.
