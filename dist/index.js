@@ -3526,6 +3526,34 @@ function declaredColumns(written) {
   return names;
 }
 
+// src/planned-folder.ts
+function plannedFolderKey(parentId, name) {
+  return `planned-folder/${fingerprint(JSON.stringify([parentId, name]))}`;
+}
+var DRIVE_ID3 = /^[A-Za-z0-9_-]{10,}$/;
+async function plannedFolderId(host, parentId, name) {
+  try {
+    const entry = await host.cache.get(plannedFolderKey(parentId, name));
+    if (entry === void 0) return void 0;
+    const id = new TextDecoder().decode(entry.bytes);
+    return DRIVE_ID3.test(id) ? id : void 0;
+  } catch {
+    return void 0;
+  }
+}
+async function rememberPlannedFolder(host, parentId, name, id) {
+  try {
+    await host.cache.put(plannedFolderKey(parentId, name), id);
+  } catch {
+  }
+}
+async function forgetPlannedFolder(host, parentId, name) {
+  try {
+    await host.cache.delete(plannedFolderKey(parentId, name));
+  } catch {
+  }
+}
+
 // src/drive-upload-apply.ts
 var DRIVE_UPLOADS = "https://www.googleapis.com/upload/drive/v3/files";
 var CHUNK_BYTES = 8 * 1024 * 1024;
@@ -3551,6 +3579,7 @@ async function applyDriveUploads(host, request, clock = systemClock) {
       const made = await create(client, payload);
       if (made === void 0 || budget.refusedForTime()) break;
       if (made.status === "failed") notCreated.set(payload.c, made.reason ?? "failed");
+      else await forgetPlannedFolder(host, payload.p, payload.n);
       outcomes[index] = made;
       continue;
     }
@@ -3944,9 +3973,9 @@ async function planFolder(walk, path, name, parent, parentExists, depth) {
   }
   const exists = folder !== void 0;
   if (folder === void 0) {
-    const ids = await generateIds(walk.client, 1);
-    if (!ids.ok) return ids;
-    const id = ids.value[0] ?? "";
+    const planned = await idFor(walk, parent.id, name);
+    if (!planned.ok) return planned;
+    const id = planned.value;
     folder = { id, name };
     const payload = { c: id, n: name, p: parent.id, m: FOLDER_MIME_TYPE };
     walk.operations.push({
@@ -3976,6 +4005,19 @@ async function planFolder(walk, path, name, parent, parentExists, depth) {
     if (!step.ok) return step;
   }
   return DONE;
+}
+async function idFor(walk, parentId, name) {
+  const kept = await plannedFolderId(walk.host, parentId, name);
+  if (kept !== void 0) {
+    const there = await getFile(walk.client, kept);
+    if (!there.ok && there.error.status === 404) return googleOk(kept);
+    if (!there.ok) return there;
+  }
+  const ids = await generateIds(walk.client, 1);
+  if (!ids.ok) return ids;
+  const id = ids.value[0] ?? "";
+  await rememberPlannedFolder(walk.host, parentId, name, id);
+  return googleOk(id);
 }
 async function allChildren(client, folderId) {
   const files = [];
@@ -4058,6 +4100,7 @@ async function folderUrls(host, request) {
   }
   const urls = /* @__PURE__ */ new Map();
   const ambiguous = [];
+  const planned = [];
   if (distinct.length > 0) {
     const connection = await connect(host, request.section);
     if (!connection.ok) return refused7(verbFailed(DRIVE_URL, connection.error));
@@ -4084,10 +4127,12 @@ async function folderUrls(host, request) {
       if (!named.ok) return refused7(verbFailed(DRIVE_URL, named.error));
       const [only, ...more] = named.value;
       if (more.length > 0) ambiguous.push(name);
-      urls.set(
-        name,
-        only === void 0 || more.length > 0 ? null : `https://drive.google.com/drive/folders/${only.id}`
-      );
+      let id = more.length > 0 ? void 0 : only?.id;
+      if (only === void 0) {
+        id = await plannedFolderId(host, parent, name);
+        if (id !== void 0) planned.push(name);
+      }
+      urls.set(name, id === void 0 ? null : `https://drive.google.com/drive/folders/${id}`);
     }
   }
   return {
@@ -4102,16 +4147,22 @@ async function folderUrls(host, request) {
         };
       })
     },
-    diagnostics: ambiguous.length === 0 ? [] : [
-      {
-        severity: "warning",
-        code: "E_RECIPE_VERB",
-        message: shortened(
+    diagnostics: [
+      ...ambiguous.length === 0 ? [] : [
+        warned(
           `'${DRIVE_URL}' left ${added} empty for ${listed(ambiguous)}: more than one folder of that name is there; keep one.`
         )
-      }
+      ],
+      ...planned.length === 0 ? [] : [
+        warned(
+          `'${DRIVE_URL}' gave ${added} for ${listed(planned)} as the address the upload above planned: the folder will be created by the upload above when its plan is applied.`
+        )
+      ]
     ]
   };
+}
+function warned(message) {
+  return { severity: "warning", code: "E_RECIPE_VERB", message: shortened(message) };
 }
 
 // src/sheet-create.ts

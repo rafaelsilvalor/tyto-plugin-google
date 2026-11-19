@@ -15,6 +15,7 @@ import {
 import {
   childrenNamed,
   childrenNamedOfType,
+  getFile,
   listChildren,
   textArgument,
   type DriveFile,
@@ -23,7 +24,8 @@ import { destinationOf, type Destination } from './drive-move.js';
 import { FOLDER_MIME_TYPE } from './drive-query.js';
 import { rootWalk } from './drive-root.js';
 import { applyDriveUploads } from './drive-upload-apply.js';
-import { messageOf, type GoogleError } from './errors.js';
+import { googleOk, messageOf, type GoogleError, type GoogleResult } from './errors.js';
+import { plannedFolderId, rememberPlannedFolder } from './planned-folder.js';
 import { budgetedTransport, systemClock, type WriteClock } from './sheet-write-apply.js';
 import { listed, MAX_OPERATIONS, shortened } from './sheet-write.js';
 import {
@@ -334,9 +336,9 @@ async function planFolder(
   }
   const exists = folder !== undefined;
   if (folder === undefined) {
-    const ids = await generateIds(walk.client, 1);
-    if (!ids.ok) return ids;
-    const id = ids.value[0] ?? '';
+    const planned = await idFor(walk, parent.id, name);
+    if (!planned.ok) return planned;
+    const id = planned.value;
     folder = { id, name };
     const payload: CreatePayload = { c: id, n: name, p: parent.id, m: FOLDER_MIME_TYPE };
     walk.operations.push({
@@ -371,6 +373,26 @@ async function planFolder(
     if (!step.ok) return step;
   }
   return DONE;
+}
+
+/**
+ * The id of a folder this plan creates: the one an earlier plan kept for the same folder and
+ * name, while Drive has nothing under it, or a new one, kept for the next plan and for
+ * `google.drive-url` below (see `planned-folder.ts`).
+ */
+async function idFor(walk: Walk, parentId: string, name: string): Promise<GoogleResult<string>> {
+  const kept = await plannedFolderId(walk.host, parentId, name);
+  if (kept !== undefined) {
+    const there = await getFile(walk.client, kept);
+    if (!there.ok && there.error.status === 404) return googleOk(kept);
+    if (!there.ok) return there;
+    // Something holds the id already (a folder made from it, then trashed or moved): a new one.
+  }
+  const ids = await generateIds(walk.client, 1);
+  if (!ids.ok) return ids;
+  const id = ids.value[0] ?? '';
+  await rememberPlannedFolder(walk.host, parentId, name, id);
+  return googleOk(id);
 }
 
 /** Every child of a folder, page after page. */

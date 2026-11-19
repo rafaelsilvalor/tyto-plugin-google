@@ -6,6 +6,7 @@ import { childrenNamedOfType, textArgument } from './drive-files.js';
 import { destinationOf } from './drive-move.js';
 import { FOLDER_MIME_TYPE } from './drive-query.js';
 import { rootWalk } from './drive-root.js';
+import { plannedFolderId } from './planned-folder.js';
 import { listed, shortened } from './sheet-write.js';
 import {
   argumentsProblem,
@@ -19,13 +20,14 @@ import {
 
 export const DRIVE_URL = 'google.drive-url';
 
-export type DriveUrlHost = Pick<PluginHost, 'fetch' | 'signin'>;
+export type DriveUrlHost = Pick<PluginHost, 'fetch' | 'signin' | 'cache'>;
 
 /**
  * `google.drive-url path=<column> [in=<folder>]`: adds `<column>_url`, the address of the Drive
  * folder `google.drive-upload` sends each row's workspace folder to: the folder named as the
- * path's last segment, directly in `in=` (the section's `root` by default). Empty while no such
- * folder is there, so a recipe can run it before the first upload is applied.
+ * path's last segment, directly in `in=` (the section's `root` by default). While no such
+ * folder is there, the address the upload above planned for it (TYTO-758), with a warning, or
+ * empty when no upload planned one, so a recipe can run it before the first upload is applied.
  */
 export function driveUrlVerb(host: DriveUrlHost): RecipeVerbContribution {
   return {
@@ -88,6 +90,7 @@ export async function folderUrls(
 
   const urls = new Map<string, string | null>();
   const ambiguous: string[] = [];
+  const planned: string[] = [];
   if (distinct.length > 0) {
     const connection = await connect(host, request.section);
     if (!connection.ok) return refused(verbFailed(DRIVE_URL, connection.error));
@@ -114,12 +117,12 @@ export async function folderUrls(
       if (!named.ok) return refused(verbFailed(DRIVE_URL, named.error));
       const [only, ...more] = named.value;
       if (more.length > 0) ambiguous.push(name);
-      urls.set(
-        name,
-        only === undefined || more.length > 0
-          ? null
-          : `https://drive.google.com/drive/folders/${only.id}`,
-      );
+      let id = more.length > 0 ? undefined : only?.id;
+      if (only === undefined) {
+        id = await plannedFolderId(host, parent, name);
+        if (id !== undefined) planned.push(name);
+      }
+      urls.set(name, id === undefined ? null : `https://drive.google.com/drive/folders/${id}`);
     }
   }
 
@@ -135,18 +138,28 @@ export async function folderUrls(
         };
       }),
     },
-    diagnostics:
-      ambiguous.length === 0
+    diagnostics: [
+      ...(ambiguous.length === 0
         ? []
         : [
-            {
-              severity: 'warning',
-              code: 'E_RECIPE_VERB',
-              message: shortened(
-                `'${DRIVE_URL}' left ${added} empty for ${listed(ambiguous)}: more than one ` +
-                  'folder of that name is there; keep one.',
-              ),
-            },
-          ],
+            warned(
+              `'${DRIVE_URL}' left ${added} empty for ${listed(ambiguous)}: more than one ` +
+                'folder of that name is there; keep one.',
+            ),
+          ]),
+      ...(planned.length === 0
+        ? []
+        : [
+            warned(
+              `'${DRIVE_URL}' gave ${added} for ${listed(planned)} as the address the upload ` +
+                'above planned: the folder will be created by the upload above when its plan ' +
+                'is applied.',
+            ),
+          ]),
+    ],
   };
+}
+
+function warned(message: string): Diagnostic {
+  return { severity: 'warning', code: 'E_RECIPE_VERB', message: shortened(message) };
 }
