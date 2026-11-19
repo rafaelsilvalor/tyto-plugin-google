@@ -17,7 +17,6 @@ import { headerOf, type Answer, type GoogleClient } from './http.js';
 import {
   APPLY_BUDGET_MILLISECONDS,
   budgetedTransport,
-  NOT_REACHED,
   systemClock,
   type WriteClock,
 } from './sheet-write-apply.js';
@@ -35,11 +34,17 @@ const RESUMES_PER_FILE = 3;
 type Ended = AppliedOperation | undefined;
 
 /**
+ * What an operation this call did not reach answers: `continue` with no progress, so the host
+ * hands it back in the same Apply (Tyto ADR 0216) instead of the person applying again.
+ */
+const NOT_REACHED: AppliedOperation = { status: 'continue' };
+
+/**
  * One batch of a `google.drive-upload` plan, in its order: each `create` makes its folder as
  * `google.drive-folder` does; each `upload` or `replace` sends the file in chunks through a
- * resumable session, kept in the plugin's cache so the next Apply goes on where this one
- * stopped. Past the call's 20 s budget, what was not finished is `skipped`, saying how far it
- * got: the person runs the cell and applies again until it finishes.
+ * resumable session, kept in the plugin's cache so the next call goes on where this one
+ * stopped. Past the call's 20 s budget, what was not finished answers `continue`, an upload
+ * saying how far it got, and the host asks again within the same Apply (Tyto ADR 0216).
  */
 export async function applyDriveUploads(
   host: UploadHost,
@@ -93,7 +98,7 @@ export async function applyDriveUploads(
   return {
     ok: true,
     value: {
-      operations: outcomes.map((outcome) => outcome ?? { status: 'skipped', reason: NOT_REACHED }),
+      operations: outcomes.map((outcome) => outcome ?? NOT_REACHED),
     },
     diagnostics: [],
   };
@@ -204,8 +209,8 @@ async function finished(sending: Sending, payload: UploadPayload, key: string): 
 }
 
 /**
- * The session an earlier Apply kept. A host with no cache keeps none, so its uploads cannot go
- * on across Applies and start over each time: the same answer as a session Drive dropped.
+ * The session an earlier call kept. A host with no cache keeps none, so its uploads cannot go
+ * on across calls and start over each time: the same answer as a session Drive dropped.
  */
 async function cached(host: UploadHost, key: string): Promise<Uint8Array | undefined> {
   try {
@@ -328,11 +333,7 @@ function expired(error: GoogleError): boolean {
   return error.status === 404 || error.status === 410;
 }
 
+/** An upload this call left unfinished: the host asks again, and it goes on from `offset`. */
 function progress(offset: number, size: number): AppliedOperation {
-  return {
-    status: 'skipped',
-    reason:
-      `sent ${sizeText(offset)} of ${sizeText(size)} in this call's time; run the cell and ` +
-      'Apply again to go on from there',
-  };
+  return { status: 'continue', progress: `sent ${sizeText(offset)} of ${sizeText(size)}` };
 }

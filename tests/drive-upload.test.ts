@@ -1,6 +1,6 @@
 import type { FetchedResponse, HostCapabilities, WorkspaceEntry } from '@tyto/plugin-api';
 import type { TestRecipeOptions } from '@tyto/plugin-api/testing';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { applyDriveUploads } from '../src/drive-upload-apply.js';
 import { sessionKey, type UploadHost } from '../src/drive-upload.js';
@@ -158,10 +158,17 @@ async function plan(drive: FakeGoogleDrive, step: string, table: InputTable) {
   };
 }
 
-async function apply(drive: FakeGoogleDrive, planned: unknown) {
+/** What the host's Apply takes besides the plan (Tyto ADR 0216): a cancel and a progress line. */
+type ApplyOptions = Parameters<
+  NonNullable<
+    NonNullable<ReturnType<FakeGoogleDrive['plugin']['recipes']['verbs']['get']>>['apply']
+  >
+>[1];
+
+async function apply(drive: FakeGoogleDrive, planned: unknown, options?: ApplyOptions) {
   const verb = drive.plugin.recipes.verbs.get('google.drive-upload');
   if (verb?.apply === undefined) throw new Error('google.drive-upload has no apply');
-  const applied = await verb.apply(planned as Parameters<typeof verb.apply>[0]);
+  const applied = await verb.apply(planned as Parameters<typeof verb.apply>[0], options);
   if (!applied.ok) throw new Error(applied.error.map((item) => item.message).join('\n'));
   return applied.value.operations.map(({ status, reason }) => ({
     status,
@@ -326,7 +333,7 @@ describe('applyDriveUploads across calls', () => {
     return { uploadHost, calls, cache };
   }
 
-  it('stops before a chunk that would not fit, says how far it got, and the next Apply goes on', async () => {
+  it('stops before a chunk that would not fit, says how far it got, and the next call goes on', async () => {
     const files = new Map([
       ['a/big.psb', { size: 60 * MB, modifiedAt: '2026-11-18T10:00:00.000Z', seed: 3 }],
     ]);
@@ -352,21 +359,17 @@ describe('applyDriveUploads across calls', () => {
     };
     const first = await applyDriveUploads(uploadHost, request, clock);
     expect(first.ok && first.value.operations).toEqual([
-      {
-        status: 'skipped',
-        reason:
-          "sent 16.8 MB of 60.0 MB in this call's time; run the cell and Apply again to go on from there",
-      },
+      { status: 'continue', progress: 'sent 16.8 MB of 60.0 MB' },
     ]);
     expect(cache.size).toBe(1);
 
     const second = await applyDriveUploads(uploadHost, request, clock);
     expect(second.ok && second.value.operations).toEqual([
-      { status: 'skipped', reason: expect.stringMatching(/^sent 33\.6 MB of 60\.0 MB/) },
+      { status: 'continue', progress: 'sent 33.6 MB of 60.0 MB' },
     ]);
     const third = await applyDriveUploads(uploadHost, request, clock);
     expect(third.ok && third.value.operations).toEqual([
-      { status: 'skipped', reason: expect.stringMatching(/^sent 50\.3 MB of 60\.0 MB/) },
+      { status: 'continue', progress: 'sent 50.3 MB of 60.0 MB' },
     ]);
     const fourth = await applyDriveUploads(uploadHost, request, clock);
     expect(fourth.ok && fourth.value.operations).toEqual([{ status: 'applied' }]);
@@ -406,5 +409,94 @@ describe('applyDriveUploads across calls', () => {
     );
     expect(answer.ok && answer.value.operations).toEqual([{ status: 'applied' }]);
     expect(drive.items.find((item) => item.name === 'one.png')?.size).toBe(1000);
+  });
+});
+
+describe('one Apply over several calls (Tyto ADR 0216)', () => {
+  const cache = new Map<string, Uint8Array>();
+  /**
+   * The plugin in the harness measures its 20 s with the system clock: Date is faked, and every
+   * chunk Drive takes moves it by six seconds, so a call sends two chunks of 8 MiB.
+   */
+  async function bigFile(): Promise<FakeGoogleDrive> {
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.UTC(2026, 10, 19, 12) });
+    cache.clear();
+    const files = new Map([
+      ['a/big.psb', { size: 40 * MB, modifiedAt: '2026-11-18T10:00:00.000Z', seed: 5 }],
+      ...['one', 'two', 'three'].map((name, index): [string, LocalFile] => [
+        `a/${name}.png`,
+        { size: 300_000 + index, modifiedAt: '2026-11-18T10:00:00.000Z', seed: 6 + index },
+      ]),
+    ]);
+    await open?.plugin.close();
+    open = await fakeDrive(studio(), {
+      section: { root: ROOT_ID },
+      capabilities: workspace(files, cache),
+      onCall: (call) => {
+        if (call.method === 'PUT' && (call.bytes?.length ?? 0) > 0) {
+          vi.setSystemTime(Date.now() + 6_000);
+        }
+      },
+    });
+    return open;
+  }
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('finishes an upload that needs three calls in one Apply, with its progress in order', async () => {
+    const drive = await bigFile();
+    const planned = await plan(drive, STEP, input('a/big.psb'));
+    const notes: (string | undefined)[] = [];
+    expect(
+      await apply(drive, planned.plan, { onProgress: (progress) => notes.push(progress.note) }),
+    ).toEqual([{ status: 'applied' }]);
+    // Two calls left it in progress, each saying how far; the line after the batch has none.
+    expect(notes).toEqual(['sent 16.8 MB of 40.0 MB', 'sent 33.6 MB of 40.0 MB', undefined]);
+    expect(puts(drive)).toHaveLength(5);
+    expect(drive.calls.filter((call) => call.method === 'POST')).toHaveLength(1);
+    expect(named(drive, 'big.psb')?.size).toBe(40 * MB);
+    expect(cache.size).toBe(0);
+  });
+
+  it('hands back a file the call did not reach, so it is sent in the same Apply', async () => {
+    const drive = await bigFile();
+    const pngs = ['a/one.png', 'a/two.png', 'a/three.png'];
+    const planned = await plan(drive, STEP, input('a/big.psb', ...pngs));
+    // The first call sends two chunks of the big file and two PNGs, and its 20 s are spent
+    // before the third PNG: that one is handed back with the big file.
+    expect(await apply(drive, planned.plan)).toEqual([
+      { status: 'applied' },
+      { status: 'applied' },
+      { status: 'applied' },
+      { status: 'applied' },
+    ]);
+    expect(named(drive, 'three.png')?.size).toBe(300_002);
+    expect(drive.calls.filter((call) => call.method === 'POST')).toHaveLength(4);
+  });
+
+  it('leaves the upload unfinished when the Apply is cancelled after the first call', async () => {
+    const drive = await bigFile();
+    const planned = await plan(drive, STEP, input('a/big.psb'));
+    const cancel = { aborted: false };
+    const notes: (string | undefined)[] = [];
+    const applied = await apply(drive, planned.plan, {
+      cancel,
+      onProgress: (progress) => {
+        notes.push(progress.note);
+        cancel.aborted = true;
+      },
+    });
+    expect(applied).toEqual([
+      {
+        status: 'failed',
+        reason: 'unfinished: the Apply was cancelled; some may have been written',
+      },
+    ]);
+    expect(notes).toEqual(['sent 16.8 MB of 40.0 MB', undefined]);
+    // Nothing asked again after the cancel: two chunks sent, and the session kept for next time.
+    expect(puts(drive)).toHaveLength(2);
+    expect(named(drive, 'big.psb')).toBeUndefined();
+    expect(cache.size).toBe(1);
   });
 });

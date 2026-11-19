@@ -52,10 +52,10 @@ describe('tyto-plugin.json', () => {
 
   it('declares the Google sign-in with no client, which the person supplies (Tyto ADR 0192)', async () => {
     const plugin = await harness({ google: 'person-token' });
-    // The engine moves with the plugin API the plugin is built against (Tyto ADR 0154): 0.25
-    // brought `aspectOf` (Tyto ADR 0215), which tests/drive-count-parity.test.ts holds
-    // `shapeOf` equal to.
-    expect(plugin.manifest.engine).toBe('>=0.25');
+    // The engine moves with the plugin API the plugin is built against (Tyto ADR 0154): 0.26
+    // brought the `continue` answer (Tyto ADR 0216) `google.drive-upload` gives an unfinished
+    // file, which a host before it reads as no answer for the whole batch.
+    expect(plugin.manifest.engine).toBe('>=0.26');
     expect(plugin.manifest.signin).toEqual({
       google: {
         authorize:

@@ -114,6 +114,8 @@ export async function fakeDrive(
     readonly keychain?: boolean;
     /** Other ports over the harness's: a test's workspace files. */
     readonly capabilities?: Partial<HostCapabilities>;
+    /** Told of every request before it is answered: a test moves its clock there. */
+    readonly onCall?: (call: DriveCall) => void;
   } = {},
 ): Promise<FakeGoogleDrive> {
   const calls: DriveCall[] = [];
@@ -128,7 +130,9 @@ export async function fakeDrive(
         }),
     ...(options.section === undefined ? {} : { section: options.section }),
     async fetch(url: string, init: HostFetchInit) {
-      return driveAnswer(drive, calls, url, init);
+      const answer = driveAnswer(drive, calls, url, init);
+      options.onCall?.(calls.at(-1) as DriveCall);
+      return answer;
     },
   });
   if (!loaded.ok) {
