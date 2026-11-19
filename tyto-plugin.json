@@ -1,9 +1,14 @@
 {
   "name": "google",
   "version": "0.1.0",
-  "engine": ">=0.20",
+  "engine": ">=0.24",
   "contributes": ["recipe-verb"],
-  "permissions": ["net:sheets.googleapis.com", "net:www.googleapis.com", "signin:google"],
+  "permissions": [
+    "net:sheets.googleapis.com",
+    "net:www.googleapis.com",
+    "signin:google",
+    "workspace:read"
+  ],
   "namespace": "google",
   "signin": {
     "google": {
@@ -22,6 +27,8 @@
     "add",
     "format-tab",
     "create",
-    "share"
+    "share",
+    "upload",
+    "replace"
   ]
 }

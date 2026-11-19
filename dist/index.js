@@ -202,7 +202,7 @@ async function send(transport, outgoing, redact) {
       );
     }
     const { status, headers } = response;
-    if (status >= 300 && status < 400) {
+    if (status >= 300 && status < 400 && !(outgoing.resumable === true && status === 308)) {
       const location = headerOf(headers, "location");
       return googleError(
         "E_GOOGLE_REDIRECT",
@@ -254,7 +254,7 @@ function retryAfter(header, now) {
 function createGoogleClient(options) {
   const { transport, tokens } = options;
   async function request(method, address, query, body) {
-    const answer = await exchange(method, address, query, body);
+    const answer = await exchange(method, address, query, { body });
     if (!answer.ok) return answer;
     const { status, text, label } = answer.value;
     if (text.trim() === "") return googleOk(null);
@@ -268,7 +268,9 @@ function createGoogleClient(options) {
       );
     }
   }
-  async function exchange(method, address, query, body, accept = "application/json") {
+  async function exchange(method, address, query, options2) {
+    const { body, accept = "application/json", resumable = false } = options2;
+    const raw = body instanceof Uint8Array;
     const url = urlOf(address, query);
     if (!url.ok) return url;
     const label = `${method} ${url.value.host}${url.value.pathname}`;
@@ -285,35 +287,38 @@ function createGoogleClient(options) {
           headers: {
             Accept: accept,
             Authorization: `Bearer ${token.value}`,
-            ...body === void 0 ? {} : { "Content-Type": "application/json" }
+            ...body === void 0 || raw ? {} : { "Content-Type": "application/json" },
+            ...options2.headers
           },
-          ...body === void 0 ? {} : { body: JSON.stringify(body) }
+          ...body === void 0 ? {} : { body: raw ? body : JSON.stringify(body) },
+          ...resumable ? { resumable } : {}
         },
         redact
       );
       if (!answer.ok) return answer;
-      const { status, text } = answer.value;
+      const { status, text, headers } = answer.value;
       if (status === 401 && attempt === 0) {
         tokens.invalidate();
         continue;
       }
-      if (status < 200 || status >= 300) {
+      if ((status < 200 || status >= 300) && !(resumable && status === 308)) {
         const failure = classifyFailure(label, status, text);
         return { ok: false, error: { ...failure, message: redact(failure.message) } };
       }
-      return googleOk({ status, text, label });
+      return googleOk({ status, text, headers, label });
     }
   }
   return {
     get: (url, query) => request("GET", url, query, void 0),
     async getText(url, query) {
-      const answer = await exchange("GET", url, query, void 0, "*/*");
+      const answer = await exchange("GET", url, query, { accept: "*/*" });
       return answer.ok ? googleOk(answer.value.text) : answer;
     },
     post: (url, body, query) => request("POST", url, query, body),
     put: (url, body, query) => request("PUT", url, query, body),
     patch: (url, body, query) => request("PATCH", url, query, body),
-    delete: (url, query) => request("DELETE", url, query, void 0)
+    delete: (url, query) => request("DELETE", url, query, void 0),
+    upload: (method, url, request2) => exchange(method, url, request2.query, { ...request2, resumable: true })
   };
 }
 function urlOf(address, query) {
@@ -474,11 +479,11 @@ function verbFailed(verb, error) {
     message: `'${verb}' failed: ${withoutFinalStop(describeGoogleError(error))}.`
   };
 }
-function argumentsProblem(verb, problem8) {
+function argumentsProblem(verb, problem9) {
   return {
     severity: "error",
     code: "E_RECIPE_ARGUMENTS",
-    message: `'${verb}' ${withoutFinalStop(problem8)}.`
+    message: `'${verb}' ${withoutFinalStop(problem9)}.`
   };
 }
 function failed(diagnostic) {
@@ -1145,18 +1150,18 @@ var SHEETS2 = "https://sheets.googleapis.com/v4/spreadsheets";
 function budgetedTransport(host, clock) {
   const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
   let outOfTime = false;
-  let refused7 = false;
-  const expired = () => {
+  let refused8 = false;
+  const expired2 = () => {
     if (clock.now() > deadline) outOfTime = true;
     return outOfTime;
   };
   return {
-    expired,
-    refusedForTime: () => refused7,
+    expired: expired2,
+    refusedForTime: () => refused8,
     transport: {
       fetch: (url, init) => {
-        if (expired()) {
-          refused7 = true;
+        if (expired2()) {
+          refused8 = true;
           return Promise.reject(new Error(NOT_REACHED));
         }
         return host.fetch(url, init);
@@ -1215,7 +1220,7 @@ async function applySheetWrites(host, request, clock = systemClock) {
   const budget = budgetedTransport(host, clock);
   const { transport } = budget;
   const refusedForTime = () => budget.refusedForTime();
-  const expired = () => budget.expired();
+  const expired2 = () => budget.expired();
   const connection = await connect(host, request.section, transport);
   if (!connection.ok) {
     if (refusedForTime()) return done();
@@ -1283,7 +1288,7 @@ async function applySheetWrites(host, request, clock = systemClock) {
       }
     }
   }
-  if (expired()) return done();
+  if (expired2()) return done();
   const writing = pending();
   if (writing.length === 0) return done();
   const requests = requestsOf(
@@ -1967,23 +1972,23 @@ var ROLE_STRENGTH = [
 var PERMISSIONS_PAGE_SIZE = 100;
 var OUT_OF_TIME = "could not check every row in one call's time; narrow the table to fewer rows and run again";
 async function planCreates(host, request, kind, clock = systemClock) {
-  const problem8 = (text) => refused3(argumentsProblem(kind.verb, text));
+  const problem9 = (text) => refused3(argumentsProblem(kind.verb, text));
   const { table } = request;
   const nameColumn = columnOf(
     table,
     "name",
     textArgument(request.arguments, "name") ?? DEFAULT_NAME_COLUMN
   );
-  if (nameColumn.problem !== void 0) return problem8(nameColumn.problem);
+  if (nameColumn.problem !== void 0) return problem9(nameColumn.problem);
   const shareWritten = textArgument(request.arguments, "share");
   const shareColumn = shareWritten === void 0 ? void 0 : columnOf(table, "share", shareWritten);
-  if (shareColumn?.problem !== void 0) return problem8(shareColumn.problem);
+  if (shareColumn?.problem !== void 0) return problem9(shareColumn.problem);
   const notify = textArgument(request.arguments, "notify") === "yes";
   const section = readSection(request.section);
   if (!section.ok) return refused3(verbFailed(kind.verb, section.error));
   const rootId = section.value.root;
   if (rootId === void 0) {
-    return problem8(
+    return problem9(
       `needs root in the google section of .tyto/project.json: it creates only under it`
     );
   }
@@ -1996,11 +2001,11 @@ async function planCreates(host, request, kind, clock = systemClock) {
     message: `'${kind.verb}' ${OUT_OF_TIME}.`
   }) : refused3(verbFailed(kind.verb, error));
   const parent = await parentOf(walk, rootId, textArgument(request.arguments, "parent"));
-  if (!parent.ok) return "error" in parent ? failedFor(parent.error) : problem8(parent.problem);
+  if (!parent.ok) return "error" in parent ? failedFor(parent.error) : problem9(parent.problem);
   const parentFolder = parent.folder;
   const planned = [];
   const firstRowOf = /* @__PURE__ */ new Map();
-  const alreadyThere = [];
+  const alreadyThere2 = [];
   const sharingOnly = [];
   for (const row of table.rows) {
     const written = row.values[nameColumn.name];
@@ -2030,7 +2035,7 @@ async function planCreates(host, request, kind, clock = systemClock) {
     const existing = await childrenNamedOfType(client, parentFolder.id, name, kind.mimeType);
     if (!existing.ok) return failedFor(existing.error);
     if (existing.value.length > 1) {
-      return problem8(
+      return problem9(
         `finds ${existing.value.length} items named '${name}' in '${parentFolder.name}' (${parentFolder.id}): ${listed(existing.value.map((each) => each.id))}; keep one, or rename the others, and run again`
       );
     }
@@ -2038,7 +2043,7 @@ async function planCreates(host, request, kind, clock = systemClock) {
     if (found !== void 0) {
       const lacking = shares.length === 0 ? googleOk([]) : await missingSharesOf(client, found.id, shares);
       if (!lacking.ok) return failedFor(lacking.error);
-      if (lacking.value.length === 0) alreadyThere.push(name);
+      if (lacking.value.length === 0) alreadyThere2.push(name);
       else {
         sharingOnly.push(name);
         planned.push({ row, name, shares: lacking.value, existingId: found.id });
@@ -2086,15 +2091,15 @@ async function planCreates(host, request, kind, clock = systemClock) {
     }
   }
   if (operations.length > MAX_OPERATIONS) {
-    return problem8(
+    return problem9(
       `would plan ${operations.length.toLocaleString("en-US")} operations, over the ${MAX_OPERATIONS.toLocaleString("en-US")} one plan holds; split the table`
     );
   }
   const where = `'${parentFolder.name}' (${parentFolder.id})`;
   const diagnostics = [];
-  if (alreadyThere.length > 0) {
+  if (alreadyThere2.length > 0) {
     diagnostics.push(
-      warning(`'${kind.verb}' plans nothing for ${listed(alreadyThere)}: already in ${where}.`)
+      warning(`'${kind.verb}' plans nothing for ${listed(alreadyThere2)}: already in ${where}.`)
     );
   }
   if (sharingOnly.length > 0) {
@@ -2594,7 +2599,7 @@ async function planDriveMove(host, request, clock = systemClock) {
   const hasParentColumn = table.columns.some((each) => each.name === PARENT_COLUMN);
   const destinations = /* @__PURE__ */ new Map();
   const operations = [];
-  const alreadyThere = [];
+  const alreadyThere2 = [];
   let noDestination = 0;
   for (const row of table.rows) {
     const parent = hasParentColumn ? folderIdOf(row.values[PARENT_COLUMN]) ?? rootId : rootId;
@@ -2654,7 +2659,7 @@ async function planDriveMove(host, request, clock = systemClock) {
       continue;
     }
     if (file.parents.includes(destination.id)) {
-      alreadyThere.push(file.name);
+      alreadyThere2.push(file.name);
       continue;
     }
     const payload = { f: fileId, from: file.parents, to: destination.id };
@@ -2668,12 +2673,12 @@ async function planDriveMove(host, request, clock = systemClock) {
     });
   }
   const diagnostics = [];
-  if (alreadyThere.length > 0) {
+  if (alreadyThere2.length > 0) {
     diagnostics.push({
       severity: "warning",
       code: "E_RECIPE_VERB",
       message: shortened(
-        `'${DRIVE_MOVE}' plans nothing for ${listed(alreadyThere)}: already in the destination.`
+        `'${DRIVE_MOVE}' plans nothing for ${listed(alreadyThere2)}: already in the destination.`
       )
     });
   }
@@ -3155,8 +3160,8 @@ async function driveReadPage(host, request) {
     }
     if (columns === void 0) {
       const own = new ColumnUnion(asked.columns);
-      const refused7 = own.add(file.name, read);
-      if (refused7 !== void 0) return readFailed(refused7);
+      const refused8 = own.add(file.name, read);
+      if (refused8 !== void 0) return readFailed(refused8);
       columns = own.columns();
     }
     const built = jsonRows(file, read, columns, fetchedAt);
@@ -3215,8 +3220,8 @@ async function judgeFile(client, file, asked, union) {
   if (!("body" in body)) return body;
   const read = jsonRecords(file, body.body, asked.rows);
   if (typeof read === "string") return { problem: read };
-  const refused7 = union.add(file.name, read);
-  return refused7 === void 0 ? { read } : { problem: refused7 };
+  const refused8 = union.add(file.name, read);
+  return refused8 === void 0 ? { read } : { problem: refused8 };
 }
 function skippedFile(file, reason) {
   return {
@@ -3377,6 +3382,491 @@ function declaredColumns(written) {
   return names;
 }
 
+// src/drive-upload-apply.ts
+var DRIVE_UPLOADS = "https://www.googleapis.com/upload/drive/v3/files";
+var CHUNK_BYTES = 8 * 1024 * 1024;
+var RESUMES_PER_FILE = 3;
+async function applyDriveUploads(host, request, clock = systemClock) {
+  const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
+  const outcomes = request.operations.map(() => void 0);
+  const failed3 = (reason) => ({
+    status: "failed",
+    reason: shortened(reason)
+  });
+  const budget = budgetedTransport(host, clock);
+  const client = connectAsPerson(host, budget.transport);
+  const notCreated = /* @__PURE__ */ new Map();
+  for (const [index, operation] of request.operations.entries()) {
+    const payload = operation.payload;
+    if (isPlannedFailure(payload)) {
+      outcomes[index] = failed3(payload.x);
+      continue;
+    }
+    if (budget.expired()) break;
+    if (operation.write === "create" && isCreatePayload(payload)) {
+      const made = await create(client, payload);
+      if (made === void 0 || budget.refusedForTime()) break;
+      if (made.status === "failed") notCreated.set(payload.c, made.reason ?? "failed");
+      outcomes[index] = made;
+      continue;
+    }
+    if (operation.write !== UPLOAD_WRITE && operation.write !== REPLACE_WRITE || !isUploadPayload(payload)) {
+      outcomes[index] = failed3(
+        "E_GOOGLE_PLAN: not a write this plugin planned; run the cell again"
+      );
+      continue;
+    }
+    const why = notCreated.get(payload.p);
+    if (why !== void 0) {
+      outcomes[index] = failed3(`its folder was not created, so it is not uploaded: ${why}`);
+      continue;
+    }
+    const ended = await uploadOne({ host, client, clock, deadline, budget }, payload);
+    if (ended === void 0) break;
+    outcomes[index] = ended;
+  }
+  return {
+    ok: true,
+    value: {
+      operations: outcomes.map((outcome) => outcome ?? { status: "skipped", reason: NOT_REACHED })
+    },
+    diagnostics: []
+  };
+}
+async function uploadOne(sending, payload) {
+  const { host, client, clock, deadline, budget } = sending;
+  const failed3 = (reason) => ({
+    status: "failed",
+    reason: shortened(reason)
+  });
+  const googleFailed = (error) => budget.refusedForTime() ? void 0 : failed3(describeGoogleError(error));
+  const changed2 = await localChange(host, payload);
+  if (changed2 !== void 0) return failed3(changed2);
+  const key = sessionKey(payload);
+  const kept = await cached(host, key);
+  let sessionUrl = kept === void 0 ? void 0 : new TextDecoder().decode(kept);
+  let offset = 0;
+  if (sessionUrl !== void 0) {
+    const where = await sessionState(client, sessionUrl, payload.s);
+    if (!where.ok) {
+      if (!expired(where.error)) return googleFailed(where.error);
+      await forget2(host, key);
+      sessionUrl = void 0;
+    } else if (where.value === "done") return finished(sending, payload, key);
+    else offset = where.value;
+  }
+  if (sessionUrl === void 0) {
+    const there = await alreadyThere(client, payload);
+    if (there !== void 0) return there.ok ? there.value : googleFailed(there.error);
+    const started = await startSession(client, payload);
+    if (!started.ok) return googleFailed(started.error);
+    sessionUrl = started.value;
+    await host.cache.put(key, sessionUrl).catch(() => void 0);
+  }
+  let lastChunk;
+  let resumes = 0;
+  while (offset < payload.s) {
+    if (lastChunk !== void 0 && clock.now() + lastChunk * 1.5 > deadline) {
+      return progress(offset, payload.s);
+    }
+    const length = Math.min(CHUNK_BYTES, payload.s - offset);
+    let bytes;
+    try {
+      bytes = await host.workspace.read(payload.u, { offset, length });
+    } catch (thrown) {
+      return failed3(`'${payload.u}' could not be read: ${messageOf(thrown)}`);
+    }
+    if (bytes.length !== length) {
+      return failed3(`E_GOOGLE_CHANGED: '${payload.u}' changed while it was read; run again`);
+    }
+    const before = clock.now();
+    const sent = await client.upload("PUT", sessionUrl, {
+      headers: { "Content-Range": `bytes ${offset}-${offset + length - 1}/${payload.s}` },
+      body: bytes
+    });
+    lastChunk = clock.now() - before;
+    if (sent.ok) {
+      if (sent.value.status !== 308) return finished(sending, payload, key);
+      offset = heldUpTo(sent.value);
+      continue;
+    }
+    if (budget.refusedForTime()) return progress(offset, payload.s);
+    if (expired(sent.error)) {
+      await forget2(host, key);
+      return failed3(`${describeGoogleError(sent.error)}; the upload starts over on the next run`);
+    }
+    const transient = sent.error.code === "E_GOOGLE_NETWORK" || (sent.error.status ?? 0) >= 500;
+    if (!transient || resumes >= RESUMES_PER_FILE) return failed3(describeGoogleError(sent.error));
+    resumes += 1;
+    const where = await sessionState(client, sessionUrl, payload.s);
+    if (!where.ok) return googleFailed(where.error);
+    if (where.value === "done") return finished(sending, payload, key);
+    offset = where.value;
+  }
+  const last = await sessionState(client, sessionUrl, payload.s);
+  if (!last.ok) return googleFailed(last.error);
+  if (last.value === "done") return finished(sending, payload, key);
+  return failed3("E_GOOGLE_HTTP: Drive did not finish the upload after its last byte; run again");
+}
+async function finished(sending, payload, key) {
+  await forget2(sending.host, key);
+  const changed2 = await localChange(sending.host, payload);
+  if (changed2 === void 0) return { status: "applied" };
+  return {
+    status: "failed",
+    reason: shortened(`${changed2}; it changed while it was sent, and the next run sends it again`)
+  };
+}
+async function cached(host, key) {
+  try {
+    return (await host.cache.get(key))?.bytes;
+  } catch {
+    return void 0;
+  }
+}
+async function forget2(host, key) {
+  await host.cache.delete(key).catch(() => false);
+}
+async function localChange(host, payload) {
+  try {
+    const now = await host.workspace.stat(payload.u);
+    if (now.kind === "file" && now.size === payload.s && Date.parse(now.modifiedAt) === Date.parse(payload.m)) {
+      return void 0;
+    }
+    return `E_GOOGLE_CHANGED: '${payload.u}' changed since the plan; run the cell again`;
+  } catch (thrown) {
+    return `'${payload.u}' could not be read: ${messageOf(thrown)}`;
+  }
+}
+async function alreadyThere(client, payload) {
+  if (payload.r !== void 0) {
+    const now = await getFile(client, payload.r);
+    if (!now.ok) return now;
+    return sameFile(now.value, payload.s, payload.m) ? { ok: true, value: { status: "applied" } } : void 0;
+  }
+  const named = await childrenNamed(client, payload.p, payload.n);
+  if (!named.ok) return named;
+  if (named.value.length === 0) return void 0;
+  if (named.value.some((each) => sameFile(each, payload.s, payload.m))) {
+    return { ok: true, value: { status: "applied" } };
+  }
+  return {
+    ok: true,
+    value: {
+      status: "failed",
+      reason: shortened(
+        `E_GOOGLE_CHANGED: a file named '${payload.n}' was put in ${payload.p} since the plan; run the cell again for a new plan`
+      )
+    }
+  };
+}
+async function startSession(client, payload) {
+  const started = await client.upload(
+    payload.r === void 0 ? "POST" : "PATCH",
+    payload.r === void 0 ? DRIVE_UPLOADS : `${DRIVE_UPLOADS}/${encodeURIComponent(payload.r)}`,
+    {
+      query: { uploadType: "resumable", supportsAllDrives: true, fields: "id" },
+      headers: { "X-Upload-Content-Length": String(payload.s) },
+      body: payload.r === void 0 ? { name: payload.n, parents: [payload.p], modifiedTime: payload.m } : { modifiedTime: payload.m }
+    }
+  );
+  if (!started.ok) return started;
+  const location = headerOf(started.value.headers, "location");
+  if (location === void 0 || !location.startsWith(`${DRIVE_UPLOADS}?`)) {
+    return {
+      ok: false,
+      error: {
+        code: "E_GOOGLE_RESPONSE",
+        message: `Drive opened no upload session for '${payload.n}' at its own address.`
+      }
+    };
+  }
+  return { ok: true, value: location };
+}
+async function sessionState(client, url, size) {
+  const asked = await client.upload("PUT", url, {
+    headers: { "Content-Range": `bytes */${size}` },
+    body: new Uint8Array(0)
+  });
+  if (!asked.ok) return asked;
+  return { ok: true, value: asked.value.status === 308 ? heldUpTo(asked.value) : "done" };
+}
+function heldUpTo(answer) {
+  const range = /^bytes=0-(\d+)$/.exec(headerOf(answer.headers, "range")?.trim() ?? "");
+  return range?.[1] === void 0 ? 0 : Number(range[1]) + 1;
+}
+function expired(error) {
+  return error.status === 404 || error.status === 410;
+}
+function progress(offset, size) {
+  return {
+    status: "skipped",
+    reason: `sent ${sizeText(offset)} of ${sizeText(size)} in this call's time; run the cell and Apply again to go on from there`
+  };
+}
+
+// src/drive-upload.ts
+var DRIVE_UPLOAD = "google.drive-upload";
+var UPLOAD_WRITE = "upload";
+var REPLACE_WRITE = "replace";
+var MAX_DEPTH = 6;
+var ARGUMENTS6 = [
+  { name: "from", type: "text" },
+  { name: "to", type: "text" },
+  { name: "to-column", type: "text" }
+];
+function driveUploadVerb(host, clock = systemClock) {
+  return {
+    id: DRIVE_UPLOAD,
+    kind: "action",
+    arguments: ARGUMENTS6,
+    writes: [CREATE_WRITE, UPLOAD_WRITE, REPLACE_WRITE],
+    plan: (request) => planDriveUpload(host, request, clock),
+    apply: (request) => applyDriveUploads(host, request, clock)
+  };
+}
+function sessionKey(payload) {
+  const { u, s, m, p, r } = payload;
+  return `upload/${fingerprint(JSON.stringify([u, s, m, p, r ?? ""]))}`;
+}
+function sameFile(file, size, modifiedAt) {
+  return file.size === size && file.modifiedTime !== void 0 && Date.parse(file.modifiedTime) === Date.parse(modifiedAt);
+}
+function sizeText(bytes) {
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
+  if (bytes >= 1e3) return `${Math.round(bytes / 1e3)} KB`;
+  return `${bytes} B`;
+}
+var problem5 = (text) => argumentsProblem(DRIVE_UPLOAD, text);
+var refused5 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var OUT_OF_TIME3 = "'google.drive-upload' could not compare every file in one call's time; narrow the table to fewer rows and run again.";
+var DONE = { ok: true };
+async function planDriveUpload(host, request, clock = systemClock) {
+  const { table } = request;
+  const fromWritten = textArgument(request.arguments, "from");
+  if (fromWritten === void 0) {
+    return refused5(problem5("needs from=, the column naming each workspace file or folder"));
+  }
+  const from = columnNamed(table, fromWritten, "from");
+  if (typeof from !== "string") return refused5(from);
+  const to = textArgument(request.arguments, "to");
+  const toColumnWritten = textArgument(request.arguments, "to-column");
+  if (to === void 0 === (toColumnWritten === void 0)) {
+    return refused5(
+      problem5("takes to=, one Drive folder for every row, or to-column=, a folder per row")
+    );
+  }
+  const toColumn = toColumnWritten === void 0 ? void 0 : columnNamed(table, toColumnWritten, "to-column");
+  if (toColumn !== void 0 && typeof toColumn !== "string") return refused5(toColumn);
+  const section = readSection(request.section);
+  if (!section.ok) return refused5(verbFailed(DRIVE_UPLOAD, section.error));
+  const rootId = section.value.root;
+  if (rootId === void 0) {
+    return refused5(
+      problem5("needs root in the google section of .tyto/project.json: it uploads under it")
+    );
+  }
+  const budget = budgetedTransport(host, clock);
+  const connection = await connect(host, request.section, budget.transport);
+  if (!connection.ok) return refused5(verbFailed(DRIVE_UPLOAD, connection.error));
+  const { client } = connection.value;
+  const walk = rootWalk(client, rootId);
+  const failedFor = (error) => budget.refusedForTime() ? refused5({ severity: "error", code: "E_RECIPE_VERB", message: OUT_OF_TIME3 }) : refused5(verbFailed(DRIVE_UPLOAD, error));
+  const destinations = /* @__PURE__ */ new Map();
+  const operations = [];
+  const unchanged = [];
+  let blank = 0;
+  for (const row of table.rows) {
+    const path = cellText(row.values[from]);
+    const wanted = toColumn === void 0 ? to : cellText(row.values[toColumn]);
+    if (path === void 0 || wanted === void 0) {
+      blank += 1;
+      continue;
+    }
+    let found = destinations.get(wanted);
+    if (found === void 0) {
+      found = await destinationOf(walk, rootId, rootId, wanted, toColumn ?? "to=");
+      destinations.set(wanted, found);
+    }
+    if (!found.ok && "error" in found) return failedFor(found.error);
+    if (!found.ok) {
+      if (toColumn === void 0) return refused5(problem5(found.problem));
+      operations.push(plannedFailure2(row, found.problem));
+      continue;
+    }
+    const context = { host, client, row, operations: [], unchanged: [] };
+    const entry = await statOf(host, path);
+    let step;
+    if (typeof entry === "string") step = { ok: false, problem: entry };
+    else if (entry.kind === "file") {
+      const named2 = await childrenNamed(client, found.folder.id, entry.name);
+      step = named2.ok ? planFile(context, path, entry, found.folder, named2.value) : { ok: false, error: named2.error };
+    } else step = await planFolder(context, path, entry.name, found.folder, true, 0);
+    if (!step.ok && "error" in step) return failedFor(step.error);
+    if (!step.ok) {
+      operations.push(plannedFailure2(row, step.problem));
+      continue;
+    }
+    operations.push(...context.operations);
+    unchanged.push(...context.unchanged);
+    if (operations.length > MAX_OPERATIONS) {
+      return refused5(
+        problem5(
+          `would plan over the ${MAX_OPERATIONS.toLocaleString("en-US")} writes one plan holds; split the table`
+        )
+      );
+    }
+  }
+  const diagnostics = [];
+  if (unchanged.length > 0) {
+    diagnostics.push(
+      warning(
+        `'${DRIVE_UPLOAD}' plans nothing for ${unchanged.length.toLocaleString("en-US")} ${unchanged.length === 1 ? "file" : "files"} already in Drive with the same name, size and time: ${listed(unchanged)}.`
+      )
+    );
+  }
+  if (blank > 0) {
+    diagnostics.push(
+      warning(
+        `'${DRIVE_UPLOAD}' left out ${blank.toLocaleString("en-US")} ${blank === 1 ? "row" : "rows"} with no file or no destination.`
+      )
+    );
+  }
+  const named = [...destinations.values()].flatMap(
+    (each) => each.ok ? [`'${each.folder.name}' (${each.folder.id})`] : []
+  );
+  return {
+    ok: true,
+    value: {
+      target: `Drive folder ${[...new Set(named)].join(", ") || to || `per row in ${toColumn}`}`,
+      operations,
+      count: operations.length
+    },
+    diagnostics
+  };
+}
+function planFile(walk, path, entry, folder, inFolder) {
+  if (entry.name.length > MAX_NAME_LENGTH) {
+    return { ok: false, problem: `'${path}' has a name over ${MAX_NAME_LENGTH} characters` };
+  }
+  const same = inFolder.filter(
+    (each) => each.name === entry.name && each.mimeType !== FOLDER_MIME_TYPE
+  );
+  if (same.length > 1) {
+    return {
+      ok: false,
+      problem: `${same.length} files named '${entry.name}' are in '${folder.name}' (${listed(same.map((each) => each.id))}); keep one`
+    };
+  }
+  const existing = same[0];
+  if (existing !== void 0 && sameFile(existing, entry.size, entry.modifiedAt)) {
+    walk.unchanged.push(path);
+    return DONE;
+  }
+  const payload = {
+    u: path,
+    n: entry.name,
+    p: folder.id,
+    s: entry.size,
+    m: entry.modifiedAt,
+    ...existing === void 0 ? {} : { r: existing.id }
+  };
+  const where = `'${folder.name}' (${folder.id})`;
+  walk.operations.push({
+    write: existing === void 0 ? UPLOAD_WRITE : REPLACE_WRITE,
+    rowKey: walk.row.key,
+    description: shortened(
+      existing === void 0 ? `upload '${path}' (${sizeText(entry.size)}) into ${where}` : `replace '${path}' (${sizeText(entry.size)}, was ${existing.size === void 0 ? "no size" : sizeText(existing.size)}) in ${where}, keeping its id ${existing.id}`
+    ),
+    payload: { ...payload }
+  });
+  return DONE;
+}
+async function planFolder(walk, path, name, parent, parentExists, depth) {
+  if (depth > MAX_DEPTH) {
+    return { ok: false, problem: `'${path}' is over ${MAX_DEPTH} folders deep` };
+  }
+  let folder;
+  if (parentExists) {
+    const named = await childrenNamedOfType(walk.client, parent.id, name, FOLDER_MIME_TYPE);
+    if (!named.ok) return named;
+    if (named.value.length > 1) {
+      return {
+        ok: false,
+        problem: `${named.value.length} folders named '${name}' are in '${parent.name}' (${listed(named.value.map((each) => each.id))}); keep one`
+      };
+    }
+    folder = named.value[0];
+  }
+  const exists = folder !== void 0;
+  if (folder === void 0) {
+    const ids = await generateIds(walk.client, 1);
+    if (!ids.ok) return ids;
+    const id = ids.value[0] ?? "";
+    folder = { id, name };
+    const payload = { c: id, n: name, p: parent.id, m: FOLDER_MIME_TYPE };
+    walk.operations.push({
+      write: CREATE_WRITE,
+      rowKey: walk.row.key,
+      description: shortened(
+        `create folder '${name}' in '${parent.name}' (${parent.id}): https://drive.google.com/drive/folders/${id}`
+      ),
+      payload: { ...payload }
+    });
+  }
+  let entries;
+  try {
+    entries = await walk.host.workspace.list(path);
+  } catch (thrown) {
+    return { ok: false, problem: `'${path}' could not be listed: ${messageOf(thrown)}` };
+  }
+  let inDrive = [];
+  if (exists) {
+    const children = await allChildren(walk.client, folder.id);
+    if (!children.ok) return children;
+    inDrive = children.value;
+  }
+  for (const entry of entries) {
+    const child = path === "" ? entry.name : `${path}/${entry.name}`;
+    const step = entry.kind === "file" ? planFile(walk, child, entry, folder, inDrive) : await planFolder(walk, child, entry.name, folder, exists, depth + 1);
+    if (!step.ok) return step;
+  }
+  return DONE;
+}
+async function allChildren(client, folderId) {
+  const files = [];
+  let pageToken;
+  do {
+    const page = await listChildren(client, folderId, void 0, pageToken);
+    if (!page.ok) return page;
+    files.push(...page.value.files);
+    pageToken = page.value.nextPageToken;
+  } while (pageToken !== void 0);
+  return { ok: true, value: files };
+}
+async function statOf(host, path) {
+  try {
+    return await host.workspace.stat(path);
+  } catch (thrown) {
+    return `'${path}' could not be read in the workspace: ${messageOf(thrown)}`;
+  }
+}
+function isUploadPayload(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value;
+  const text = (key) => typeof record[key] === "string" && record[key] !== "";
+  return text("u") && text("n") && text("p") && text("m") && typeof record["s"] === "number" && Number.isSafeInteger(record["s"]) && record["s"] >= 0 && (record["r"] === void 0 || text("r"));
+}
+function cellText(value) {
+  if (value === null || value === void 0) return void 0;
+  const text = String(value).trim();
+  return text === "" ? void 0 : text;
+}
+function columnNamed(table, name, argument) {
+  const found = columnOf(table, argument, name);
+  return found.problem === void 0 ? found.name : problem5(found.problem);
+}
+
 // src/sheet-create.ts
 var SHEET_CREATE = "google.sheet-create";
 var SPREADSHEET_MIME_TYPE = "application/vnd.google-apps.spreadsheet";
@@ -3480,8 +3970,8 @@ async function firstSnapshot(host, verb, client, asked, refresh) {
   if (version.ok && !refresh) {
     const entry = await readCache(host, verb, asked.spreadsheetId, tab.sheetId);
     if (entry !== void 0 && entry.version === version.value) {
-      const cached = readOf(verb, entry.snapshot, asked, entry.fetchedAt);
-      if ("severity" in cached || covers(entry.snapshot, cached.plan)) return cached;
+      const cached2 = readOf(verb, entry.snapshot, asked, entry.fetchedAt);
+      if ("severity" in cached2 || covers(entry.snapshot, cached2.plan)) return cached2;
     }
   }
   const live = await liveSnapshot(verb, client, asked, tab);
@@ -4401,7 +4891,7 @@ function cellsOf(value) {
 // src/sheet-lookup.ts
 var SHEET_LOOKUP = "google.sheet-lookup";
 var DEFAULT_PREFIX = "sheet_";
-var ARGUMENTS6 = [
+var ARGUMENTS7 = [
   { name: "spreadsheet", type: "text" },
   { name: "tab", type: "text", required: true },
   { name: "key", type: "text", required: true },
@@ -4414,28 +4904,28 @@ function sheetLookupVerb(host) {
   return {
     id: SHEET_LOOKUP,
     kind: "transform",
-    arguments: ARGUMENTS6,
+    arguments: ARGUMENTS7,
     transform: (request) => lookUp(host, request)
   };
 }
-var refused5 = (diagnostic) => ({ ok: false, error: [diagnostic] });
-var problem5 = (text) => argumentsProblem(SHEET_LOOKUP, text);
+var refused6 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var problem6 = (text) => argumentsProblem(SHEET_LOOKUP, text);
 var listOf4 = (written) => [...new Set((written ?? "").split(",").map((item) => item.trim()))].filter((item) => item !== "");
 async function lookUp(host, request) {
   const { table } = request;
   const tabName = textArgument(request.arguments, "tab");
-  if (tabName === void 0) return refused5(problem5("needs tab=, the tab to look rows up in"));
+  if (tabName === void 0) return refused6(problem6("needs tab=, the tab to look rows up in"));
   const keyName = textArgument(request.arguments, "key");
-  if (keyName === void 0) return refused5(problem5("needs key=, the column to match rows by"));
+  if (keyName === void 0) return refused6(problem6("needs key=, the column to match rows by"));
   const wanted = listOf4(textArgument(request.arguments, "columns"));
-  if (wanted.length === 0) return refused5(problem5("needs columns=, the tab columns to add"));
+  if (wanted.length === 0) return refused6(problem6("needs columns=, the tab columns to add"));
   const links = listOf4(textArgument(request.arguments, "links"));
   const notes = listOf4(textArgument(request.arguments, "notes"));
   const prefix = request.arguments["prefix"] === void 0 ? DEFAULT_PREFIX : String(request.arguments["prefix"]).trim();
   const keyColumn = table.columns.find((each) => each.name === keyName) ?? table.columns.find((each) => each.name.toLowerCase() === keyName.toLowerCase());
   if (keyColumn === void 0) {
-    return refused5(
-      problem5(
+    return refused6(
+      problem6(
         `key= names the column '${keyName}', which the table does not have; its columns are ` + listed(table.columns.map((each) => each.name))
       )
     );
@@ -4445,9 +4935,9 @@ async function lookUp(host, request) {
     request.arguments["spreadsheet"],
     request.section
   );
-  if (typeof spreadsheetId !== "string") return refused5(spreadsheetId);
+  if (typeof spreadsheetId !== "string") return refused6(spreadsheetId);
   const connection = await connect(host, request.section);
-  if (!connection.ok) return refused5(verbFailed(SHEET_LOOKUP, connection.error));
+  if (!connection.ok) return refused6(verbFailed(SHEET_LOOKUP, connection.error));
   const read = await firstSnapshot(
     host,
     SHEET_LOOKUP,
@@ -4458,14 +4948,14 @@ async function lookUp(host, request) {
     // current Drive version, which any edit to the spreadsheet raises.
     false
   );
-  if ("severity" in read) return refused5(read);
+  if ("severity" in read) return refused6(read);
   const { snapshot, names, plan } = read;
   const kc = plan.key ?? 0;
   const added = [];
   for (const written of wanted) {
     const at = columnIndexOf(names, written);
     if (at === void 0)
-      return refused5(notInTab(SHEET_LOOKUP, "columns", written, names, snapshot.title));
+      return refused6(notInTab(SHEET_LOOKUP, "columns", written, names, snapshot.title));
     const type = inferType(snapshot.values, at);
     added.push({
       column: { name: `${prefix}${names[at] ?? ""}`, type, origin: ORIGIN },
@@ -4488,8 +4978,8 @@ async function lookUp(host, request) {
   for (const { column } of added) {
     const lowered = column.name.toLowerCase();
     if (taken.has(lowered)) {
-      return refused5(
-        problem5(
+      return refused6(
+        problem6(
           `would add the column '${column.name}', which the table already has; name another prefix=`
         )
       );
@@ -4503,8 +4993,8 @@ async function lookUp(host, request) {
     const sheetRow = index + 1;
     const before = rowOfKey.get(key);
     if (before !== void 0) {
-      return refused5(
-        problem5(
+      return refused6(
+        problem6(
           `rows ${before} and ${sheetRow} of the tab '${snapshot.title}' both hold '${key}' in ${names[kc] ?? ""}; a key must be unique, and the lookup does not guess which row is it`
         )
       );
@@ -4536,7 +5026,7 @@ var PAGE_ROWS2 = 5e3;
 var PAGE_BYTES2 = 6 * 1024 * 1024;
 var DEFAULT_MAX2 = 1e5;
 var MAX_MAX2 = 1e5;
-var ARGUMENTS7 = [
+var ARGUMENTS8 = [
   { name: "spreadsheet", type: "text" },
   { name: "tab", type: "text" },
   { name: "key", type: "text" },
@@ -4548,11 +5038,11 @@ function sheetRowsVerb(host) {
   return {
     id: SHEET_ROWS,
     kind: "source",
-    arguments: ARGUMENTS7,
+    arguments: ARGUMENTS8,
     page: (request) => sheetRowsPage(host, request)
   };
 }
-var problem6 = (text) => argumentsProblem(SHEET_ROWS, text);
+var problem7 = (text) => argumentsProblem(SHEET_ROWS, text);
 var sheetFailed = (text) => failed({ severity: "error", code: "E_RECIPE_VERB", message: `'${SHEET_ROWS}' failed: ${text}.` });
 async function sheetRowsPage(host, request) {
   const asked = readArguments(request.arguments, request.section);
@@ -4616,9 +5106,9 @@ async function laterSnapshot(host, client, asked, cursor) {
   };
   const entry = await readCache(host, SHEET_ROWS, asked.spreadsheetId, cursor.s);
   if (entry !== void 0) {
-    const cached = readOf(SHEET_ROWS, entry.snapshot, asked, entry.fetchedAt);
-    if (!("severity" in cached) && covers(entry.snapshot, cached.plan) && cached.digest === cursor.d) {
-      return cached;
+    const cached2 = readOf(SHEET_ROWS, entry.snapshot, asked, entry.fetchedAt);
+    if (!("severity" in cached2) && covers(entry.snapshot, cached2.plan) && cached2.digest === cursor.d) {
+      return cached2;
     }
   }
   const tabs = await readTabs(client, asked.spreadsheetId);
@@ -4641,7 +5131,7 @@ function readArguments(values, section) {
   if (written !== void 0) {
     spreadsheetId = spreadsheetIdOf(written);
     if (spreadsheetId === void 0) {
-      return problem6(
+      return problem7(
         `spreadsheet= holds '${written}', which is neither a spreadsheet id nor its address, such as https://docs.google.com/spreadsheets/d/<id>/edit`
       );
     }
@@ -4650,14 +5140,14 @@ function readArguments(values, section) {
     if (!read.ok) return verbFailed(SHEET_ROWS, read.error);
     spreadsheetId = read.value.spreadsheet;
     if (spreadsheetId === void 0) {
-      return problem6(
+      return problem7(
         "needs spreadsheet=, or spreadsheet in the google section of .tyto/project.json, and was given neither"
       );
     }
   }
   const max = values["max"] ?? DEFAULT_MAX2;
   if (typeof max !== "number" || !Number.isSafeInteger(max) || max < 1 || max > MAX_MAX2) {
-    return problem6(`max= must be a whole number from 1 to ${MAX_MAX2}, not ${String(max)}`);
+    return problem7(`max= must be a whole number from 1 to ${MAX_MAX2}, not ${String(max)}`);
   }
   const list = (name) => [...new Set((text(name) ?? "").split(",").map((item) => item.trim()))].filter(
     (item) => item !== ""
@@ -4695,7 +5185,7 @@ function shownNote(name, mode, current, value, next) {
 // src/sheet-sync.ts
 var SHEET_SYNC = "google.sheet-sync";
 var SYNC_WRITES = ["add-tab", "update", "move", "delete", "add", "format-tab"];
-var ARGUMENTS8 = [
+var ARGUMENTS9 = [
   { name: "spreadsheet", type: "text" },
   { name: "tab", type: "text", required: true },
   { name: "key", type: "text", required: true },
@@ -4709,14 +5199,14 @@ function sheetSyncVerb(host, clock = systemClock) {
   return {
     id: SHEET_SYNC,
     kind: "sink",
-    arguments: ARGUMENTS8,
+    arguments: ARGUMENTS9,
     writes: SYNC_WRITES,
     plan: (request) => planSheetSync(host, request),
     apply: (request) => applySheetSync(host, request, clock)
   };
 }
-var problem7 = (text) => argumentsProblem(SHEET_SYNC, text);
-var refused6 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var problem8 = (text) => argumentsProblem(SHEET_SYNC, text);
+var refused7 = (diagnostic) => ({ ok: false, error: [diagnostic] });
 var warning2 = (message) => ({
   severity: "warning",
   code: "E_RECIPE_VERB",
@@ -4733,9 +5223,9 @@ async function planSheetSync(host, request) {
     request.arguments["spreadsheet"],
     request.section
   );
-  if (typeof spreadsheetId !== "string") return refused6(spreadsheetId);
+  if (typeof spreadsheetId !== "string") return refused7(spreadsheetId);
   const written = writeColumns(table, "");
-  if (!Array.isArray(written)) return refused6(written);
+  if (!Array.isArray(written)) return refused7(written);
   const noteMode = text("note-mode") === "append" ? "append" : "set";
   const noteSources = [];
   for (const name of listOf5(text("notes"))) {
@@ -4743,8 +5233,8 @@ async function planSheetSync(host, request) {
       (column) => column.name.toLowerCase() === `${name.toLowerCase()}_note`
     );
     if (source === void 0) {
-      return refused6(
-        problem7(`notes= names '${name}', but the table has no column '${name}_note' to write`)
+      return refused7(
+        problem8(`notes= names '${name}', but the table has no column '${name}_note' to write`)
       );
     }
     noteSources.push({ name, source: source.name });
@@ -4755,33 +5245,33 @@ async function planSheetSync(host, request) {
   const tableColumn = (name) => columns.find((column) => column.name.toLowerCase() === name.toLowerCase());
   const keyColumn = tableColumn(text("key"));
   if (keyColumn === void 0) {
-    return refused6(problem7(`key= names '${text("key")}', which is not a column of the table`));
+    return refused7(problem8(`key= names '${text("key")}', which is not a column of the table`));
   }
   const moveName = text("move");
   const moveColumn = moveName === "" ? void 0 : tableColumn(moveName);
   if (moveName !== "" && moveColumn === void 0) {
-    return refused6(problem7(`move= names '${moveName}', which is not a column of the table`));
+    return refused7(problem8(`move= names '${moveName}', which is not a column of the table`));
   }
   const connection = await connect(host, request.section);
-  if (!connection.ok) return refused6(verbFailed(SHEET_SYNC, connection.error));
+  if (!connection.ok) return refused7(verbFailed(SHEET_SYNC, connection.error));
   const { client } = connection.value;
   const tabs = await readGridTabs(client, spreadsheetId);
-  if (!tabs.ok) return refused6(verbFailed(SHEET_SYNC, tabs.error));
+  if (!tabs.ok) return refused7(verbFailed(SHEET_SYNC, tabs.error));
   const tab = pickTab(tabs.value, text("tab"));
-  if (typeof tab === "string") return refused6(problem7(tab));
+  if (typeof tab === "string") return refused7(problem8(tab));
   const values = await readValues(client, spreadsheetId, tab);
-  if (!values.ok) return refused6(verbFailed(SHEET_SYNC, values.error));
+  if (!values.ok) return refused7(verbFailed(SHEET_SYNC, values.error));
   const names = headerOf2(values.value, tab.title);
-  if (typeof names === "string") return refused6(problem7(names));
+  if (typeof names === "string") return refused7(problem8(names));
   const kc = columnIndexOf(names, keyColumn.name);
   if (kc === void 0) {
-    return refused6(problem7(`the tab '${tab.title}' has no column '${keyColumn.name}' in row 1`));
+    return refused7(problem8(`the tab '${tab.title}' has no column '${keyColumn.name}' in row 1`));
   }
   const keep = listOf5(text("keep")).map((name) => [name, columnIndexOf(names, name)]);
   const unknownKeep = keep.filter(([, index]) => index === void 0).map(([name]) => name);
   if (unknownKeep.length > 0) {
-    return refused6(
-      problem7(`keep= names ${listed(unknownKeep)}, which the tab '${tab.title}' has no column for`)
+    return refused7(
+      problem8(`keep= names ${listed(unknownKeep)}, which the tab '${tab.title}' has no column for`)
     );
   }
   const keepIndexes = new Set(keep.map(([, index]) => index));
@@ -4789,8 +5279,8 @@ async function planSheetSync(host, request) {
   for (const { name, source } of noteSources) {
     const at = columnIndexOf(names, name);
     if (at === void 0) {
-      return refused6(
-        problem7(`notes= names '${name}', which the tab '${tab.title}' has no column for`)
+      return refused7(
+        problem8(`notes= names '${name}', which the tab '${tab.title}' has no column for`)
       );
     }
     noted.push({ at, source });
@@ -4806,8 +5296,8 @@ async function planSheetSync(host, request) {
     }
   }
   if (unplaced.length > 0) {
-    return refused6(
-      problem7(
+    return refused7(
+      problem8(
         `cannot write ${listed(unplaced)}: the tab '${tab.title}' has no column of that name in row 1. Its columns are ${listed(names)}`
       )
     );
@@ -4824,8 +5314,8 @@ async function planSheetSync(host, request) {
     }
     const before = inTab.get(key);
     if (before !== void 0) {
-      return refused6(
-        problem7(
+      return refused7(
+        problem8(
           `rows ${before.number} and ${number} of the tab '${tab.title}' both hold '${key}' in ${names[kc] ?? ""}; a key must be unique, and the sync does not guess which row is it`
         )
       );
@@ -4846,8 +5336,8 @@ async function planSheetSync(host, request) {
       continue;
     }
     if (inTable.has(key)) {
-      return refused6(
-        problem7(`the table holds '${key}' in ${keyColumn.name} twice; a key must be unique`)
+      return refused7(
+        problem8(`the table holds '${key}' in ${keyColumn.name} twice; a key must be unique`)
       );
     }
     inTable.set(key, row);
@@ -4869,15 +5359,15 @@ async function planSheetSync(host, request) {
     const found = pickTab(tabs.value, title);
     if (typeof found === "string") continue;
     const read = await readValues(client, spreadsheetId, found);
-    if (!read.ok) return refused6(verbFailed(SHEET_SYNC, read.error));
+    if (!read.ok) return refused7(verbFailed(SHEET_SYNC, read.error));
     tabsRead.set(found.title, read.value);
     if (read.value.length === 0) continue;
     const archivedNames = headerOf2(read.value, found.title);
-    if (typeof archivedNames === "string") return refused6(problem7(archivedNames));
+    if (typeof archivedNames === "string") return refused7(problem8(archivedNames));
     const at = columnIndexOf(archivedNames, keyColumn.name);
     if (at === void 0) {
-      return refused6(
-        problem7(`archived= names '${found.title}', which has no column '${keyColumn.name}'`)
+      return refused7(
+        problem8(`archived= names '${found.title}', which has no column '${keyColumn.name}'`)
       );
     }
     for (const row of read.value.slice(1)) {
@@ -4910,7 +5400,7 @@ async function planSheetSync(host, request) {
     { links: names.map((_, index) => index), notes: noted.map(({ at }) => at) },
     lastRow
   );
-  if (!extras.ok) return refused6(verbFailed(SHEET_SYNC, extras.error));
+  if (!extras.ok) return refused7(verbFailed(SHEET_SYNC, extras.error));
   const linkAt = (at, number) => extras.value.links[String(at)]?.[String(number)];
   const digestOf2 = (row) => rowDigest(
     row.cells,
@@ -5022,7 +5512,7 @@ async function planSheetSync(host, request) {
     let read = tabsRead.get(found.title);
     if (read === void 0) {
       const answer = await readValues(client, spreadsheetId, found);
-      if (!answer.ok) return refused6(verbFailed(SHEET_SYNC, answer.error));
+      if (!answer.ok) return refused7(verbFailed(SHEET_SYNC, answer.error));
       read = answer.value;
       tabsRead.set(found.title, read);
     }
@@ -5144,7 +5634,7 @@ async function planSheetSync(host, request) {
     lastRow - writes(deletes) - writes(moveDrafts) + writes(addDrafts),
     false
   );
-  if (!formatted.ok) return refused6(verbFailed(SHEET_SYNC, formatted.error));
+  if (!formatted.ok) return refused7(verbFailed(SHEET_SYNC, formatted.error));
   for (const [destination, header] of destinations) {
     if (typeof header === "string") continue;
     const into = moveDrafts.filter(
@@ -5158,7 +5648,7 @@ async function planSheetSync(host, request) {
       (tabsRead.get(found.title)?.length ?? 1) + into,
       true
     );
-    if (!done.ok) return refused6(verbFailed(SHEET_SYNC, done.error));
+    if (!done.ok) return refused7(verbFailed(SHEET_SYNC, done.error));
   }
   const ordered = [
     ...tabDrafts,
@@ -5169,8 +5659,8 @@ async function planSheetSync(host, request) {
     ...formatDrafts
   ];
   if (ordered.length > MAX_OPERATIONS) {
-    return refused6(
-      problem7(
+    return refused7(
+      problem8(
         `would plan ${ordered.length.toLocaleString("en-US")} operations, over the ${MAX_OPERATIONS.toLocaleString("en-US")} one plan holds; split the table`
       )
     );
@@ -5282,6 +5772,7 @@ function activate(host) {
     host.registerRecipeVerb(driveMoveVerb(host)),
     host.registerRecipeVerb(driveFolderVerb(host)),
     host.registerRecipeVerb(sheetCreateVerb(host)),
+    host.registerRecipeVerb(driveUploadVerb(host)),
     host.registerRecipeVerb(driveCountVerb(host)),
     host.registerRecipeVerb(sheetLookupVerb(host))
   ];

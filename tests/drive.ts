@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 
-import type { FetchedResponse, HostFetchInit } from '@tyto/plugin-api';
+import type { FetchedResponse, HostCapabilities, HostFetchInit } from '@tyto/plugin-api';
 import { testPlugin, type PluginHarness, type TestRecipeOptions } from '@tyto/plugin-api/testing';
 
 import { PERSON_TOKEN, response } from './host.js';
@@ -51,6 +51,33 @@ export interface FakeDrive {
   refusedDomain?: string;
   /** Item names whose create Drive refuses, with a body echoing the request's token. */
   refusedNames?: string[];
+  /** Resumable upload sessions, by their `upload_id`. */
+  sessions?: Map<string, FakeSession>;
+  /** How many of the next chunks Drive loses, answering 503 after keeping half of each. */
+  lostChunks?: number;
+}
+
+/** A resumable upload as Drive holds it: what it is for, and the bytes it has, summed. */
+export interface FakeSession {
+  readonly name: string;
+  readonly parents: string[];
+  readonly modifiedTime: string;
+  /** The file whose content it replaces; absent for a new file. */
+  readonly replaces?: string;
+  readonly total: number;
+  received: number;
+  /** A sum of every byte with its offset, so bytes sent out of place show. */
+  checksum: number;
+  done?: string;
+}
+
+/** The sum {@link FakeSession.checksum} keeps, for a test to compare with its own bytes. */
+export function checksumOf(bytes: Uint8Array, offset: number, sum = 0): number {
+  let total = sum;
+  for (let index = 0; index < bytes.length; index += 1) {
+    total = (total + bytes[index]! * ((offset + index) % 251)) % 1_000_000_007;
+  }
+  return total;
 }
 
 export interface DriveCall {
@@ -60,6 +87,9 @@ export interface DriveCall {
   /** The request's `Authorization` header: whose token signed it. */
   readonly authorization: string;
   readonly body?: unknown;
+  readonly headers?: Readonly<Record<string, string>>;
+  /** A raw body (an upload's chunk), kept as it was sent. */
+  readonly bytes?: Uint8Array;
 }
 
 export interface FakeGoogleDrive {
@@ -79,6 +109,8 @@ export async function fakeDrive(
     readonly signins?: Readonly<Record<string, string>>;
     /** `false` for a terminal with no system keychain: `E_SIGNIN_UNAVAILABLE`, no verb runs. */
     readonly keychain?: boolean;
+    /** Other ports over the harness's: a test's workspace files. */
+    readonly capabilities?: Partial<HostCapabilities>;
   } = {},
 ): Promise<FakeGoogleDrive> {
   const calls: DriveCall[] = [];
@@ -86,20 +118,14 @@ export async function fakeDrive(
     manifest,
     load: () => import(entry),
     ...(options.keychain === false
-      ? { capabilities: withoutSigninPort() }
-      : { signins: options.signins ?? { google: PERSON_TOKEN } }),
+      ? { capabilities: { ...withoutSigninPort(), ...options.capabilities } }
+      : {
+          signins: options.signins ?? { google: PERSON_TOKEN },
+          ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
+        }),
     ...(options.section === undefined ? {} : { section: options.section }),
     async fetch(url: string, init: HostFetchInit) {
-      const parsed = new URL(url);
-      const call: DriveCall = {
-        method: init.method ?? 'GET',
-        path: decodeURIComponent(parsed.pathname),
-        query: Object.fromEntries(parsed.searchParams),
-        authorization: String(init.headers?.['Authorization'] ?? ''),
-        ...(init.body === undefined ? {} : { body: JSON.parse(String(init.body)) as unknown }),
-      };
-      calls.push(call);
-      return answerOf(drive, call);
+      return driveAnswer(drive, calls, url, init);
     },
   });
   if (!loaded.ok) {
@@ -108,13 +134,121 @@ export async function fakeDrive(
   return { plugin: loaded.value, calls, drive };
 }
 
+/** The fake's answer to one request, recorded in `calls`. */
+export function driveAnswer(
+  drive: FakeDrive,
+  calls: DriveCall[],
+  url: string,
+  init: HostFetchInit,
+): FetchedResponse {
+  const parsed = new URL(url);
+  const call: DriveCall = {
+    method: init.method ?? 'GET',
+    path: decodeURIComponent(parsed.pathname),
+    query: Object.fromEntries(parsed.searchParams),
+    authorization: String(init.headers?.['Authorization'] ?? ''),
+    ...(init.headers === undefined ? {} : { headers: init.headers }),
+    ...(init.body instanceof Uint8Array
+      ? { bytes: init.body }
+      : init.body === undefined
+        ? {}
+        : { body: JSON.parse(init.body) as unknown }),
+  };
+  calls.push(call);
+  return answerOf(drive, call);
+}
+
 const FILES = '/drive/v3/files';
+const UPLOADS = '/upload/drive/v3/files';
+let sessionCount = 0;
+
+/**
+ * Drive's resumable upload: a POST (a new file) or a PATCH (new content for one, whose id
+ * stays) opens a session at the `Location` it answers; each PUT sends a chunk, or asks with
+ * an empty `Content-Range` total where the session stands. A 308 says how far it got.
+ */
+function uploaded(drive: FakeDrive, call: DriveCall): FetchedResponse {
+  const sessions = (drive.sessions ??= new Map());
+  if (call.method !== 'PUT') {
+    if (call.query['uploadType'] !== 'resumable') throw new Error('not a resumable upload');
+    const body = call.body as { name?: string; parents?: string[]; modifiedTime: string };
+    const replaces = call.path.slice(UPLOADS.length + 1);
+    const target = drive.items.find((each) => each.id === replaces);
+    sessionCount += 1;
+    const id = `s${sessionCount}`;
+    sessions.set(id, {
+      name: body.name ?? target?.name ?? '',
+      parents: body.parents ?? target?.parents ?? [],
+      modifiedTime: body.modifiedTime,
+      ...(replaces === '' ? {} : { replaces }),
+      total: Number(call.headers?.['X-Upload-Content-Length']),
+      received: 0,
+      checksum: 0,
+    });
+    const location = `https://www.googleapis.com${UPLOADS}?uploadType=resumable&upload_id=${id}`;
+    return response(200, '', { location });
+  }
+  const session = sessions.get(call.query['upload_id'] ?? '');
+  if (session === undefined) return response(404, { error: { code: 404, message: 'No session.' } });
+  const held = (): FetchedResponse =>
+    session.done !== undefined
+      ? response(200, { id: session.done })
+      : response(
+          308,
+          '',
+          session.received === 0 ? {} : { range: `bytes=0-${session.received - 1}` },
+        );
+  const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(call.headers?.['Content-Range'] ?? '');
+  if (range === null) {
+    if (session.received === session.total && session.done === undefined) finish(drive, session);
+    return held();
+  }
+  const start = Number(range[1]);
+  const bytes = call.bytes ?? new Uint8Array(0);
+  // Strict on purpose: a chunk that does not start where the session stands is refused, so an
+  // upload that guesses its offset after a lost chunk, instead of asking, fails here.
+  if (start !== session.received || Number(range[2]) - start + 1 !== bytes.length) {
+    return response(400, { error: { code: 400, message: 'Content-Range does not match.' } });
+  }
+  const kept = (drive.lostChunks ?? 0) > 0 ? bytes.subarray(0, bytes.length / 2) : bytes;
+  session.checksum = checksumOf(kept, start, session.checksum);
+  session.received += kept.length;
+  if (kept !== bytes) {
+    drive.lostChunks = (drive.lostChunks ?? 1) - 1;
+    return response(503, { error: { code: 503, message: 'Backend Error' } });
+  }
+  if (session.received === session.total) finish(drive, session);
+  return held();
+}
+
+function finish(drive: FakeDrive, session: FakeSession): void {
+  const existing = drive.items.find((each) => each.id === session.replaces);
+  if (existing !== undefined) {
+    existing.size = session.total;
+    existing.modifiedTime = session.modifiedTime;
+    session.done = existing.id;
+    return;
+  }
+  generated += 1;
+  const id = `up${String(generated).padStart(12, '0')}`;
+  drive.items.push({
+    id,
+    name: session.name,
+    mimeType: 'application/octet-stream',
+    parents: [...session.parents],
+    size: session.total,
+    createdTime: '2026-11-19T09:00:00.000Z',
+    modifiedTime: session.modifiedTime,
+  });
+  session.done = id;
+}
 
 type InputTable = NonNullable<TestRecipeOptions['input']>;
 
 let generated = 0;
 
 function answerOf(drive: FakeDrive, call: DriveCall): FetchedResponse {
+  if (call.path.startsWith(UPLOADS)) return uploaded(drive, call);
   if (call.path === FILES && call.method === 'POST') return created(drive, call);
   if (call.path === FILES) return listOf(drive, call.query);
   if (call.path === `${FILES}/generateIds`) {

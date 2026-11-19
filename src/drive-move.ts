@@ -254,7 +254,7 @@ export async function planDriveMove(
   };
 }
 
-type Destination =
+export type Destination =
   | { readonly ok: true; readonly folder: DriveFile }
   | { readonly ok: false; readonly error: GoogleError }
   | { readonly ok: false; readonly problem: string };
@@ -264,7 +264,7 @@ type Destination =
  * `parent`, and, when none is and the text looks like an id, the folder of that id. A missing
  * or ambiguous destination, one that is not a folder, or one outside the root stops the plan.
  */
-async function destinationOf(
+export async function destinationOf(
   walk: RootWalk,
   rootId: string,
   parent: string,

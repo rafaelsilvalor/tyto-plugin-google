@@ -32,7 +32,7 @@ describe('tyto-plugin.json', () => {
     if (loaded.ok) await loaded.value.close();
   });
 
-  it('reaches only the Sheets and Drive API hosts, and holds a sign-in and no credential', async () => {
+  it('reaches only the Sheets and Drive API hosts, reads the workspace, and holds no credential', async () => {
     const plugin = await harness();
     expect(plugin.manifest.name).toBe('google');
     expect(plugin.manifest.namespace).toBe('google');
@@ -44,13 +44,16 @@ describe('tyto-plugin.json', () => {
       'net:sheets.googleapis.com',
       'net:www.googleapis.com',
       'signin:google',
+      // `google.drive-upload` reads the files it sends, and writes none of the workspace.
+      'workspace:read',
     ]);
     await plugin.close();
   });
 
   it('declares the Google sign-in with no client, which the person supplies (Tyto ADR 0192)', async () => {
     const plugin = await harness({ google: 'person-token' });
-    expect(plugin.manifest.engine).toBe('>=0.20');
+    // Reading a workspace file in parts came with plugin API 0.24 (Tyto ADR 0212).
+    expect(plugin.manifest.engine).toBe('>=0.24');
     expect(plugin.manifest.signin).toEqual({
       google: {
         authorize:
@@ -79,6 +82,8 @@ describe('tyto-plugin.json', () => {
       'format-tab',
       'create',
       'share',
+      'upload',
+      'replace',
     ]);
     // `move` is both a sync's (a row to another tab) and `google.drive-move`'s.
     const declared = [
@@ -99,7 +104,7 @@ describe('tyto-plugin.json', () => {
 });
 
 describe('activate', () => {
-  it('registers no setting, the three sources, the two sheet sinks, the three actions and the transforms', async () => {
+  it('registers no setting, the three sources, the two sheet sinks, the four actions and the transforms', async () => {
     const plugin = await harness();
     expect(plugin.host.registry.configurations()).toEqual([]);
     expect(plugin.host.registry.recipeVerbs().map((verb) => `${verb.id}:${verb.kind}`)).toEqual([
@@ -111,6 +116,7 @@ describe('activate', () => {
       'google.drive-move:action',
       'google.drive-folder:action',
       'google.sheet-create:action',
+      'google.drive-upload:action',
       'google.drive-count:transform',
       'google.sheet-lookup:transform',
     ]);

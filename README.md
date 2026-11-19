@@ -5,7 +5,7 @@ Google Drive from a recipe. Tyto knows no provider (Tyto ADR 0011, ADR 0127): ev
 Google-specific lives here, in its own repository, and reaches Tyto only through the plugin API.
 This repository is public and unlicensed.
 
-Ten recipe verbs, all in the `google` namespace:
+Eleven recipe verbs, all in the `google` namespace:
 
 | Verb                  | Kind      | What it does                                                       |
 | --------------------- | --------- | ------------------------------------------------------------------ |
@@ -17,6 +17,7 @@ Ten recipe verbs, all in the `google` namespace:
 | `google.drive-move`   | action    | Moves each row's file or folder into a folder under the root.      |
 | `google.drive-folder` | action    | Creates a folder per row as you, and shares it with listed people. |
 | `google.sheet-create` | action    | Creates a spreadsheet per row as you, and shares it likewise.      |
+| `google.drive-upload` | action    | Sends each row's workspace file or folder into a Drive folder.     |
 | `google.drive-count`  | transform | Adds the number of PNG and JPEG files in each row's folder.        |
 | `google.sheet-lookup` | transform | Adds a tab's columns to each row, found by a key column.           |
 
@@ -41,6 +42,7 @@ the permissions below and asks for your approval.
 | `net:sheets.googleapis.com` | The Sheets API: reading and writing a spreadsheet.    |
 | `net:www.googleapis.com`    | The Drive API: listing, reading, moving and creating. |
 | `signin:google`             | Your own Google sign-in, run by Tyto in your browser. |
+| `workspace:read`            | The open folder's files, for `google.drive-upload`.   |
 
 **The plugin acts only as you, the person signed in**, with your own Google sign-in, on every
 verb: in the desktop app, and in a terminal (`tyto recipe run`, `tyto mcp`) after
@@ -61,8 +63,8 @@ account sees, so a spreadsheet or a folder needs no sharing with anyone else, an
 cannot open answers as missing, with an error that says it is not shared with the account signed
 in on the plugins screen. `google.drive-folder` and `google.sheet-create` create what is yours,
 in your Drive or a shared drive you can write to, shared only with the people a row lists. Every
-verb needs Tyto's desktop app 0.21 or later (plugin API 0.20), which runs the sign-in; signing
-in from a terminal needs Tyto 0.22 or later. Tyto runs that sign-in, not the plugin: the
+verb needs Tyto's desktop app 0.24.1 or later (plugin API 0.24), which runs the sign-in and
+reads workspace files in parts; the plugin installs on no older Tyto. Tyto runs that sign-in, not the plugin: the
 browser opens only when you click **Sign in** on the plugins screen, and the plugin receives a
 short-lived access token and never the refresh token, which Tyto keeps in the system keychain
 (Tyto ADR 0174).
@@ -523,6 +525,53 @@ no Sheets API request is made and Google names its first tab. Only a spreadsheet
 name counts as already there: a folder or another file of that name is a different item. Each
 `create` shows the spreadsheet's address, `https://docs.google.com/spreadsheets/d/<id>/edit`,
 before it exists.
+
+## `google.drive-upload`
+
+An action: sends each row's file, or its folder with everything under it, from the open
+workspace into a Drive folder under the root, as the signed-in person, as a plan you read and
+then apply. It needs Tyto 0.24.1 or later (plugin API 0.24), which reads a workspace file in
+parts.
+
+```
+google.drive-upload from=Path to=Deliveries
+```
+
+| Argument     | What it does                                                                          |
+| ------------ | ------------------------------------------------------------------------------------- |
+| `from=`      | The column holding each row's file or folder, relative to the workspace; required.    |
+| `to=`        | The Drive folder for every row: a folder directly in the root by its name, or its id. |
+| `to-column=` | The column naming each row's Drive folder instead, as `to=` names one.                |
+
+- **The workspace is read only through Tyto** (Tyto ADR 0130, ADR 0212), never opened by the
+  plugin itself. A row whose path is not in the workspace fails in the plan.
+- **A folder goes as a folder of its name** inside the destination, found or created, and so
+  does every folder under it, at most six deep. A folder the plan creates shows its address,
+  because its id is generated first.
+- **One line per file**: `upload` for a file Drive does not have, `replace` for one it has of
+  that name in that folder. **A replace keeps the Drive file's id**, so a link to it, in a sheet
+  or anywhere, still opens it. Two files or two folders of one name in a Drive folder fail the row.
+- **A file is left alone when Drive has one of its name, size and modification time** in that
+  folder, with one warning listing them. The plugin sets the time of every file it sends to the
+  local file's, so the next run sees the same, and an edit that keeps the size still counts. **A
+  file put in Drive another way (dragged in a browser) has its own time, and is replaced once**,
+  on the first run that meets it; after that it is left alone.
+
+### Applying an upload
+
+Every file goes through a resumable upload, in 8 MiB chunks, one read of the workspace each, so
+a 100 MB editable never sits in memory whole. A chunk Drive loses (a 5xx, no answer) is followed
+by asking the session how far it got, and the upload goes on from there; a 429 waits as every
+request does (see [Retries](#retries)).
+
+**A big file takes more than one Apply.** One Apply spends at most 20 s, under Tyto's 30 s for a
+plugin call, and starts a chunk only when the last one's time still fits. A file not finished is
+`skipped`, saying how much was sent: run the cell and Apply again, and it goes on from there,
+because the session is kept in the plugin's cache (Drive keeps one for a week). Until Tyto calls
+an Apply again on its own for such a file (TYTO-791), you apply until it reads `applied`.
+
+A local file changed since the plan, or while it was sent, fails with `E_GOOGLE_CHANGED`. An
+Apply run twice sends nothing again: a file already in Drive as planned counts as `applied`.
 
 ## `google.drive-count`
 
