@@ -15,8 +15,8 @@ importers:
         specifier: ^26.6.2
         version: 26.6.5
       '@tyto/plugin-api':
-        specifier: npm:@rafaelsilvalor/tyto-plugin-api@^0.24.0
-        version: '@rafaelsilvalor/tyto-plugin-api@0.24.2'
+        specifier: npm:@rafaelsilvalor/tyto-plugin-api@^0.25.0
+        version: '@rafaelsilvalor/tyto-plugin-api@0.25.0'
       eslint:
         specifier: ^10.11.0
         version: 10.13.0
@@ -306,17 +306,17 @@ packages:
   '@oxc-project/types@0.155.0':
     resolution: {integrity: sha512-SeE8JPwW1xs1tHeNycjUtUBdhorRa8o4jlvjwk49R7/Z291i+4DQa7JJIgOm/TaYQZx+QrPQbVJ/9c8dMIZN8Q==}
 
-  '@rafaelsilvalor/tyto-brief-lang@0.12.0':
-    resolution: {integrity: sha512-Q1QRvWgKcJdhqDfdrjRfxD/mjNjktTddJLnlauJnL5Cda37ieBeR/b74fsAdUKTNP4BqxENQR0XPPHJhAzLRDw==, tarball: https://npm.pkg.github.com/download/@rafaelsilvalor/tyto-brief-lang/0.12.0/9c71b0f3264ec81293a23d0d34a1496bfc6e80de}
+  '@rafaelsilvalor/tyto-brief-lang@0.12.3':
+    resolution: {integrity: sha512-xpUguXVdEKxtGJPmPynQ/2E3LUQuMMH/uT0anGYDbPobCIZXMfHXxqhqKzH1KG3p4JzAcQgjiNfu9JXV0HO5mw==, tarball: https://npm.pkg.github.com/download/@rafaelsilvalor/tyto-brief-lang/0.12.3/5b194f9d0b37e7d9bdaddf4a3b5aae33db401b8d}
 
-  '@rafaelsilvalor/tyto-core@0.51.0':
-    resolution: {integrity: sha512-wnBxKGpr+CKIuX4qWSc2/fIthsrJOv6IXVoxr8LwATqIBoXU6j0cHPqSYC/ep5KW1PQDEJSDFcCzyTJ4sHA9Yg==, tarball: https://npm.pkg.github.com/download/@rafaelsilvalor/tyto-core/0.51.0/9f018d3e2ba86ecf0656f334eb61cf76d7db76ee}
+  '@rafaelsilvalor/tyto-core@0.52.0':
+    resolution: {integrity: sha512-Dwg4Bf6IdQ/i+6SJYzMmJSTBtwKX3pJDDjwC4ZYtTVvjORDoYJmTEGxd5hRFqEU96RZ8pogwxyL09n6dYM7wYw==, tarball: https://npm.pkg.github.com/download/@rafaelsilvalor/tyto-core/0.52.0/aeb4204cc05d0061af51c6965372c6b04427eb4d}
 
-  '@rafaelsilvalor/tyto-plugin-api@0.24.2':
-    resolution: {integrity: sha512-762zvkM038TecpMDZUf79HI8S13Rjoig74Wm4LRuEVwsvLPTQb9EG9IJ7fYZN1xGMUQvcz3DlpvCyvai2u7efA==, tarball: https://npm.pkg.github.com/download/@rafaelsilvalor/tyto-plugin-api/0.24.2/1b33d0a106d9c2b2b88853aecdedbafb9834d6c3}
+  '@rafaelsilvalor/tyto-plugin-api@0.25.0':
+    resolution: {integrity: sha512-vNP/0pFEAu50JHNytiZryWDi1D7oT0fNhQqQNmK+SaoORADWthlsZNYw3pC3+B8NF5UTyuuHptmL7ef3lcMZIA==, tarball: https://npm.pkg.github.com/download/@rafaelsilvalor/tyto-plugin-api/0.25.0/d9396de8132a5c6d5b425d951e8e0fc5c435ed05}
 
-  '@rafaelsilvalor/tyto-recipe@0.10.0':
-    resolution: {integrity: sha512-G/Pt1cLpcxAahxzf945hvf8K8Le4CWsd8M1hHY6y3WKYuOaYgF4dEEU+yCzheLJ7gAL6Yj02JVbP99ihdcpEnQ==, tarball: https://npm.pkg.github.com/download/@rafaelsilvalor/tyto-recipe/0.10.0/d062277fc8a223f015f2c0532d0cd2d1b66e00b9}
+  '@rafaelsilvalor/tyto-recipe@0.13.0':
+    resolution: {integrity: sha512-2edY99tD/PF1WPDfwWELhykc0LKFSCLUUcGFieM593s8s6/FoBZ2CP233mWAAe0AB5JXK7ayalxOovxyMCkkQw==, tarball: https://npm.pkg.github.com/download/@rafaelsilvalor/tyto-recipe/0.13.0/2f04e5aa52552ea7973e69b3c3c8d8aecb4cb026}
 
   '@rolldown/binding-android-arm-eabi@1.2.15':
     resolution: {integrity: sha512-aLcgK9gIJ3YRvrrtfSBbRa27F5WrpiTaPulnFpsHPxpUHgFlSgnU4854MHwoRGEBhfRJDWCS2WQ7lIjskE9Olw==}
@@ -1545,31 +1545,31 @@ snapshots:
 
   '@oxc-project/types@0.155.0': {}
 
-  '@rafaelsilvalor/tyto-brief-lang@0.12.0':
+  '@rafaelsilvalor/tyto-brief-lang@0.12.3':
     dependencies:
       '@lezer/common': 1.5.5
       '@lezer/highlight': 1.2.5
       '@lezer/lr': 1.4.12
-      '@tyto/core': '@rafaelsilvalor/tyto-core@0.51.0'
+      '@tyto/core': '@rafaelsilvalor/tyto-core@0.52.0'
       yaml: 2.9.1
 
-  '@rafaelsilvalor/tyto-core@0.51.0':
+  '@rafaelsilvalor/tyto-core@0.52.0':
     dependencies:
       fontkit: 2.0.4
       yaml: 2.9.1
       zod: 4.6.7
 
-  '@rafaelsilvalor/tyto-plugin-api@0.24.2':
+  '@rafaelsilvalor/tyto-plugin-api@0.25.0':
     dependencies:
-      '@tyto/core': '@rafaelsilvalor/tyto-core@0.51.0'
-      '@tyto/recipe': '@rafaelsilvalor/tyto-recipe@0.10.0'
+      '@tyto/core': '@rafaelsilvalor/tyto-core@0.52.0'
+      '@tyto/recipe': '@rafaelsilvalor/tyto-recipe@0.13.0'
       yaml: 2.9.1
       zod: 4.6.7
 
-  '@rafaelsilvalor/tyto-recipe@0.10.0':
+  '@rafaelsilvalor/tyto-recipe@0.13.0':
     dependencies:
-      '@tyto/brief-lang': '@rafaelsilvalor/tyto-brief-lang@0.12.0'
-      '@tyto/core': '@rafaelsilvalor/tyto-core@0.51.0'
+      '@tyto/brief-lang': '@rafaelsilvalor/tyto-brief-lang@0.12.3'
+      '@tyto/core': '@rafaelsilvalor/tyto-core@0.52.0'
       jsonc-parser: 3.3.1
       zod: 4.6.7
 
