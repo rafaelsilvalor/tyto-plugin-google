@@ -550,6 +550,12 @@ google.drive-upload from=Path to=Deliveries
 - **A folder goes as a folder of its name** inside the destination, found or created, and so
   does every folder under it, at most six deep. A folder the plan creates shows its address,
   because its id is generated first.
+- **That address holds until the upload applies.** The id is kept in the plugin's cache, by
+  the folder it goes in and its name, so planning again before Apply keeps the same address,
+  and [`google.drive-url`](#googledrive-url) below the upload gives it already (see
+  [Before the upload applies](#before-the-upload-applies)). Once the folder is created the
+  kept id is forgotten. A kept id Drive already holds (a folder made from it, then trashed)
+  is dropped for a new one.
 - **One line per file**: `upload` for a file Drive does not have, `replace` for one it has of
   that name in that folder. **A replace keeps the Drive file's id**, so a link to it, in a sheet
   or anywhere, still opens it. Two files or two folders of one name in a Drive folder fail the row.
@@ -667,9 +673,10 @@ google.drive-url path=Path in=Deliveries
 
 - The folder looked up is the one named as the path's last segment (`entregas/D1` reads `D1`),
   directly in `in=`, not in the trash: the folder the upload finds or creates.
-- **Empty while the folder is not there**: a recipe can run it before the first upload is
-  applied, and the next run fills it in. Two folders of one name leave it empty too, with a
-  warning, as the upload refuses that row.
+- **While the folder is not there**, it is the address `google.drive-upload` planned for it,
+  with a warning, or empty when no upload planned one; see
+  [Before the upload applies](#before-the-upload-applies). Two folders of one name leave it
+  empty, with a warning, as the upload refuses that row.
 - Each distinct name is looked up once; more than 100 in one table is refused before any
   request. Nothing is written.
 
@@ -717,6 +724,26 @@ google.doc-text doc=Copy
 google.doc-text doc=Copy
 to-delivery copy-text=Copy_text
 ```
+
+### Before the upload applies
+
+An action answers a plan and cannot add a column, so `google.drive-upload` gives no
+`<from>_url` itself. Put `google.drive-url` below it: where the folder is not in Drive yet, it
+answers the address the upload planned, from the id the upload kept in the plugin's cache, and
+warns that the folder will be created by the upload above when its plan is applied. A recipe
+under `apply together` (Tyto ADR 0219) plans the steps below the upload before it applies, so a
+sheet write or a tracker comment there carries the link in the same Apply.
+
+```
+apply together
+google.drive-upload from=Path to=Deliveries
+google.drive-url path=Path in=Deliveries
+google.sheet-sync tab=Deliveries key=Path
+```
+
+The address is the upload's only while its plan is the one applied: a plan never applied
+leaves the address pointing nowhere, and the warning says so on every run until the folder is
+there.
 
 ## Retries
 

@@ -12,6 +12,7 @@ import {
   type UploadPayload,
 } from './drive-upload.js';
 import { describeGoogleError, messageOf, type GoogleError } from './errors.js';
+import { forgetPlannedFolder } from './planned-folder.js';
 import { headerOf, type Answer, type GoogleClient } from './http.js';
 import {
   APPLY_BUDGET_MILLISECONDS,
@@ -66,6 +67,8 @@ export async function applyDriveUploads(
       const made = await create(client, payload);
       if (made === undefined || budget.refusedForTime()) break;
       if (made.status === 'failed') notCreated.set(payload.c, made.reason ?? 'failed');
+      // The folder answers for itself now: `google.drive-url` finds it by its name.
+      else await forgetPlannedFolder(host, payload.p, payload.n);
       outcomes[index] = made;
       continue;
     }
