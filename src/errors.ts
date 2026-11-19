@@ -37,6 +37,11 @@ export interface GoogleError {
    * `E_SIGNIN_REQUIRED`, `E_SIGNIN_UNAVAILABLE`).
    */
   readonly hostCode?: string;
+  /**
+   * Google's own `reason`s for a failed answer (`exportSizeLimitExceeded`…), for a verb that
+   * treats one refusal as data about a row rather than as the step's failure.
+   */
+  readonly reasons?: readonly string[];
 }
 
 export type GoogleResult<T> =
@@ -137,6 +142,16 @@ const QUOTED_LIMIT = 300;
  */
 export function classifyFailure(label: string, status: number, text: string): GoogleError {
   const body = readErrorBody(text);
+  const failure = classified(label, status, text, body);
+  return body.reasons.length === 0 ? failure : { ...failure, reasons: body.reasons };
+}
+
+function classified(
+  label: string,
+  status: number,
+  text: string,
+  body: GoogleErrorBody,
+): GoogleError {
   const said = quoted(body, text);
   const signatures = [text, ...body.reasons, body.status ?? ''].join('\n');
 

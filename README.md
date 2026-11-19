@@ -5,7 +5,7 @@ Google Drive from a recipe. Tyto knows no provider (Tyto ADR 0011, ADR 0127): ev
 Google-specific lives here, in its own repository, and reaches Tyto only through the plugin API.
 This repository is public and unlicensed.
 
-Twelve recipe verbs, all in the `google` namespace:
+Thirteen recipe verbs, all in the `google` namespace:
 
 | Verb                  | Kind      | What it does                                                       |
 | --------------------- | --------- | ------------------------------------------------------------------ |
@@ -21,6 +21,7 @@ Twelve recipe verbs, all in the `google` namespace:
 | `google.drive-count`  | transform | Adds the number of PNG and JPEG files in each row's folder.        |
 | `google.sheet-lookup` | transform | Adds a tab's columns to each row, found by a key column.           |
 | `google.drive-url`    | transform | Adds the address of the Drive folder an upload sent each row to.   |
+| `google.doc-text`     | transform | Adds the text of each row's Google Doc, as Markdown.               |
 
 A sink or an action plans: it shows what it would write, and nothing is written until you
 apply the plan.
@@ -684,6 +685,37 @@ never this plugin's.
 google.drive-upload from=Path to=Deliveries
 google.drive-url path=Path in=Deliveries
 google.sheet-sync tab=Deliveries key=Path
+```
+
+## `google.doc-text`
+
+A transform: adds `<column>_text`, the text of the Google Doc each row links to, exported by
+Drive as Markdown, so a copy keeps its headings, lists and emphasis.
+
+```
+google.doc-text doc=Copy
+```
+
+| Argument | What it does                                                |
+| -------- | ----------------------------------------------------------- |
+| `doc=`   | The column holding each row's Google Doc link; required.    |
+| `as=`    | The name of the column it adds; `<column>_text` by default. |
+
+- **A Doc link** is an address on `docs.google.com/document/d/<id>/…` (also with `/u/<n>/`
+  after `document`). A bare id, or a Drive `file/d/` link, is not read: it could be any file.
+- **The cell stays empty, with one warning naming the rows**, when it is not a Doc link; when
+  it links a Sheet, Slides or another Google file (never sent to Drive); when the Doc does not
+  exist or is not shared with you; when it is an uploaded Word file Docs opens without
+  converting; and when its text is over Drive's 10 MB export limit. A blank cell is left empty
+  with no warning. Any other failure (the sign-in, the network) fails the step.
+- Each distinct Doc is exported once, however many rows link it. More than 100 distinct Docs
+  in one table is refused before any request: narrow the table first. Nothing is written.
+- The added column feeds Tyto's `to-delivery copy-text=<column>` (Tyto ADR 0217), which writes
+  it into the delivery's `editaveis/copy.md`:
+
+```
+google.doc-text doc=Copy
+to-delivery copy-text=Copy_text
 ```
 
 ## Retries
