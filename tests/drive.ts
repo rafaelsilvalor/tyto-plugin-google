@@ -16,6 +16,7 @@ const entry = new URL('../dist/index.js', import.meta.url).href;
 
 export const FOLDER_MIME = 'application/vnd.google-apps.folder';
 export const SPREADSHEET_MIME = 'application/vnd.google-apps.spreadsheet';
+export const DOCUMENT_MIME = 'application/vnd.google-apps.document';
 /** The Google types `files.create` makes with no content; any other `google-apps` type is 400. */
 const CREATABLE_NATIVE = [FOLDER_MIME, SPREADSHEET_MIME];
 export const INBOX_ID = 'inbox0123456789';
@@ -39,6 +40,8 @@ export interface FakeItem {
   permissions?: { email: string; role: string; notified: boolean }[];
   /** `permissions.list` answers 403, as Drive does to a person who may not see the sharing. */
   permissionsHidden?: boolean;
+  /** A Doc's text over Drive's 10 MB export limit: `files.export` answers 403. */
+  exportTooLarge?: boolean;
 }
 
 export interface FakeDrive {
@@ -268,6 +271,7 @@ function answerOf(drive: FakeDrive, call: DriveCall): FetchedResponse {
   if (sub === 'permissions' && call.method === 'POST') return shared(drive, item, call);
   if (sub === 'permissions' && call.method === 'GET') return permissionsOf(drive, item, call);
   if (sub === 'permissions') throw new Error(`the plugin sent ${call.method} to permissions`);
+  if (sub === 'export') return exported(item, call);
   if (call.method === 'PATCH') {
     // Drive's files.update: the folders to add and remove, comma-separated, as Drive reads them.
     const removed = (call.query['removeParents'] ?? '').split(',').filter((id) => id !== '');
@@ -288,6 +292,39 @@ function answerOf(drive: FakeDrive, call: DriveCall): FetchedResponse {
     return response(200, item.content);
   }
   return response(200, described(item));
+}
+
+/**
+ * `files.export` of a Doc: its `content` as Markdown, or as plain text with the Markdown marks
+ * dropped, so a test tells which one was asked. A file that is not a Google editor file, and a
+ * Doc over the 10 MB limit, answer the 403s Drive does.
+ */
+function exported(item: FakeItem, call: DriveCall): FetchedResponse {
+  if (call.method !== 'GET') throw new Error(`the plugin sent ${call.method} to export`);
+  if (!item.mimeType.startsWith('application/vnd.google-apps.')) {
+    return response(403, {
+      error: {
+        code: 403,
+        message: 'Export only supports Docs Editors files.',
+        errors: [{ reason: 'fileNotExportable' }],
+      },
+    });
+  }
+  if (item.exportTooLarge === true) {
+    return response(403, {
+      error: {
+        code: 403,
+        message: 'This file is too large to be exported.',
+        errors: [{ reason: 'exportSizeLimitExceeded' }],
+      },
+    });
+  }
+  const content = item.content ?? '';
+  if (call.query['mimeType'] === 'text/markdown') return response(200, content);
+  if (call.query['mimeType'] === 'text/plain') return response(200, content.replace(/[#*_]/g, ''));
+  return response(400, {
+    error: { code: 400, message: 'The requested conversion is not supported.' },
+  });
 }
 
 /** `files.create` with a generated id: a second create of one id is Drive's 409. */

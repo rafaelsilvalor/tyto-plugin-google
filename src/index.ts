@@ -1,5 +1,6 @@
 import type { Disposable, PluginHost } from '@tyto/plugin-api';
 
+import { docTextVerb } from './doc-text.js';
 import { driveCountVerb } from './drive-count.js';
 import { driveFolderVerb } from './drive-folder.js';
 import { driveListVerb } from './drive-list.js';
@@ -18,7 +19,8 @@ import { sheetWriteVerb } from './sheet-write.js';
  * `google.drive-list` and `google.drive-read` sources, the `google.sheet-write` and
  * `google.sheet-sync` sinks, the `google.drive-move`, `google.drive-folder`, `google.sheet-create` and
  * `google.drive-upload` actions, and the
- * `google.drive-count`, `google.sheet-lookup` and `google.drive-url` transforms.
+ * `google.drive-count`, `google.sheet-lookup`, `google.drive-url` and `google.doc-text`
+ * transforms.
  *
  * Nothing is read at activation: the sign-in and the project's `google` section are resolved
  * on every call of a verb, so a sign-in or a folder changed between two runs is what the next
@@ -38,6 +40,7 @@ export function activate(host: PluginHost): Disposable {
     host.registerRecipeVerb(driveCountVerb(host)),
     host.registerRecipeVerb(sheetLookupVerb(host)),
     host.registerRecipeVerb(driveUrlVerb(host)),
+    host.registerRecipeVerb(docTextVerb(host)),
   ];
   return {
     dispose() {

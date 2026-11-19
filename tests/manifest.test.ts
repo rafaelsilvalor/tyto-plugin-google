@@ -122,6 +122,7 @@ describe('activate', () => {
       'google.drive-count:transform',
       'google.sheet-lookup:transform',
       'google.drive-url:transform',
+      'google.doc-text:transform',
     ]);
     await plugin.close();
   });
