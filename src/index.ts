@@ -6,6 +6,7 @@ import { driveListVerb } from './drive-list.js';
 import { driveMoveVerb } from './drive-move.js';
 import { driveReadVerb } from './drive-read.js';
 import { driveUploadVerb } from './drive-upload.js';
+import { driveUrlVerb } from './drive-url.js';
 import { sheetCreateVerb } from './sheet-create.js';
 import { sheetLookupVerb } from './sheet-lookup.js';
 import { sheetRowsVerb } from './sheet-rows.js';
@@ -17,7 +18,7 @@ import { sheetWriteVerb } from './sheet-write.js';
  * `google.drive-list` and `google.drive-read` sources, the `google.sheet-write` and
  * `google.sheet-sync` sinks, the `google.drive-move`, `google.drive-folder`, `google.sheet-create` and
  * `google.drive-upload` actions, and the
- * `google.drive-count` and `google.sheet-lookup` transforms.
+ * `google.drive-count`, `google.sheet-lookup` and `google.drive-url` transforms.
  *
  * Nothing is read at activation: the sign-in and the project's `google` section are resolved
  * on every call of a verb, so a sign-in or a folder changed between two runs is what the next
@@ -36,6 +37,7 @@ export function activate(host: PluginHost): Disposable {
     host.registerRecipeVerb(driveUploadVerb(host)),
     host.registerRecipeVerb(driveCountVerb(host)),
     host.registerRecipeVerb(sheetLookupVerb(host)),
+    host.registerRecipeVerb(driveUrlVerb(host)),
   ];
   return {
     dispose() {

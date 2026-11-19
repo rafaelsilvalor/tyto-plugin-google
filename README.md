@@ -5,7 +5,7 @@ Google Drive from a recipe. Tyto knows no provider (Tyto ADR 0011, ADR 0127): ev
 Google-specific lives here, in its own repository, and reaches Tyto only through the plugin API.
 This repository is public and unlicensed.
 
-Eleven recipe verbs, all in the `google` namespace:
+Twelve recipe verbs, all in the `google` namespace:
 
 | Verb                  | Kind      | What it does                                                       |
 | --------------------- | --------- | ------------------------------------------------------------------ |
@@ -20,6 +20,7 @@ Eleven recipe verbs, all in the `google` namespace:
 | `google.drive-upload` | action    | Sends each row's workspace file or folder into a Drive folder.     |
 | `google.drive-count`  | transform | Adds the number of PNG and JPEG files in each row's folder.        |
 | `google.sheet-lookup` | transform | Adds a tab's columns to each row, found by a key column.           |
+| `google.drive-url`    | transform | Adds the address of the Drive folder an upload sent each row to.   |
 
 A sink or an action plans: it shows what it would write, and nothing is written until you
 apply the plan.
@@ -645,6 +646,42 @@ google.sheet-lookup tab=Tasks key=ID columns=Status,Owner
   while Drive gives the same `version`, which any edit to the spreadsheet raises. Running again
   without cache does not reach a transform yet (Tyto's plugin API hands it to sources only), so
   the lookup relies on that version.
+
+## `google.drive-url`
+
+A transform: adds `<column>_url`, a link to the Drive folder that
+[`google.drive-upload`](#googledrive-upload) sends each row's workspace folder to.
+
+```
+google.drive-url path=Path in=Deliveries
+```
+
+| Argument | What it does                                                                        |
+| -------- | ----------------------------------------------------------------------------------- |
+| `path=`  | The column holding each row's workspace folder, as `from=` of the upload; required. |
+| `in=`    | The Drive folder the upload went to, as its `to=`; the root by default.             |
+
+- The folder looked up is the one named as the path's last segment (`entregas/D1` reads `D1`),
+  directly in `in=`, not in the trash: the folder the upload finds or creates.
+- **Empty while the folder is not there**: a recipe can run it before the first upload is
+  applied, and the next run fills it in. Two folders of one name leave it empty too, with a
+  warning, as the upload refuses that row.
+- Each distinct name is looked up once; more than 100 in one table is refused before any
+  request. Nothing is written.
+
+### Using the link
+
+`<column>_url` is a link column, so the verbs that write a sheet link with it: beside a `Path`
+column, `google.sheet-write` and `google.sheet-sync` write `Path` as text linked to the folder.
+A step that writes a tracker field, such as a Jira card's folder field, can take its value from
+the same column; which field, and in which flow, is the workspace recipe's to say (TYTO-758),
+never this plugin's.
+
+```
+google.drive-upload from=Path to=Deliveries
+google.drive-url path=Path in=Deliveries
+google.sheet-sync tab=Deliveries key=Path
+```
 
 ## Retries
 
