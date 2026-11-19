@@ -217,7 +217,9 @@ async function send(transport, outgoing, redact) {
       );
     }
     const text = await bodyText(response);
-    if (status >= 200 && status < 300) return googleOk({ status, headers, text });
+    if (status >= 200 && status < 300) {
+      return googleOk({ status, headers, text, bytes: response.body });
+    }
     const rate = isRateLimited(status, readErrorBody(text));
     if (!rate && !(idempotent && status >= 500)) return googleOk({ status, headers, text });
     const asked = retryAfter(headerOf(headers, "retry-after"), now());
@@ -300,7 +302,7 @@ function createGoogleClient(options) {
         redact
       );
       if (!answer.ok) return answer;
-      const { status, text, headers } = answer.value;
+      const { status, text, headers, bytes } = answer.value;
       if (status === 401 && attempt === 0) {
         tokens.invalidate();
         continue;
@@ -309,7 +311,7 @@ function createGoogleClient(options) {
         const failure = classifyFailure(label, status, text);
         return { ok: false, error: { ...failure, message: redact(failure.message) } };
       }
-      return googleOk({ status, text, headers, label });
+      return googleOk({ status, text, headers, label, ...bytes === void 0 ? {} : { bytes } });
     }
   }
   return {
@@ -317,6 +319,10 @@ function createGoogleClient(options) {
     async getText(url, query) {
       const answer = await exchange("GET", url, query, { accept: "*/*" });
       return answer.ok ? googleOk(answer.value.text) : answer;
+    },
+    async getBytes(url, query) {
+      const answer = await exchange("GET", url, query, { accept: "*/*" });
+      return answer.ok ? googleOk(answer.value.bytes ?? new Uint8Array(0)) : answer;
     },
     post: (url, body, query) => request("POST", url, query, body),
     put: (url, body, query) => request("PUT", url, query, body),
@@ -483,11 +489,11 @@ function verbFailed(verb, error) {
     message: `'${verb}' failed: ${withoutFinalStop(describeGoogleError(error))}.`
   };
 }
-function argumentsProblem(verb, problem11) {
+function argumentsProblem(verb, problem12) {
   return {
     severity: "error",
     code: "E_RECIPE_ARGUMENTS",
-    message: `'${verb}' ${withoutFinalStop(problem11)}.`
+    message: `'${verb}' ${withoutFinalStop(problem12)}.`
   };
 }
 function failed(diagnostic) {
@@ -562,6 +568,12 @@ async function getFile(client, fileId) {
 }
 async function downloadFile(client, fileId) {
   return client.getText(`${DRIVE_FILES}/${encodeURIComponent(fileId)}`, {
+    alt: "media",
+    supportsAllDrives: true
+  });
+}
+async function downloadBytes(client, fileId) {
+  return client.getBytes(`${DRIVE_FILES}/${encodeURIComponent(fileId)}`, {
     alt: "media",
     supportsAllDrives: true
   });
@@ -1154,18 +1166,18 @@ var SHEETS2 = "https://sheets.googleapis.com/v4/spreadsheets";
 function budgetedTransport(host, clock) {
   const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
   let outOfTime = false;
-  let refused10 = false;
+  let refused11 = false;
   const expired2 = () => {
     if (clock.now() > deadline) outOfTime = true;
     return outOfTime;
   };
   return {
     expired: expired2,
-    refusedForTime: () => refused10,
+    refusedForTime: () => refused11,
     transport: {
       fetch: (url, init) => {
         if (expired2()) {
-          refused10 = true;
+          refused11 = true;
           return Promise.reject(new Error(NOT_REACHED));
         }
         return host.fetch(url, init);
@@ -1951,9 +1963,9 @@ async function countImages(host, request) {
     const connection = await connect(host, request.section);
     if (!connection.ok) return refused3(verbFailed(DRIVE_COUNT, connection.error));
     for (const folder of folders) {
-      const counted = await countIn(connection.value.client, folder, withShapes);
-      if (!counted.ok) return refused3(verbFailed(DRIVE_COUNT, counted.error));
-      counts.set(folder, counted.value);
+      const counted2 = await countIn(connection.value.client, folder, withShapes);
+      if (!counted2.ok) return refused3(verbFailed(DRIVE_COUNT, counted2.error));
+      counts.set(folder, counted2.value);
     }
   }
   return {
@@ -1966,10 +1978,10 @@ async function countImages(host, request) {
       ],
       rows: table.rows.map((row, index) => {
         const folder = folderOfRow[index];
-        const counted = folder === null || folder === void 0 ? void 0 : counts.get(folder);
-        const count = counted?.total ?? null;
+        const counted2 = folder === null || folder === void 0 ? void 0 : counts.get(folder);
+        const count = counted2?.total ?? null;
         if (!withShapes) return { ...row, values: { ...row.values, [added]: count } };
-        const shapes = counted === void 0 ? null : shapesText(counted.shapes);
+        const shapes = counted2 === void 0 ? null : shapesText(counted2.shapes);
         return { ...row, values: { ...row.values, [added]: count, [shapesAdded]: shapes } };
       })
     },
@@ -2116,23 +2128,23 @@ var ROLE_STRENGTH = [
 var PERMISSIONS_PAGE_SIZE = 100;
 var OUT_OF_TIME = "could not check every row in one call's time; narrow the table to fewer rows and run again";
 async function planCreates(host, request, kind, clock = systemClock) {
-  const problem11 = (text) => refused4(argumentsProblem(kind.verb, text));
+  const problem12 = (text) => refused4(argumentsProblem(kind.verb, text));
   const { table } = request;
   const nameColumn = columnOf(
     table,
     "name",
     textArgument(request.arguments, "name") ?? DEFAULT_NAME_COLUMN
   );
-  if (nameColumn.problem !== void 0) return problem11(nameColumn.problem);
+  if (nameColumn.problem !== void 0) return problem12(nameColumn.problem);
   const shareWritten = textArgument(request.arguments, "share");
   const shareColumn = shareWritten === void 0 ? void 0 : columnOf(table, "share", shareWritten);
-  if (shareColumn?.problem !== void 0) return problem11(shareColumn.problem);
+  if (shareColumn?.problem !== void 0) return problem12(shareColumn.problem);
   const notify = textArgument(request.arguments, "notify") === "yes";
   const section = readSection(request.section);
   if (!section.ok) return refused4(verbFailed(kind.verb, section.error));
   const rootId = section.value.root;
   if (rootId === void 0) {
-    return problem11(
+    return problem12(
       `needs root in the google section of .tyto/project.json: it creates only under it`
     );
   }
@@ -2145,7 +2157,7 @@ async function planCreates(host, request, kind, clock = systemClock) {
     message: `'${kind.verb}' ${OUT_OF_TIME}.`
   }) : refused4(verbFailed(kind.verb, error));
   const parent = await parentOf(walk, rootId, textArgument(request.arguments, "parent"));
-  if (!parent.ok) return "error" in parent ? failedFor(parent.error) : problem11(parent.problem);
+  if (!parent.ok) return "error" in parent ? failedFor(parent.error) : problem12(parent.problem);
   const parentFolder = parent.folder;
   const planned = [];
   const firstRowOf = /* @__PURE__ */ new Map();
@@ -2179,7 +2191,7 @@ async function planCreates(host, request, kind, clock = systemClock) {
     const existing = await childrenNamedOfType(client, parentFolder.id, name, kind.mimeType);
     if (!existing.ok) return failedFor(existing.error);
     if (existing.value.length > 1) {
-      return problem11(
+      return problem12(
         `finds ${existing.value.length} items named '${name}' in '${parentFolder.name}' (${parentFolder.id}): ${listed(existing.value.map((each) => each.id))}; keep one, or rename the others, and run again`
       );
     }
@@ -2235,7 +2247,7 @@ async function planCreates(host, request, kind, clock = systemClock) {
     }
   }
   if (operations.length > MAX_OPERATIONS) {
-    return problem11(
+    return problem12(
       `would plan ${operations.length.toLocaleString("en-US")} operations, over the ${MAX_OPERATIONS.toLocaleString("en-US")} one plan holds; split the table`
     );
   }
@@ -2415,20 +2427,20 @@ async function applyCreates(host, request, clock = systemClock) {
     },
     diagnostics: []
   });
-  const failed3 = (reason) => ({
+  const failed4 = (reason) => ({
     status: "failed",
     reason: shortened(reason)
   });
   const work = [];
   for (const [index, operation] of request.operations.entries()) {
     const payload = operation.payload;
-    if (isPlannedFailure(payload)) outcomes[index] = failed3(payload.x);
+    if (isPlannedFailure(payload)) outcomes[index] = failed4(payload.x);
     else if (operation.write === CREATE_WRITE && isCreatePayload(payload)) {
       work.push([index, payload]);
     } else if (operation.write === SHARE_WRITE && isSharePayload(payload)) {
       work.push([index, payload]);
     } else {
-      outcomes[index] = failed3(
+      outcomes[index] = failed4(
         "E_GOOGLE_PLAN: not a write this plugin planned; run the cell again"
       );
     }
@@ -2449,7 +2461,7 @@ async function applyCreates(host, request, clock = systemClock) {
     }
     const why = createFailed.get(payload.s);
     if (why !== void 0) {
-      outcomes[index] = failed3(`creating '${payload.n}' failed, so it is not shared: ${why}`);
+      outcomes[index] = failed4(`creating '${payload.n}' failed, so it is not shared: ${why}`);
       continue;
     }
     let held = heldBy.get(payload.s);
@@ -2457,7 +2469,7 @@ async function applyCreates(host, request, clock = systemClock) {
       const read = await heldShares(client, payload.s);
       if (!read.ok) {
         if (budget.refusedForTime()) break;
-        outcomes[index] = failed3(describeGoogleError(read.error));
+        outcomes[index] = failed4(describeGoogleError(read.error));
         continue;
       }
       held = [...read.value];
@@ -2475,7 +2487,7 @@ async function applyCreates(host, request, clock = systemClock) {
     );
     if (!shared.ok) {
       if (budget.refusedForTime()) break;
-      outcomes[index] = failed3(describeGoogleError(shared.error));
+      outcomes[index] = failed4(describeGoogleError(shared.error));
       continue;
     }
     held.push(share);
@@ -2484,15 +2496,15 @@ async function applyCreates(host, request, clock = systemClock) {
   return done();
 }
 async function create(client, payload) {
-  const failed3 = (reason) => ({
+  const failed4 = (reason) => ({
     status: "failed",
     reason: shortened(reason)
   });
   const named = await childrenNamedOfType(client, payload.p, payload.n, payload.m);
-  if (!named.ok) return failed3(describeGoogleError(named.error));
+  if (!named.ok) return failed4(describeGoogleError(named.error));
   if (named.value.some((each) => each.id === payload.c)) return { status: "applied" };
   if (named.value.length > 0) {
-    return failed3(
+    return failed4(
       `E_GOOGLE_CHANGED: '${payload.n}' was created in ${payload.p} since the plan, as ${listed(named.value.map((each) => each.id))}; run the cell again for a new plan`
     );
   }
@@ -2504,7 +2516,7 @@ async function create(client, payload) {
   if (made.ok) return { status: "applied" };
   const there = await getFile(client, payload.c);
   if (there.ok && there.value.parents.includes(payload.p)) return { status: "applied" };
-  return failed3(describeGoogleError(made.error));
+  return failed4(describeGoogleError(made.error));
 }
 function isPlannedFailure(value) {
   return typeof value === "object" && value !== null && typeof value["x"] === "string";
@@ -2540,135 +2552,75 @@ function columnOf(table, argument, name) {
   };
 }
 
-// src/drive-folder.ts
-var DRIVE_FOLDER = "google.drive-folder";
-var FOLDER_KIND = {
-  verb: DRIVE_FOLDER,
-  noun: "folder",
-  mimeType: FOLDER_MIME_TYPE,
-  link: (id) => `https://drive.google.com/drive/folders/${id}`
-};
-function driveFolderVerb(host, clock = systemClock) {
-  return {
-    id: DRIVE_FOLDER,
-    kind: "action",
-    arguments: CREATE_ARGUMENTS,
-    writes: [CREATE_WRITE, SHARE_WRITE],
-    plan: (request) => planCreates(host, request, FOLDER_KIND, clock),
-    apply: (request) => applyCreates(host, request, clock)
-  };
-}
-
-// src/drive-list.ts
-var DRIVE_LIST = "google.drive-list";
-var DEFAULT_MAX = 1e5;
-var MAX_MAX = 1e5;
-var CURSOR_LIMIT = 4e3;
-var ARGUMENTS4 = [
-  { name: "folder", type: "text" },
-  { name: "type", type: "text" },
-  { name: "max", type: "number" }
-];
-var LIST_COLUMNS = [
-  { name: "id", type: "text", origin: ORIGIN },
-  { name: "name", type: "text", origin: ORIGIN },
-  { name: "mime_type", type: "text", origin: ORIGIN },
-  { name: "kind", type: "text", origin: ORIGIN },
-  { name: "size", type: "number", origin: ORIGIN },
-  { name: "created", type: "datetime", origin: ORIGIN },
-  { name: "modified", type: "datetime", origin: ORIGIN },
-  { name: "url", type: "link", origin: ORIGIN },
-  { name: "parent_id", type: "text", origin: ORIGIN },
-  // Last, so a recipe that reads the columns by position keeps reading the same ones.
-  { name: "width", type: "number", origin: ORIGIN },
-  { name: "height", type: "number", origin: ORIGIN }
-];
-function driveListVerb(host) {
-  return {
-    id: DRIVE_LIST,
-    kind: "source",
-    arguments: ARGUMENTS4,
-    page: (request) => driveListPage(host, request)
-  };
-}
-var listFailed = (text) => failed({ severity: "error", code: "E_RECIPE_VERB", message: `'${DRIVE_LIST}' failed: ${text}.` });
-async function driveListPage(host, request) {
-  const asked = readListArguments(request.arguments, request.section);
-  if ("severity" in asked) return failed(asked);
-  const print = fingerprint(JSON.stringify([asked.folderId, asked.type ?? null, asked.max]));
-  let cursor;
-  if (request.cursor !== void 0) {
-    const decoded = decodeOpaque(request.cursor, CURSOR_LIMIT);
-    if (typeof decoded === "string") return listFailed(`${decoded}; run again`);
-    if (!isListCursor(decoded.value)) {
-      return listFailed("the cursor is not one this plugin writes; run again");
+// src/drive-fetch-apply.ts
+async function applyDriveFetches(host, request, clock = systemClock) {
+  const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
+  const outcomes = request.operations.map(() => void 0);
+  const budget = budgetedTransport(host, clock);
+  const client = connectAsPerson(host, budget.transport);
+  const fetches = request.operations.filter((each) => !isPlannedFailure(each.payload)).length;
+  let fetched = 0;
+  let lastDownload;
+  for (const [index, operation] of request.operations.entries()) {
+    const payload = operation.payload;
+    if (isPlannedFailure(payload)) {
+      outcomes[index] = failed3(payload.x);
+      continue;
     }
-    cursor = decoded.value;
-    if (cursor.f !== print) {
-      return listFailed("the step changed between two pages of one run; run again");
+    if (operation.write !== FETCH_WRITE && operation.write !== REPLACE_LOCAL_WRITE || !isFetchPayload(payload)) {
+      outcomes[index] = failed3(
+        "E_GOOGLE_PLAN: not a write this plugin planned; run the cell again"
+      );
+      continue;
     }
+    if (budget.expired()) break;
+    if (lastDownload !== void 0 && clock.now() + lastDownload * 1.5 > deadline) break;
+    const before = clock.now();
+    const ended = await fetchOne(host, client, payload, () => budget.refusedForTime());
+    if (ended === void 0) break;
+    lastDownload = clock.now() - before;
+    outcomes[index] = ended;
+    if (ended.status === "applied") fetched += 1;
   }
-  const connection = await connect(host, request.section);
-  if (!connection.ok) return failed(verbFailed(DRIVE_LIST, connection.error));
-  const page = await listChildren(connection.value.client, asked.folderId, asked.type, cursor?.t);
-  if (!page.ok) return failed(verbFailed(DRIVE_LIST, page.error));
-  const fetchedAt = (/* @__PURE__ */ new Date()).toISOString();
-  const rows = page.value.files.filter((file) => matchesType(kindOf(file.mimeType, file.name), asked.type)).map((file) => rowOf2(file, asked.folderId, fetchedAt));
-  const table = { columns: LIST_COLUMNS, rows };
-  const answered = (cursor?.n ?? 0) + rows.length;
-  if (answered > asked.max) return { ok: true, value: { table, truncated: true }, diagnostics: [] };
-  const token = page.value.nextPageToken;
-  if (token === void 0) return { ok: true, value: { table }, diagnostics: [] };
-  const next = { v: 1, t: token, n: answered, f: print };
-  return { ok: true, value: { table, cursor: encodeOpaque(next) }, diagnostics: [] };
-}
-function rowOf2(file, folderId, fetchedAt) {
+  const progress2 = `fetched ${fetched} of ${fetches} ${fetches === 1 ? "file" : "files"}`;
   return {
-    key: file.id,
-    values: {
-      id: file.id,
-      name: file.name,
-      mime_type: file.mimeType,
-      kind: kindOf(file.mimeType, file.name),
-      size: file.size ?? null,
-      created: file.createdTime ?? null,
-      modified: file.modifiedTime ?? null,
-      url: file.webViewLink ?? null,
-      // The folder asked for: a file Drive lists under it is its child, whatever else holds it.
-      parent_id: folderId,
-      width: file.width ?? null,
-      height: file.height ?? null
+    ok: true,
+    value: {
+      operations: outcomes.map((outcome) => outcome ?? { status: "continue", progress: progress2 })
     },
-    provenance: { source: ORIGIN, id: file.id, fetchedAt }
+    diagnostics: []
   };
 }
-function isListCursor(value) {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const record = value;
-  return record["v"] === 1 && typeof record["t"] === "string" && record["t"] !== "" && Number.isSafeInteger(record["n"]) && record["n"] >= 0 && typeof record["f"] === "string" && /^[0-9a-f]{16}$/.test(record["f"]);
+async function fetchOne(host, client, payload, refusedForTime) {
+  const local = await localState(host, payload);
+  if (local === "fetched") return { status: "applied" };
+  if (local !== "as-planned") return failed3(local);
+  const downloaded = await downloadBytes(client, payload.i);
+  if (!downloaded.ok) {
+    return refusedForTime() ? void 0 : failed3(describeGoogleError(downloaded.error));
+  }
+  if (downloaded.value.length !== payload.s) {
+    return failed3(
+      `E_GOOGLE_CHANGED: Drive's file for '${payload.w}' is ${downloaded.value.length} bytes, not the ${payload.s} the plan saw; run the cell again`
+    );
+  }
+  try {
+    await host.workspace.write(payload.w, downloaded.value);
+  } catch (thrown) {
+    return failed3(`'${payload.w}' could not be written: ${messageOf(thrown)}`);
+  }
+  return { status: "applied" };
 }
-function readListArguments(values, section) {
-  const folderId = folderArgument(DRIVE_LIST, values, section);
-  if (typeof folderId !== "string") return folderId;
-  const type = textArgument(values, "type")?.toLowerCase();
-  if (type !== void 0 && !DRIVE_TYPES.includes(type)) {
-    return argumentsProblem(
-      DRIVE_LIST,
-      `type= must be one of ${DRIVE_TYPES.join(", ")}, not '${type}'`
-    );
-  }
-  const max = values["max"] ?? DEFAULT_MAX;
-  if (typeof max !== "number" || !Number.isSafeInteger(max) || max < 1 || max > MAX_MAX) {
-    return argumentsProblem(
-      DRIVE_LIST,
-      `max= must be a whole number from 1 to ${MAX_MAX}, not ${String(max)}`
-    );
-  }
-  return {
-    folderId,
-    ...type === void 0 ? {} : { type },
-    max
-  };
+async function localState(host, payload) {
+  const now = await localEntry(host, payload.w);
+  if (typeof now === "string") return now;
+  if (now !== void 0 && alreadyFetched(now, payload.s, payload.m)) return "fetched";
+  const same = now === void 0 ? payload.ls === void 0 : payload.ls === now.size && Date.parse(payload.lm ?? "") === Date.parse(now.modifiedAt);
+  if (same) return "as-planned";
+  return `E_GOOGLE_CHANGED: '${payload.w}' changed in the workspace since the plan; run the cell again`;
+}
+function failed3(reason) {
+  return { status: "failed", reason: shortened(reason) };
 }
 
 // src/drive-move.ts
@@ -2677,7 +2629,7 @@ var MOVE_WRITE = "move";
 var DEFAULT_FILE_COLUMN = "id";
 var PARENT_COLUMN = "parent_id";
 var NO_CREATE = "creating folders comes in a later version";
-var ARGUMENTS5 = [
+var ARGUMENTS4 = [
   { name: "file", type: "text" },
   { name: "to", type: "text" },
   { name: "to-column", type: "text" }
@@ -2686,7 +2638,7 @@ function driveMoveVerb(host, clock = systemClock) {
   return {
     id: DRIVE_MOVE,
     kind: "action",
-    arguments: ARGUMENTS5,
+    arguments: ARGUMENTS4,
     writes: [MOVE_WRITE],
     plan: (request) => planDriveMove(host, request, clock),
     apply: (request) => applyDriveMoves(host, request, clock)
@@ -2902,16 +2854,16 @@ async function applyDriveMoves(host, request, clock = systemClock) {
     },
     diagnostics: []
   });
-  const failed3 = (reason) => ({
+  const failed4 = (reason) => ({
     status: "failed",
     reason: shortened(reason)
   });
   const moves = [];
   for (const [index, operation] of request.operations.entries()) {
     const payload = operation.payload;
-    if (isPlannedFailure2(payload)) outcomes[index] = failed3(payload.x);
+    if (isPlannedFailure2(payload)) outcomes[index] = failed4(payload.x);
     else if (operation.write !== MOVE_WRITE || !isMovePayload(payload)) {
-      outcomes[index] = failed3("E_GOOGLE_PLAN: not a move this plugin planned; run the cell again");
+      outcomes[index] = failed4("E_GOOGLE_PLAN: not a move this plugin planned; run the cell again");
     } else moves.push([index, payload]);
   }
   if (moves.length === 0) return done();
@@ -2919,7 +2871,7 @@ async function applyDriveMoves(host, request, clock = systemClock) {
   const connection = await connect(host, request.section, budget.transport);
   if (!connection.ok) {
     if (budget.refusedForTime()) return done();
-    for (const [index] of moves) outcomes[index] = failed3(describeGoogleError(connection.error));
+    for (const [index] of moves) outcomes[index] = failed4(describeGoogleError(connection.error));
     return done();
   }
   const { client } = connection.value;
@@ -2928,11 +2880,11 @@ async function applyDriveMoves(host, request, clock = systemClock) {
     const now = await getFile(client, payload.f);
     if (!now.ok) {
       if (budget.refusedForTime()) break;
-      outcomes[index] = failed3(describeGoogleError(now.error));
+      outcomes[index] = failed4(describeGoogleError(now.error));
       continue;
     }
     if (!sameFolders(now.value.parents, payload.from)) {
-      outcomes[index] = failed3(
+      outcomes[index] = failed4(
         `E_GOOGLE_CHANGED: '${now.value.name}' is in ${now.value.parents.join(", ") || "no folder"} now, not in ${payload.from.join(", ")} as planned; run the cell again for a new plan`
       );
       continue;
@@ -2949,7 +2901,7 @@ async function applyDriveMoves(host, request, clock = systemClock) {
     );
     if (!moved.ok) {
       if (budget.refusedForTime()) break;
-      outcomes[index] = failed3(describeGoogleError(moved.error));
+      outcomes[index] = failed4(describeGoogleError(moved.error));
       continue;
     }
     outcomes[index] = { status: "applied" };
@@ -2990,6 +2942,908 @@ function columnOf2(table, name, argument) {
 function shown(value) {
   if (value === null || value === void 0 || value === "") return "nothing";
   return `'${String(value)}'`;
+}
+
+// src/planned-folder.ts
+function plannedFolderKey(parentId, name) {
+  return `planned-folder/${fingerprint(JSON.stringify([parentId, name]))}`;
+}
+var DRIVE_ID3 = /^[A-Za-z0-9_-]{10,}$/;
+async function plannedFolderId(host, parentId, name) {
+  try {
+    const entry = await host.cache.get(plannedFolderKey(parentId, name));
+    if (entry === void 0) return void 0;
+    const id = new TextDecoder().decode(entry.bytes);
+    return DRIVE_ID3.test(id) ? id : void 0;
+  } catch {
+    return void 0;
+  }
+}
+async function rememberPlannedFolder(host, parentId, name, id) {
+  try {
+    await host.cache.put(plannedFolderKey(parentId, name), id);
+  } catch {
+  }
+}
+async function forgetPlannedFolder(host, parentId, name) {
+  try {
+    await host.cache.delete(plannedFolderKey(parentId, name));
+  } catch {
+  }
+}
+
+// src/drive-upload-apply.ts
+var DRIVE_UPLOADS = "https://www.googleapis.com/upload/drive/v3/files";
+var CHUNK_BYTES = 8 * 1024 * 1024;
+var RESUMES_PER_FILE = 3;
+var NOT_REACHED2 = { status: "continue" };
+async function applyDriveUploads(host, request, clock = systemClock) {
+  const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
+  const outcomes = request.operations.map(() => void 0);
+  const failed4 = (reason) => ({
+    status: "failed",
+    reason: shortened(reason)
+  });
+  const budget = budgetedTransport(host, clock);
+  const client = connectAsPerson(host, budget.transport);
+  const notCreated = /* @__PURE__ */ new Map();
+  for (const [index, operation] of request.operations.entries()) {
+    const payload = operation.payload;
+    if (isPlannedFailure(payload)) {
+      outcomes[index] = failed4(payload.x);
+      continue;
+    }
+    if (budget.expired()) break;
+    if (operation.write === "create" && isCreatePayload(payload)) {
+      const made = await create(client, payload);
+      if (made === void 0 || budget.refusedForTime()) break;
+      if (made.status === "failed") notCreated.set(payload.c, made.reason ?? "failed");
+      else await forgetPlannedFolder(host, payload.p, payload.n);
+      outcomes[index] = made;
+      continue;
+    }
+    if (operation.write !== UPLOAD_WRITE && operation.write !== REPLACE_WRITE || !isUploadPayload(payload)) {
+      outcomes[index] = failed4(
+        "E_GOOGLE_PLAN: not a write this plugin planned; run the cell again"
+      );
+      continue;
+    }
+    const why = notCreated.get(payload.p);
+    if (why !== void 0) {
+      outcomes[index] = failed4(`its folder was not created, so it is not uploaded: ${why}`);
+      continue;
+    }
+    const ended = await uploadOne({ host, client, clock, deadline, budget }, payload);
+    if (ended === void 0) break;
+    outcomes[index] = ended;
+  }
+  return {
+    ok: true,
+    value: {
+      operations: outcomes.map((outcome) => outcome ?? NOT_REACHED2)
+    },
+    diagnostics: []
+  };
+}
+async function uploadOne(sending, payload) {
+  const { host, client, clock, deadline, budget } = sending;
+  const failed4 = (reason) => ({
+    status: "failed",
+    reason: shortened(reason)
+  });
+  const googleFailed = (error) => budget.refusedForTime() ? void 0 : failed4(describeGoogleError(error));
+  const changed2 = await localChange(host, payload);
+  if (changed2 !== void 0) return failed4(changed2);
+  const key = sessionKey(payload);
+  const kept = await cached(host, key);
+  let sessionUrl = kept === void 0 ? void 0 : new TextDecoder().decode(kept);
+  let offset = 0;
+  if (sessionUrl !== void 0) {
+    const where = await sessionState(client, sessionUrl, payload.s);
+    if (!where.ok) {
+      if (!expired(where.error)) return googleFailed(where.error);
+      await forget2(host, key);
+      sessionUrl = void 0;
+    } else if (where.value === "done") return finished(sending, payload, key);
+    else offset = where.value;
+  }
+  if (sessionUrl === void 0) {
+    const there = await alreadyThere(client, payload);
+    if (there !== void 0) return there.ok ? there.value : googleFailed(there.error);
+    const started = await startSession(client, payload);
+    if (!started.ok) return googleFailed(started.error);
+    sessionUrl = started.value;
+    await host.cache.put(key, sessionUrl).catch(() => void 0);
+  }
+  let lastChunk;
+  let resumes = 0;
+  while (offset < payload.s) {
+    if (lastChunk !== void 0 && clock.now() + lastChunk * 1.5 > deadline) {
+      return progress(offset, payload.s);
+    }
+    const length = Math.min(CHUNK_BYTES, payload.s - offset);
+    let bytes;
+    try {
+      bytes = await host.workspace.read(payload.u, { offset, length });
+    } catch (thrown) {
+      return failed4(`'${payload.u}' could not be read: ${messageOf(thrown)}`);
+    }
+    if (bytes.length !== length) {
+      return failed4(`E_GOOGLE_CHANGED: '${payload.u}' changed while it was read; run again`);
+    }
+    const before = clock.now();
+    const sent = await client.upload("PUT", sessionUrl, {
+      headers: { "Content-Range": `bytes ${offset}-${offset + length - 1}/${payload.s}` },
+      body: bytes
+    });
+    lastChunk = clock.now() - before;
+    if (sent.ok) {
+      if (sent.value.status !== 308) return finished(sending, payload, key);
+      offset = heldUpTo(sent.value);
+      continue;
+    }
+    if (budget.refusedForTime()) return progress(offset, payload.s);
+    if (expired(sent.error)) {
+      await forget2(host, key);
+      return failed4(`${describeGoogleError(sent.error)}; the upload starts over on the next run`);
+    }
+    const transient = sent.error.code === "E_GOOGLE_NETWORK" || (sent.error.status ?? 0) >= 500;
+    if (!transient || resumes >= RESUMES_PER_FILE) return failed4(describeGoogleError(sent.error));
+    resumes += 1;
+    const where = await sessionState(client, sessionUrl, payload.s);
+    if (!where.ok) return googleFailed(where.error);
+    if (where.value === "done") return finished(sending, payload, key);
+    offset = where.value;
+  }
+  const last = await sessionState(client, sessionUrl, payload.s);
+  if (!last.ok) return googleFailed(last.error);
+  if (last.value === "done") return finished(sending, payload, key);
+  return failed4("E_GOOGLE_HTTP: Drive did not finish the upload after its last byte; run again");
+}
+async function finished(sending, payload, key) {
+  await forget2(sending.host, key);
+  const changed2 = await localChange(sending.host, payload);
+  if (changed2 === void 0) return { status: "applied" };
+  return {
+    status: "failed",
+    reason: shortened(`${changed2}; it changed while it was sent, and the next run sends it again`)
+  };
+}
+async function cached(host, key) {
+  try {
+    return (await host.cache.get(key))?.bytes;
+  } catch {
+    return void 0;
+  }
+}
+async function forget2(host, key) {
+  await host.cache.delete(key).catch(() => false);
+}
+async function localChange(host, payload) {
+  try {
+    const now = await host.workspace.stat(payload.u);
+    if (now.kind === "file" && now.size === payload.s && Date.parse(now.modifiedAt) === Date.parse(payload.m)) {
+      return void 0;
+    }
+    return `E_GOOGLE_CHANGED: '${payload.u}' changed since the plan; run the cell again`;
+  } catch (thrown) {
+    return `'${payload.u}' could not be read: ${messageOf(thrown)}`;
+  }
+}
+async function alreadyThere(client, payload) {
+  if (payload.r !== void 0) {
+    const now = await getFile(client, payload.r);
+    if (!now.ok) return now;
+    return sameFile(now.value, payload.s, payload.m) ? { ok: true, value: { status: "applied" } } : void 0;
+  }
+  const named = await childrenNamed(client, payload.p, payload.n);
+  if (!named.ok) return named;
+  if (named.value.length === 0) return void 0;
+  if (named.value.some((each) => sameFile(each, payload.s, payload.m))) {
+    return { ok: true, value: { status: "applied" } };
+  }
+  return {
+    ok: true,
+    value: {
+      status: "failed",
+      reason: shortened(
+        `E_GOOGLE_CHANGED: a file named '${payload.n}' was put in ${payload.p} since the plan; run the cell again for a new plan`
+      )
+    }
+  };
+}
+async function startSession(client, payload) {
+  const started = await client.upload(
+    payload.r === void 0 ? "POST" : "PATCH",
+    payload.r === void 0 ? DRIVE_UPLOADS : `${DRIVE_UPLOADS}/${encodeURIComponent(payload.r)}`,
+    {
+      query: { uploadType: "resumable", supportsAllDrives: true, fields: "id" },
+      headers: { "X-Upload-Content-Length": String(payload.s) },
+      body: payload.r === void 0 ? { name: payload.n, parents: [payload.p], modifiedTime: payload.m } : { modifiedTime: payload.m }
+    }
+  );
+  if (!started.ok) return started;
+  const location = headerOf(started.value.headers, "location");
+  if (location === void 0 || !location.startsWith(`${DRIVE_UPLOADS}?`)) {
+    return {
+      ok: false,
+      error: {
+        code: "E_GOOGLE_RESPONSE",
+        message: `Drive opened no upload session for '${payload.n}' at its own address.`
+      }
+    };
+  }
+  return { ok: true, value: location };
+}
+async function sessionState(client, url, size) {
+  const asked = await client.upload("PUT", url, {
+    headers: { "Content-Range": `bytes */${size}` },
+    body: new Uint8Array(0)
+  });
+  if (!asked.ok) return asked;
+  return { ok: true, value: asked.value.status === 308 ? heldUpTo(asked.value) : "done" };
+}
+function heldUpTo(answer) {
+  const range = /^bytes=0-(\d+)$/.exec(headerOf(answer.headers, "range")?.trim() ?? "");
+  return range?.[1] === void 0 ? 0 : Number(range[1]) + 1;
+}
+function expired(error) {
+  return error.status === 404 || error.status === 410;
+}
+function progress(offset, size) {
+  return { status: "continue", progress: `sent ${sizeText(offset)} of ${sizeText(size)}` };
+}
+
+// src/drive-upload.ts
+var DRIVE_UPLOAD = "google.drive-upload";
+var UPLOAD_WRITE = "upload";
+var REPLACE_WRITE = "replace";
+var MAX_DEPTH = 6;
+var ARGUMENTS5 = [
+  { name: "from", type: "text" },
+  { name: "to", type: "text" },
+  { name: "to-column", type: "text" }
+];
+function driveUploadVerb(host, clock = systemClock) {
+  return {
+    id: DRIVE_UPLOAD,
+    kind: "action",
+    arguments: ARGUMENTS5,
+    writes: [CREATE_WRITE, UPLOAD_WRITE, REPLACE_WRITE],
+    plan: (request) => planDriveUpload(host, request, clock),
+    apply: (request) => applyDriveUploads(host, request, clock)
+  };
+}
+function sessionKey(payload) {
+  const { u, s, m, p, r } = payload;
+  return `upload/${fingerprint(JSON.stringify([u, s, m, p, r ?? ""]))}`;
+}
+function sameFile(file, size, modifiedAt) {
+  return file.size === size && file.modifiedTime !== void 0 && Date.parse(file.modifiedTime) === Date.parse(modifiedAt);
+}
+function sizeText(bytes) {
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
+  if (bytes >= 1e3) return `${Math.round(bytes / 1e3)} KB`;
+  return `${bytes} B`;
+}
+var problem5 = (text) => argumentsProblem(DRIVE_UPLOAD, text);
+var refused6 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var OUT_OF_TIME3 = "'google.drive-upload' could not compare every file in one call's time; narrow the table to fewer rows and run again.";
+var DONE = { ok: true };
+async function planDriveUpload(host, request, clock = systemClock) {
+  const { table } = request;
+  const fromWritten = textArgument(request.arguments, "from");
+  if (fromWritten === void 0) {
+    return refused6(problem5("needs from=, the column naming each workspace file or folder"));
+  }
+  const from = columnNamed(table, fromWritten, "from");
+  if (typeof from !== "string") return refused6(from);
+  const to = textArgument(request.arguments, "to");
+  const toColumnWritten = textArgument(request.arguments, "to-column");
+  if (to === void 0 === (toColumnWritten === void 0)) {
+    return refused6(
+      problem5("takes to=, one Drive folder for every row, or to-column=, a folder per row")
+    );
+  }
+  const toColumn = toColumnWritten === void 0 ? void 0 : columnNamed(table, toColumnWritten, "to-column");
+  if (toColumn !== void 0 && typeof toColumn !== "string") return refused6(toColumn);
+  const section = readSection(request.section);
+  if (!section.ok) return refused6(verbFailed(DRIVE_UPLOAD, section.error));
+  const rootId = section.value.root;
+  if (rootId === void 0) {
+    return refused6(
+      problem5("needs root in the google section of .tyto/project.json: it uploads under it")
+    );
+  }
+  const budget = budgetedTransport(host, clock);
+  const connection = await connect(host, request.section, budget.transport);
+  if (!connection.ok) return refused6(verbFailed(DRIVE_UPLOAD, connection.error));
+  const { client } = connection.value;
+  const walk = rootWalk(client, rootId);
+  const failedFor = (error) => budget.refusedForTime() ? refused6({ severity: "error", code: "E_RECIPE_VERB", message: OUT_OF_TIME3 }) : refused6(verbFailed(DRIVE_UPLOAD, error));
+  const destinations = /* @__PURE__ */ new Map();
+  const operations = [];
+  const unchanged = [];
+  let blank = 0;
+  for (const row of table.rows) {
+    const path = cellText(row.values[from]);
+    const wanted = toColumn === void 0 ? to : cellText(row.values[toColumn]);
+    if (path === void 0 || wanted === void 0) {
+      blank += 1;
+      continue;
+    }
+    let found = destinations.get(wanted);
+    if (found === void 0) {
+      found = await destinationOf(walk, rootId, rootId, wanted, toColumn ?? "to=");
+      destinations.set(wanted, found);
+    }
+    if (!found.ok && "error" in found) return failedFor(found.error);
+    if (!found.ok) {
+      if (toColumn === void 0) return refused6(problem5(found.problem));
+      operations.push(plannedFailure2(row, found.problem));
+      continue;
+    }
+    const context = { host, client, row, operations: [], unchanged: [] };
+    const entry = await statOf(host, path);
+    let step;
+    if (typeof entry === "string") step = { ok: false, problem: entry };
+    else if (entry.kind === "file") {
+      const named2 = await childrenNamed(client, found.folder.id, entry.name);
+      step = named2.ok ? planFile(context, path, entry, found.folder, named2.value) : { ok: false, error: named2.error };
+    } else step = await planFolder(context, path, entry.name, found.folder, true, 0);
+    if (!step.ok && "error" in step) return failedFor(step.error);
+    if (!step.ok) {
+      operations.push(plannedFailure2(row, step.problem));
+      continue;
+    }
+    operations.push(...context.operations);
+    unchanged.push(...context.unchanged);
+    if (operations.length > MAX_OPERATIONS) {
+      return refused6(
+        problem5(
+          `would plan over the ${MAX_OPERATIONS.toLocaleString("en-US")} writes one plan holds; split the table`
+        )
+      );
+    }
+  }
+  const diagnostics = [];
+  if (unchanged.length > 0) {
+    diagnostics.push(
+      warning(
+        `'${DRIVE_UPLOAD}' plans nothing for ${unchanged.length.toLocaleString("en-US")} ${unchanged.length === 1 ? "file" : "files"} already in Drive with the same name, size and time: ${listed(unchanged)}.`
+      )
+    );
+  }
+  if (blank > 0) {
+    diagnostics.push(
+      warning(
+        `'${DRIVE_UPLOAD}' left out ${blank.toLocaleString("en-US")} ${blank === 1 ? "row" : "rows"} with no file or no destination.`
+      )
+    );
+  }
+  const named = [...destinations.values()].flatMap(
+    (each) => each.ok ? [`'${each.folder.name}' (${each.folder.id})`] : []
+  );
+  return {
+    ok: true,
+    value: {
+      target: `Drive folder ${[...new Set(named)].join(", ") || to || `per row in ${toColumn}`}`,
+      operations,
+      count: operations.length
+    },
+    diagnostics
+  };
+}
+function planFile(walk, path, entry, folder, inFolder) {
+  if (entry.name.length > MAX_NAME_LENGTH) {
+    return { ok: false, problem: `'${path}' has a name over ${MAX_NAME_LENGTH} characters` };
+  }
+  const same = inFolder.filter(
+    (each) => each.name === entry.name && each.mimeType !== FOLDER_MIME_TYPE
+  );
+  if (same.length > 1) {
+    return {
+      ok: false,
+      problem: `${same.length} files named '${entry.name}' are in '${folder.name}' (${listed(same.map((each) => each.id))}); keep one`
+    };
+  }
+  const existing = same[0];
+  if (existing !== void 0 && sameFile(existing, entry.size, entry.modifiedAt)) {
+    walk.unchanged.push(path);
+    return DONE;
+  }
+  const payload = {
+    u: path,
+    n: entry.name,
+    p: folder.id,
+    s: entry.size,
+    m: entry.modifiedAt,
+    ...existing === void 0 ? {} : { r: existing.id }
+  };
+  const where = `'${folder.name}' (${folder.id})`;
+  walk.operations.push({
+    write: existing === void 0 ? UPLOAD_WRITE : REPLACE_WRITE,
+    rowKey: walk.row.key,
+    description: shortened(
+      existing === void 0 ? `upload '${path}' (${sizeText(entry.size)}) into ${where}` : `replace '${path}' (${sizeText(entry.size)}, was ${existing.size === void 0 ? "no size" : sizeText(existing.size)}) in ${where}, keeping its id ${existing.id}`
+    ),
+    payload: { ...payload }
+  });
+  return DONE;
+}
+async function planFolder(walk, path, name, parent, parentExists, depth) {
+  if (depth > MAX_DEPTH) {
+    return { ok: false, problem: `'${path}' is over ${MAX_DEPTH} folders deep` };
+  }
+  let folder;
+  if (parentExists) {
+    const named = await childrenNamedOfType(walk.client, parent.id, name, FOLDER_MIME_TYPE);
+    if (!named.ok) return named;
+    if (named.value.length > 1) {
+      return {
+        ok: false,
+        problem: `${named.value.length} folders named '${name}' are in '${parent.name}' (${listed(named.value.map((each) => each.id))}); keep one`
+      };
+    }
+    folder = named.value[0];
+  }
+  const exists = folder !== void 0;
+  if (folder === void 0) {
+    const planned = await idFor(walk, parent.id, name);
+    if (!planned.ok) return planned;
+    const id = planned.value;
+    folder = { id, name };
+    const payload = { c: id, n: name, p: parent.id, m: FOLDER_MIME_TYPE };
+    walk.operations.push({
+      write: CREATE_WRITE,
+      rowKey: walk.row.key,
+      description: shortened(
+        `create folder '${name}' in '${parent.name}' (${parent.id}): https://drive.google.com/drive/folders/${id}`
+      ),
+      payload: { ...payload }
+    });
+  }
+  let entries;
+  try {
+    entries = await walk.host.workspace.list(path);
+  } catch (thrown) {
+    return { ok: false, problem: `'${path}' could not be listed: ${messageOf(thrown)}` };
+  }
+  let inDrive = [];
+  if (exists) {
+    const children = await allChildren(walk.client, folder.id);
+    if (!children.ok) return children;
+    inDrive = children.value;
+  }
+  for (const entry of entries) {
+    const child = path === "" ? entry.name : `${path}/${entry.name}`;
+    const step = entry.kind === "file" ? planFile(walk, child, entry, folder, inDrive) : await planFolder(walk, child, entry.name, folder, exists, depth + 1);
+    if (!step.ok) return step;
+  }
+  return DONE;
+}
+async function idFor(walk, parentId, name) {
+  const kept = await plannedFolderId(walk.host, parentId, name);
+  if (kept !== void 0) {
+    const there = await getFile(walk.client, kept);
+    if (!there.ok && there.error.status === 404) return googleOk(kept);
+    if (!there.ok) return there;
+  }
+  const ids = await generateIds(walk.client, 1);
+  if (!ids.ok) return ids;
+  const id = ids.value[0] ?? "";
+  await rememberPlannedFolder(walk.host, parentId, name, id);
+  return googleOk(id);
+}
+async function allChildren(client, folderId) {
+  const files = [];
+  let pageToken;
+  do {
+    const page = await listChildren(client, folderId, void 0, pageToken);
+    if (!page.ok) return page;
+    files.push(...page.value.files);
+    pageToken = page.value.nextPageToken;
+  } while (pageToken !== void 0);
+  return { ok: true, value: files };
+}
+async function statOf(host, path) {
+  try {
+    return await host.workspace.stat(path);
+  } catch (thrown) {
+    return `'${path}' could not be read in the workspace: ${messageOf(thrown)}`;
+  }
+}
+function isUploadPayload(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value;
+  const text = (key) => typeof record[key] === "string" && record[key] !== "";
+  return text("u") && text("n") && text("p") && text("m") && typeof record["s"] === "number" && Number.isSafeInteger(record["s"]) && record["s"] >= 0 && (record["r"] === void 0 || text("r"));
+}
+function cellText(value) {
+  if (value === null || value === void 0) return void 0;
+  const text = String(value).trim();
+  return text === "" ? void 0 : text;
+}
+function columnNamed(table, name, argument) {
+  const found = columnOf(table, argument, name);
+  return found.problem === void 0 ? found.name : problem5(found.problem);
+}
+
+// src/drive-fetch.ts
+var DRIVE_FETCH = "google.drive-fetch";
+var FETCH_WRITE = "fetch";
+var REPLACE_LOCAL_WRITE = "replace";
+var ASSETS_FOLDER = "assets";
+var MAX_FETCH_BYTES = 32 * 1024 * 1024;
+var ARGUMENTS6 = [
+  { name: "from", type: "text" },
+  { name: "into", type: "text" }
+];
+function driveFetchVerb(host, clock = systemClock) {
+  return {
+    id: DRIVE_FETCH,
+    kind: "action",
+    arguments: ARGUMENTS6,
+    writes: [FETCH_WRITE, REPLACE_LOCAL_WRITE],
+    plan: (request) => planDriveFetch(host, request, clock),
+    apply: (request) => applyDriveFetches(host, request, clock)
+  };
+}
+function alreadyFetched(local, size, modifiedTime) {
+  return local.kind === "file" && local.size === size && Date.parse(local.modifiedAt) >= Date.parse(modifiedTime);
+}
+var problem6 = (text) => argumentsProblem(DRIVE_FETCH, text);
+var refused7 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var OUT_OF_TIME4 = "'google.drive-fetch' could not compare every file in one call's time; narrow the table to fewer rows and run again.";
+function fetchFailure(row, reason) {
+  const text = shortened(`E_GOOGLE_PLAN: ${row.key}: ${reason}`);
+  return {
+    write: FETCH_WRITE,
+    rowKey: row.key,
+    description: shortened(`${row.key} (will fail: ${text})`),
+    payload: { x: text }
+  };
+}
+async function planDriveFetch(host, request, clock = systemClock) {
+  const { table } = request;
+  const fromWritten = textArgument(request.arguments, "from");
+  if (fromWritten === void 0) {
+    return refused7(problem6("needs from=, the column holding each Drive file or folder link"));
+  }
+  const intoWritten = textArgument(request.arguments, "into");
+  if (intoWritten === void 0) {
+    return refused7(problem6("needs into=, the column holding each delivery's workspace folder"));
+  }
+  const from = columnNamed2(table, fromWritten, "from");
+  if (typeof from !== "string") return refused7(from);
+  const into = columnNamed2(table, intoWritten, "into");
+  if (typeof into !== "string") return refused7(into);
+  const budget = budgetedTransport(host, clock);
+  const connection = await connect(host, request.section, budget.transport);
+  if (!connection.ok) return refused7(verbFailed(DRIVE_FETCH, connection.error));
+  const { client } = connection.value;
+  const failedFor = (error) => budget.refusedForTime() ? refused7({ severity: "error", code: "E_RECIPE_VERB", message: OUT_OF_TIME4 }) : refused7(verbFailed(DRIVE_FETCH, error));
+  const operations = [];
+  const unchanged = [];
+  const native = [];
+  let blank = 0;
+  for (const row of table.rows) {
+    const written = cellText2(row.values[from]);
+    const folder = cellText2(row.values[into]);
+    if (written === void 0 || folder === void 0) {
+      blank += 1;
+      continue;
+    }
+    const id = fileIdOf(written) ?? folderIdOf(written);
+    if (id === void 0) {
+      operations.push(
+        fetchFailure(row, `'${written}' in ${from} is neither a Drive file nor a folder link`)
+      );
+      continue;
+    }
+    const base = folderPath(folder);
+    if (base === void 0) {
+      operations.push(
+        fetchFailure(row, `'${folder}' in ${into} is not a folder inside the workspace`)
+      );
+      continue;
+    }
+    const named = await filesNamed(client, id);
+    if (!named.ok) {
+      if (budget.refusedForTime() || named.error.status !== 404) return failedFor(named.error);
+      operations.push(fetchFailure(row, `${written} is not in Drive, or not shared with you`));
+      continue;
+    }
+    const problems = [];
+    const planned = [];
+    const targets = /* @__PURE__ */ new Set();
+    for (const file of named.value) {
+      if (file.mimeType.startsWith(NATIVE_PREFIX)) {
+        if (named.value.length === 1) problems.push(`'${file.name}' is a Google file, no bytes`);
+        else native.push(file.name);
+        continue;
+      }
+      const why = nameProblem(file.name);
+      if (why !== void 0) {
+        problems.push(why);
+        continue;
+      }
+      const path = `${base}/${ASSETS_FOLDER}/${file.name}`;
+      if (targets.has(path)) {
+        problems.push(`two files named '${file.name}' are in that folder; keep one`);
+        continue;
+      }
+      targets.add(path);
+      if (file.size === void 0 || file.modifiedTime === void 0) {
+        problems.push(`Drive gave no size or time for '${file.name}'`);
+        continue;
+      }
+      if (file.size > MAX_FETCH_BYTES) {
+        problems.push(
+          `'${file.name}' is ${sizeText(file.size)}, over the ${sizeText(MAX_FETCH_BYTES)} one workspace write holds; it is not fetched`
+        );
+        continue;
+      }
+      const local = await localEntry(host, path);
+      if (typeof local === "string") {
+        problems.push(local);
+        continue;
+      }
+      if (local !== void 0 && alreadyFetched(local, file.size, file.modifiedTime)) {
+        unchanged.push(path);
+        continue;
+      }
+      if (local !== void 0 && local.kind !== "file") {
+        problems.push(`'${path}' is a folder in the workspace`);
+        continue;
+      }
+      planned.push(fetchOf(row, file, path, local));
+    }
+    operations.push(...planned);
+    for (const each of problems) operations.push(fetchFailure(row, each));
+    if (operations.length > MAX_OPERATIONS) {
+      return refused7(
+        problem6(
+          `would plan over the ${MAX_OPERATIONS.toLocaleString("en-US")} writes one plan holds; split the table`
+        )
+      );
+    }
+  }
+  const diagnostics = [];
+  if (unchanged.length > 0) {
+    diagnostics.push(
+      warning(
+        `'${DRIVE_FETCH}' plans nothing for ${counted(unchanged.length, "file")} already in the workspace with the same size, written since Drive's last change: ${listed(unchanged)}.`
+      )
+    );
+  }
+  if (native.length > 0) {
+    diagnostics.push(
+      warning(
+        `'${DRIVE_FETCH}' left out ${counted(native.length, "Google file")} with no bytes to fetch: ${listed(native)}.`
+      )
+    );
+  }
+  if (blank > 0) {
+    diagnostics.push(
+      warning(`'${DRIVE_FETCH}' left out ${counted(blank, "row")} with no link or no folder.`)
+    );
+  }
+  return {
+    ok: true,
+    value: {
+      target: `the assets folder of each row's ${into}`,
+      operations,
+      count: operations.length
+    },
+    diagnostics
+  };
+}
+function fetchOf(row, file, path, local) {
+  const size = file.size ?? 0;
+  const payload = {
+    i: file.id,
+    w: path,
+    s: size,
+    m: file.modifiedTime ?? "",
+    ...local === void 0 ? {} : { ls: local.size, lm: local.modifiedAt }
+  };
+  return {
+    write: local === void 0 ? FETCH_WRITE : REPLACE_LOCAL_WRITE,
+    rowKey: row.key,
+    description: shortened(
+      local === void 0 ? `fetch '${file.name}' (${sizeText(size)}) from Drive into '${path}'` : `replace '${path}' (${sizeText(local.size)}, ${local.modifiedAt}) with Drive's '${file.name}' (${sizeText(size)}, ${file.modifiedTime ?? ""})`
+    ),
+    payload: { ...payload }
+  };
+}
+async function filesNamed(client, id) {
+  const item = await getFile(client, id);
+  if (!item.ok) return item;
+  if (item.value.mimeType !== FOLDER_MIME_TYPE) return googleOk([item.value]);
+  const files = [];
+  let pageToken;
+  do {
+    const page = await listChildren(client, id, "file", pageToken);
+    if (!page.ok) return page;
+    files.push(...page.value.files);
+    pageToken = page.value.nextPageToken;
+  } while (pageToken !== void 0);
+  return googleOk(files);
+}
+async function localEntry(host, path) {
+  try {
+    return await host.workspace.stat(path);
+  } catch (thrown) {
+    const message = messageOf(thrown);
+    if (/ENOENT|not found|no such|does not exist/i.test(message)) return void 0;
+    return `'${path}' could not be read in the workspace: ${message}`;
+  }
+}
+function nameProblem(name) {
+  if (name === "" || name === "." || name === ".." || /[/\\\u0000-\u001f]/.test(name)) {
+    return `'${name}' cannot be a file name in ${ASSETS_FOLDER}/`;
+  }
+  return void 0;
+}
+function folderPath(written) {
+  const path = written.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (path === "" || path.startsWith("/") || /^[A-Za-z]:/.test(path)) return void 0;
+  if (path.split("/").some((part) => part === ".." || part === "." || part === "")) {
+    return void 0;
+  }
+  return path;
+}
+function counted(count, noun) {
+  return `${count.toLocaleString("en-US")} ${count === 1 ? noun : `${noun}s`}`;
+}
+function cellText2(value) {
+  if (value === null || value === void 0) return void 0;
+  const text = String(value).trim();
+  return text === "" ? void 0 : text;
+}
+function columnNamed2(table, name, argument) {
+  const found = columnOf(table, argument, name);
+  return found.problem === void 0 ? found.name : problem6(found.problem);
+}
+function isFetchPayload(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value;
+  const text = (key) => typeof record[key] === "string" && record[key] !== "";
+  const bytes = (key) => typeof record[key] === "number" && Number.isSafeInteger(record[key]) && record[key] >= 0;
+  const local = record["ls"] === void 0 ? record["lm"] === void 0 : bytes("ls") && text("lm");
+  return text("i") && text("w") && text("m") && bytes("s") && local;
+}
+
+// src/drive-folder.ts
+var DRIVE_FOLDER = "google.drive-folder";
+var FOLDER_KIND = {
+  verb: DRIVE_FOLDER,
+  noun: "folder",
+  mimeType: FOLDER_MIME_TYPE,
+  link: (id) => `https://drive.google.com/drive/folders/${id}`
+};
+function driveFolderVerb(host, clock = systemClock) {
+  return {
+    id: DRIVE_FOLDER,
+    kind: "action",
+    arguments: CREATE_ARGUMENTS,
+    writes: [CREATE_WRITE, SHARE_WRITE],
+    plan: (request) => planCreates(host, request, FOLDER_KIND, clock),
+    apply: (request) => applyCreates(host, request, clock)
+  };
+}
+
+// src/drive-list.ts
+var DRIVE_LIST = "google.drive-list";
+var DEFAULT_MAX = 1e5;
+var MAX_MAX = 1e5;
+var CURSOR_LIMIT = 4e3;
+var ARGUMENTS7 = [
+  { name: "folder", type: "text" },
+  { name: "type", type: "text" },
+  { name: "max", type: "number" }
+];
+var LIST_COLUMNS = [
+  { name: "id", type: "text", origin: ORIGIN },
+  { name: "name", type: "text", origin: ORIGIN },
+  { name: "mime_type", type: "text", origin: ORIGIN },
+  { name: "kind", type: "text", origin: ORIGIN },
+  { name: "size", type: "number", origin: ORIGIN },
+  { name: "created", type: "datetime", origin: ORIGIN },
+  { name: "modified", type: "datetime", origin: ORIGIN },
+  { name: "url", type: "link", origin: ORIGIN },
+  { name: "parent_id", type: "text", origin: ORIGIN },
+  // Last, so a recipe that reads the columns by position keeps reading the same ones.
+  { name: "width", type: "number", origin: ORIGIN },
+  { name: "height", type: "number", origin: ORIGIN }
+];
+function driveListVerb(host) {
+  return {
+    id: DRIVE_LIST,
+    kind: "source",
+    arguments: ARGUMENTS7,
+    page: (request) => driveListPage(host, request)
+  };
+}
+var listFailed = (text) => failed({ severity: "error", code: "E_RECIPE_VERB", message: `'${DRIVE_LIST}' failed: ${text}.` });
+async function driveListPage(host, request) {
+  const asked = readListArguments(request.arguments, request.section);
+  if ("severity" in asked) return failed(asked);
+  const print = fingerprint(JSON.stringify([asked.folderId, asked.type ?? null, asked.max]));
+  let cursor;
+  if (request.cursor !== void 0) {
+    const decoded = decodeOpaque(request.cursor, CURSOR_LIMIT);
+    if (typeof decoded === "string") return listFailed(`${decoded}; run again`);
+    if (!isListCursor(decoded.value)) {
+      return listFailed("the cursor is not one this plugin writes; run again");
+    }
+    cursor = decoded.value;
+    if (cursor.f !== print) {
+      return listFailed("the step changed between two pages of one run; run again");
+    }
+  }
+  const connection = await connect(host, request.section);
+  if (!connection.ok) return failed(verbFailed(DRIVE_LIST, connection.error));
+  const page = await listChildren(connection.value.client, asked.folderId, asked.type, cursor?.t);
+  if (!page.ok) return failed(verbFailed(DRIVE_LIST, page.error));
+  const fetchedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const rows = page.value.files.filter((file) => matchesType(kindOf(file.mimeType, file.name), asked.type)).map((file) => rowOf2(file, asked.folderId, fetchedAt));
+  const table = { columns: LIST_COLUMNS, rows };
+  const answered = (cursor?.n ?? 0) + rows.length;
+  if (answered > asked.max) return { ok: true, value: { table, truncated: true }, diagnostics: [] };
+  const token = page.value.nextPageToken;
+  if (token === void 0) return { ok: true, value: { table }, diagnostics: [] };
+  const next = { v: 1, t: token, n: answered, f: print };
+  return { ok: true, value: { table, cursor: encodeOpaque(next) }, diagnostics: [] };
+}
+function rowOf2(file, folderId, fetchedAt) {
+  return {
+    key: file.id,
+    values: {
+      id: file.id,
+      name: file.name,
+      mime_type: file.mimeType,
+      kind: kindOf(file.mimeType, file.name),
+      size: file.size ?? null,
+      created: file.createdTime ?? null,
+      modified: file.modifiedTime ?? null,
+      url: file.webViewLink ?? null,
+      // The folder asked for: a file Drive lists under it is its child, whatever else holds it.
+      parent_id: folderId,
+      width: file.width ?? null,
+      height: file.height ?? null
+    },
+    provenance: { source: ORIGIN, id: file.id, fetchedAt }
+  };
+}
+function isListCursor(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value;
+  return record["v"] === 1 && typeof record["t"] === "string" && record["t"] !== "" && Number.isSafeInteger(record["n"]) && record["n"] >= 0 && typeof record["f"] === "string" && /^[0-9a-f]{16}$/.test(record["f"]);
+}
+function readListArguments(values, section) {
+  const folderId = folderArgument(DRIVE_LIST, values, section);
+  if (typeof folderId !== "string") return folderId;
+  const type = textArgument(values, "type")?.toLowerCase();
+  if (type !== void 0 && !DRIVE_TYPES.includes(type)) {
+    return argumentsProblem(
+      DRIVE_LIST,
+      `type= must be one of ${DRIVE_TYPES.join(", ")}, not '${type}'`
+    );
+  }
+  const max = values["max"] ?? DEFAULT_MAX;
+  if (typeof max !== "number" || !Number.isSafeInteger(max) || max < 1 || max > MAX_MAX) {
+    return argumentsProblem(
+      DRIVE_LIST,
+      `max= must be a whole number from 1 to ${MAX_MAX}, not ${String(max)}`
+    );
+  }
+  return {
+    folderId,
+    ...type === void 0 ? {} : { type },
+    max
+  };
 }
 
 // src/drive-json.ts
@@ -3193,7 +4047,7 @@ var PAGE_ROWS = 5e3;
 var PAGE_BYTES = 6 * 1024 * 1024;
 var MAX_FILES = 1e3;
 var CURSOR_LIMIT2 = 16e3;
-var ARGUMENTS6 = [
+var ARGUMENTS8 = [
   { name: "file", type: "text" },
   { name: "folder", type: "text" },
   { name: "type", type: "text" },
@@ -3210,11 +4064,11 @@ function driveReadVerb(host) {
   return {
     id: DRIVE_READ,
     kind: "source",
-    arguments: ARGUMENTS6,
+    arguments: ARGUMENTS8,
     page: (request) => driveReadPage(host, request)
   };
 }
-var problem5 = (text) => argumentsProblem(DRIVE_READ, text);
+var problem7 = (text) => argumentsProblem(DRIVE_READ, text);
 var readFailed = (text) => failed({ severity: "error", code: "E_RECIPE_VERB", message: `'${DRIVE_READ}' failed: ${text}.` });
 var changed = (what) => readFailed(`${what} changed while its pages were read; run again`);
 async function driveReadPage(host, request) {
@@ -3282,14 +4136,14 @@ async function driveReadPage(host, request) {
     return changed(`the file '${file.name}'`);
   }
   const format = formatOf(file, asked);
-  if (typeof format !== "string") return failed(problem5(format.problem));
+  if (typeof format !== "string") return failed(problem7(format.problem));
   const fetchedAt = (/* @__PURE__ */ new Date()).toISOString();
   let tableColumns;
   let rows;
   if (format === "text") {
     const body = await download(client, file);
     if ("severity" in body) return failed(body);
-    if ("problem" in body) return failed(problem5(body.problem));
+    if ("problem" in body) return failed(problem7(body.problem));
     tableColumns = TEXT_COLUMNS;
     rows = textRows(file, body.body, fetchedAt);
   } else {
@@ -3297,15 +4151,15 @@ async function driveReadPage(host, request) {
     if (read === void 0) {
       const body = await download(client, file);
       if ("severity" in body) return failed(body);
-      if ("problem" in body) return failed(problem5(body.problem));
+      if ("problem" in body) return failed(problem7(body.problem));
       const parsed = jsonRecords(file, body.body, asked.rows);
       if (typeof parsed === "string") return readFailed(parsed);
       read = parsed;
     }
     if (columns === void 0) {
       const own = new ColumnUnion(asked.columns);
-      const refused10 = own.add(file.name, read);
-      if (refused10 !== void 0) return readFailed(refused10);
+      const refused11 = own.add(file.name, read);
+      if (refused11 !== void 0) return readFailed(refused11);
       columns = own.columns();
     }
     const built = jsonRows(file, read, columns, fetchedAt);
@@ -3364,8 +4218,8 @@ async function judgeFile(client, file, asked, union) {
   if (!("body" in body)) return body;
   const read = jsonRecords(file, body.body, asked.rows);
   if (typeof read === "string") return { problem: read };
-  const refused10 = union.add(file.name, read);
-  return refused10 === void 0 ? { read } : { problem: refused10 };
+  const refused11 = union.add(file.name, read);
+  return refused11 === void 0 ? { read } : { problem: refused11 };
 }
 function skippedFile(file, reason) {
   return {
@@ -3388,7 +4242,7 @@ async function jsonFilesOf(client, folderId) {
     if (!page.ok) return verbFailed(DRIVE_READ, page.error);
     found.push(...page.value.files.filter((file) => isJson(file.mimeType, file.name)));
     if (found.length > MAX_FILES) {
-      return problem5(
+      return problem7(
         `reads at most ${MAX_FILES} JSON files of a folder, one per page, and this folder holds more; move some of them to another folder`
       );
     }
@@ -3464,25 +4318,25 @@ function readReadArguments(values, section) {
   const fileWritten = textArgument(values, "file");
   const type = textArgument(values, "type")?.toLowerCase();
   if (type !== void 0 && type !== "json" && type !== "text") {
-    return problem5(`type= must be json or text, not '${type}'`);
+    return problem7(`type= must be json or text, not '${type}'`);
   }
   const rows = textArgument(values, "rows");
   if (rows !== void 0 && type === "text") {
-    return problem5("rows= spreads a list of a JSON object into rows; type=text reads lines");
+    return problem7("rows= spreads a list of a JSON object into rows; type=text reads lines");
   }
   const columns = declaredColumns(textArgument(values, "columns"));
-  if (typeof columns === "string") return problem5(columns);
+  if (typeof columns === "string") return problem7(columns);
   if (columns !== void 0 && type === "text") {
-    return problem5("columns= names a JSON file's columns; type=text reads lines");
+    return problem7("columns= names a JSON file's columns; type=text reads lines");
   }
   const declared = columns === void 0 ? {} : { columns };
   if (fileWritten !== void 0) {
     if (textArgument(values, "folder") !== void 0) {
-      return problem5("takes file= or folder=, not both");
+      return problem7("takes file= or folder=, not both");
     }
     const fileId = fileIdOf(fileWritten);
     if (fileId === void 0) {
-      return problem5(
+      return problem7(
         `file= holds '${fileWritten}', which is neither a Drive file id nor its address, such as https://drive.google.com/file/d/<id>/view`
       );
     }
@@ -3495,7 +4349,7 @@ function readReadArguments(values, section) {
     };
   }
   if (type === "text") {
-    return problem5("reads a folder as its JSON files only; type=text needs file=");
+    return problem7("reads a folder as its JSON files only; type=text needs file=");
   }
   const folderId = folderArgument(DRIVE_READ, values, section);
   if (typeof folderId !== "string") return folderId;
@@ -3526,531 +4380,6 @@ function declaredColumns(written) {
   return names;
 }
 
-// src/planned-folder.ts
-function plannedFolderKey(parentId, name) {
-  return `planned-folder/${fingerprint(JSON.stringify([parentId, name]))}`;
-}
-var DRIVE_ID3 = /^[A-Za-z0-9_-]{10,}$/;
-async function plannedFolderId(host, parentId, name) {
-  try {
-    const entry = await host.cache.get(plannedFolderKey(parentId, name));
-    if (entry === void 0) return void 0;
-    const id = new TextDecoder().decode(entry.bytes);
-    return DRIVE_ID3.test(id) ? id : void 0;
-  } catch {
-    return void 0;
-  }
-}
-async function rememberPlannedFolder(host, parentId, name, id) {
-  try {
-    await host.cache.put(plannedFolderKey(parentId, name), id);
-  } catch {
-  }
-}
-async function forgetPlannedFolder(host, parentId, name) {
-  try {
-    await host.cache.delete(plannedFolderKey(parentId, name));
-  } catch {
-  }
-}
-
-// src/drive-upload-apply.ts
-var DRIVE_UPLOADS = "https://www.googleapis.com/upload/drive/v3/files";
-var CHUNK_BYTES = 8 * 1024 * 1024;
-var RESUMES_PER_FILE = 3;
-var NOT_REACHED2 = { status: "continue" };
-async function applyDriveUploads(host, request, clock = systemClock) {
-  const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
-  const outcomes = request.operations.map(() => void 0);
-  const failed3 = (reason) => ({
-    status: "failed",
-    reason: shortened(reason)
-  });
-  const budget = budgetedTransport(host, clock);
-  const client = connectAsPerson(host, budget.transport);
-  const notCreated = /* @__PURE__ */ new Map();
-  for (const [index, operation] of request.operations.entries()) {
-    const payload = operation.payload;
-    if (isPlannedFailure(payload)) {
-      outcomes[index] = failed3(payload.x);
-      continue;
-    }
-    if (budget.expired()) break;
-    if (operation.write === "create" && isCreatePayload(payload)) {
-      const made = await create(client, payload);
-      if (made === void 0 || budget.refusedForTime()) break;
-      if (made.status === "failed") notCreated.set(payload.c, made.reason ?? "failed");
-      else await forgetPlannedFolder(host, payload.p, payload.n);
-      outcomes[index] = made;
-      continue;
-    }
-    if (operation.write !== UPLOAD_WRITE && operation.write !== REPLACE_WRITE || !isUploadPayload(payload)) {
-      outcomes[index] = failed3(
-        "E_GOOGLE_PLAN: not a write this plugin planned; run the cell again"
-      );
-      continue;
-    }
-    const why = notCreated.get(payload.p);
-    if (why !== void 0) {
-      outcomes[index] = failed3(`its folder was not created, so it is not uploaded: ${why}`);
-      continue;
-    }
-    const ended = await uploadOne({ host, client, clock, deadline, budget }, payload);
-    if (ended === void 0) break;
-    outcomes[index] = ended;
-  }
-  return {
-    ok: true,
-    value: {
-      operations: outcomes.map((outcome) => outcome ?? NOT_REACHED2)
-    },
-    diagnostics: []
-  };
-}
-async function uploadOne(sending, payload) {
-  const { host, client, clock, deadline, budget } = sending;
-  const failed3 = (reason) => ({
-    status: "failed",
-    reason: shortened(reason)
-  });
-  const googleFailed = (error) => budget.refusedForTime() ? void 0 : failed3(describeGoogleError(error));
-  const changed2 = await localChange(host, payload);
-  if (changed2 !== void 0) return failed3(changed2);
-  const key = sessionKey(payload);
-  const kept = await cached(host, key);
-  let sessionUrl = kept === void 0 ? void 0 : new TextDecoder().decode(kept);
-  let offset = 0;
-  if (sessionUrl !== void 0) {
-    const where = await sessionState(client, sessionUrl, payload.s);
-    if (!where.ok) {
-      if (!expired(where.error)) return googleFailed(where.error);
-      await forget2(host, key);
-      sessionUrl = void 0;
-    } else if (where.value === "done") return finished(sending, payload, key);
-    else offset = where.value;
-  }
-  if (sessionUrl === void 0) {
-    const there = await alreadyThere(client, payload);
-    if (there !== void 0) return there.ok ? there.value : googleFailed(there.error);
-    const started = await startSession(client, payload);
-    if (!started.ok) return googleFailed(started.error);
-    sessionUrl = started.value;
-    await host.cache.put(key, sessionUrl).catch(() => void 0);
-  }
-  let lastChunk;
-  let resumes = 0;
-  while (offset < payload.s) {
-    if (lastChunk !== void 0 && clock.now() + lastChunk * 1.5 > deadline) {
-      return progress(offset, payload.s);
-    }
-    const length = Math.min(CHUNK_BYTES, payload.s - offset);
-    let bytes;
-    try {
-      bytes = await host.workspace.read(payload.u, { offset, length });
-    } catch (thrown) {
-      return failed3(`'${payload.u}' could not be read: ${messageOf(thrown)}`);
-    }
-    if (bytes.length !== length) {
-      return failed3(`E_GOOGLE_CHANGED: '${payload.u}' changed while it was read; run again`);
-    }
-    const before = clock.now();
-    const sent = await client.upload("PUT", sessionUrl, {
-      headers: { "Content-Range": `bytes ${offset}-${offset + length - 1}/${payload.s}` },
-      body: bytes
-    });
-    lastChunk = clock.now() - before;
-    if (sent.ok) {
-      if (sent.value.status !== 308) return finished(sending, payload, key);
-      offset = heldUpTo(sent.value);
-      continue;
-    }
-    if (budget.refusedForTime()) return progress(offset, payload.s);
-    if (expired(sent.error)) {
-      await forget2(host, key);
-      return failed3(`${describeGoogleError(sent.error)}; the upload starts over on the next run`);
-    }
-    const transient = sent.error.code === "E_GOOGLE_NETWORK" || (sent.error.status ?? 0) >= 500;
-    if (!transient || resumes >= RESUMES_PER_FILE) return failed3(describeGoogleError(sent.error));
-    resumes += 1;
-    const where = await sessionState(client, sessionUrl, payload.s);
-    if (!where.ok) return googleFailed(where.error);
-    if (where.value === "done") return finished(sending, payload, key);
-    offset = where.value;
-  }
-  const last = await sessionState(client, sessionUrl, payload.s);
-  if (!last.ok) return googleFailed(last.error);
-  if (last.value === "done") return finished(sending, payload, key);
-  return failed3("E_GOOGLE_HTTP: Drive did not finish the upload after its last byte; run again");
-}
-async function finished(sending, payload, key) {
-  await forget2(sending.host, key);
-  const changed2 = await localChange(sending.host, payload);
-  if (changed2 === void 0) return { status: "applied" };
-  return {
-    status: "failed",
-    reason: shortened(`${changed2}; it changed while it was sent, and the next run sends it again`)
-  };
-}
-async function cached(host, key) {
-  try {
-    return (await host.cache.get(key))?.bytes;
-  } catch {
-    return void 0;
-  }
-}
-async function forget2(host, key) {
-  await host.cache.delete(key).catch(() => false);
-}
-async function localChange(host, payload) {
-  try {
-    const now = await host.workspace.stat(payload.u);
-    if (now.kind === "file" && now.size === payload.s && Date.parse(now.modifiedAt) === Date.parse(payload.m)) {
-      return void 0;
-    }
-    return `E_GOOGLE_CHANGED: '${payload.u}' changed since the plan; run the cell again`;
-  } catch (thrown) {
-    return `'${payload.u}' could not be read: ${messageOf(thrown)}`;
-  }
-}
-async function alreadyThere(client, payload) {
-  if (payload.r !== void 0) {
-    const now = await getFile(client, payload.r);
-    if (!now.ok) return now;
-    return sameFile(now.value, payload.s, payload.m) ? { ok: true, value: { status: "applied" } } : void 0;
-  }
-  const named = await childrenNamed(client, payload.p, payload.n);
-  if (!named.ok) return named;
-  if (named.value.length === 0) return void 0;
-  if (named.value.some((each) => sameFile(each, payload.s, payload.m))) {
-    return { ok: true, value: { status: "applied" } };
-  }
-  return {
-    ok: true,
-    value: {
-      status: "failed",
-      reason: shortened(
-        `E_GOOGLE_CHANGED: a file named '${payload.n}' was put in ${payload.p} since the plan; run the cell again for a new plan`
-      )
-    }
-  };
-}
-async function startSession(client, payload) {
-  const started = await client.upload(
-    payload.r === void 0 ? "POST" : "PATCH",
-    payload.r === void 0 ? DRIVE_UPLOADS : `${DRIVE_UPLOADS}/${encodeURIComponent(payload.r)}`,
-    {
-      query: { uploadType: "resumable", supportsAllDrives: true, fields: "id" },
-      headers: { "X-Upload-Content-Length": String(payload.s) },
-      body: payload.r === void 0 ? { name: payload.n, parents: [payload.p], modifiedTime: payload.m } : { modifiedTime: payload.m }
-    }
-  );
-  if (!started.ok) return started;
-  const location = headerOf(started.value.headers, "location");
-  if (location === void 0 || !location.startsWith(`${DRIVE_UPLOADS}?`)) {
-    return {
-      ok: false,
-      error: {
-        code: "E_GOOGLE_RESPONSE",
-        message: `Drive opened no upload session for '${payload.n}' at its own address.`
-      }
-    };
-  }
-  return { ok: true, value: location };
-}
-async function sessionState(client, url, size) {
-  const asked = await client.upload("PUT", url, {
-    headers: { "Content-Range": `bytes */${size}` },
-    body: new Uint8Array(0)
-  });
-  if (!asked.ok) return asked;
-  return { ok: true, value: asked.value.status === 308 ? heldUpTo(asked.value) : "done" };
-}
-function heldUpTo(answer) {
-  const range = /^bytes=0-(\d+)$/.exec(headerOf(answer.headers, "range")?.trim() ?? "");
-  return range?.[1] === void 0 ? 0 : Number(range[1]) + 1;
-}
-function expired(error) {
-  return error.status === 404 || error.status === 410;
-}
-function progress(offset, size) {
-  return { status: "continue", progress: `sent ${sizeText(offset)} of ${sizeText(size)}` };
-}
-
-// src/drive-upload.ts
-var DRIVE_UPLOAD = "google.drive-upload";
-var UPLOAD_WRITE = "upload";
-var REPLACE_WRITE = "replace";
-var MAX_DEPTH = 6;
-var ARGUMENTS7 = [
-  { name: "from", type: "text" },
-  { name: "to", type: "text" },
-  { name: "to-column", type: "text" }
-];
-function driveUploadVerb(host, clock = systemClock) {
-  return {
-    id: DRIVE_UPLOAD,
-    kind: "action",
-    arguments: ARGUMENTS7,
-    writes: [CREATE_WRITE, UPLOAD_WRITE, REPLACE_WRITE],
-    plan: (request) => planDriveUpload(host, request, clock),
-    apply: (request) => applyDriveUploads(host, request, clock)
-  };
-}
-function sessionKey(payload) {
-  const { u, s, m, p, r } = payload;
-  return `upload/${fingerprint(JSON.stringify([u, s, m, p, r ?? ""]))}`;
-}
-function sameFile(file, size, modifiedAt) {
-  return file.size === size && file.modifiedTime !== void 0 && Date.parse(file.modifiedTime) === Date.parse(modifiedAt);
-}
-function sizeText(bytes) {
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
-  if (bytes >= 1e3) return `${Math.round(bytes / 1e3)} KB`;
-  return `${bytes} B`;
-}
-var problem6 = (text) => argumentsProblem(DRIVE_UPLOAD, text);
-var refused6 = (diagnostic) => ({ ok: false, error: [diagnostic] });
-var OUT_OF_TIME3 = "'google.drive-upload' could not compare every file in one call's time; narrow the table to fewer rows and run again.";
-var DONE = { ok: true };
-async function planDriveUpload(host, request, clock = systemClock) {
-  const { table } = request;
-  const fromWritten = textArgument(request.arguments, "from");
-  if (fromWritten === void 0) {
-    return refused6(problem6("needs from=, the column naming each workspace file or folder"));
-  }
-  const from = columnNamed(table, fromWritten, "from");
-  if (typeof from !== "string") return refused6(from);
-  const to = textArgument(request.arguments, "to");
-  const toColumnWritten = textArgument(request.arguments, "to-column");
-  if (to === void 0 === (toColumnWritten === void 0)) {
-    return refused6(
-      problem6("takes to=, one Drive folder for every row, or to-column=, a folder per row")
-    );
-  }
-  const toColumn = toColumnWritten === void 0 ? void 0 : columnNamed(table, toColumnWritten, "to-column");
-  if (toColumn !== void 0 && typeof toColumn !== "string") return refused6(toColumn);
-  const section = readSection(request.section);
-  if (!section.ok) return refused6(verbFailed(DRIVE_UPLOAD, section.error));
-  const rootId = section.value.root;
-  if (rootId === void 0) {
-    return refused6(
-      problem6("needs root in the google section of .tyto/project.json: it uploads under it")
-    );
-  }
-  const budget = budgetedTransport(host, clock);
-  const connection = await connect(host, request.section, budget.transport);
-  if (!connection.ok) return refused6(verbFailed(DRIVE_UPLOAD, connection.error));
-  const { client } = connection.value;
-  const walk = rootWalk(client, rootId);
-  const failedFor = (error) => budget.refusedForTime() ? refused6({ severity: "error", code: "E_RECIPE_VERB", message: OUT_OF_TIME3 }) : refused6(verbFailed(DRIVE_UPLOAD, error));
-  const destinations = /* @__PURE__ */ new Map();
-  const operations = [];
-  const unchanged = [];
-  let blank = 0;
-  for (const row of table.rows) {
-    const path = cellText(row.values[from]);
-    const wanted = toColumn === void 0 ? to : cellText(row.values[toColumn]);
-    if (path === void 0 || wanted === void 0) {
-      blank += 1;
-      continue;
-    }
-    let found = destinations.get(wanted);
-    if (found === void 0) {
-      found = await destinationOf(walk, rootId, rootId, wanted, toColumn ?? "to=");
-      destinations.set(wanted, found);
-    }
-    if (!found.ok && "error" in found) return failedFor(found.error);
-    if (!found.ok) {
-      if (toColumn === void 0) return refused6(problem6(found.problem));
-      operations.push(plannedFailure2(row, found.problem));
-      continue;
-    }
-    const context = { host, client, row, operations: [], unchanged: [] };
-    const entry = await statOf(host, path);
-    let step;
-    if (typeof entry === "string") step = { ok: false, problem: entry };
-    else if (entry.kind === "file") {
-      const named2 = await childrenNamed(client, found.folder.id, entry.name);
-      step = named2.ok ? planFile(context, path, entry, found.folder, named2.value) : { ok: false, error: named2.error };
-    } else step = await planFolder(context, path, entry.name, found.folder, true, 0);
-    if (!step.ok && "error" in step) return failedFor(step.error);
-    if (!step.ok) {
-      operations.push(plannedFailure2(row, step.problem));
-      continue;
-    }
-    operations.push(...context.operations);
-    unchanged.push(...context.unchanged);
-    if (operations.length > MAX_OPERATIONS) {
-      return refused6(
-        problem6(
-          `would plan over the ${MAX_OPERATIONS.toLocaleString("en-US")} writes one plan holds; split the table`
-        )
-      );
-    }
-  }
-  const diagnostics = [];
-  if (unchanged.length > 0) {
-    diagnostics.push(
-      warning(
-        `'${DRIVE_UPLOAD}' plans nothing for ${unchanged.length.toLocaleString("en-US")} ${unchanged.length === 1 ? "file" : "files"} already in Drive with the same name, size and time: ${listed(unchanged)}.`
-      )
-    );
-  }
-  if (blank > 0) {
-    diagnostics.push(
-      warning(
-        `'${DRIVE_UPLOAD}' left out ${blank.toLocaleString("en-US")} ${blank === 1 ? "row" : "rows"} with no file or no destination.`
-      )
-    );
-  }
-  const named = [...destinations.values()].flatMap(
-    (each) => each.ok ? [`'${each.folder.name}' (${each.folder.id})`] : []
-  );
-  return {
-    ok: true,
-    value: {
-      target: `Drive folder ${[...new Set(named)].join(", ") || to || `per row in ${toColumn}`}`,
-      operations,
-      count: operations.length
-    },
-    diagnostics
-  };
-}
-function planFile(walk, path, entry, folder, inFolder) {
-  if (entry.name.length > MAX_NAME_LENGTH) {
-    return { ok: false, problem: `'${path}' has a name over ${MAX_NAME_LENGTH} characters` };
-  }
-  const same = inFolder.filter(
-    (each) => each.name === entry.name && each.mimeType !== FOLDER_MIME_TYPE
-  );
-  if (same.length > 1) {
-    return {
-      ok: false,
-      problem: `${same.length} files named '${entry.name}' are in '${folder.name}' (${listed(same.map((each) => each.id))}); keep one`
-    };
-  }
-  const existing = same[0];
-  if (existing !== void 0 && sameFile(existing, entry.size, entry.modifiedAt)) {
-    walk.unchanged.push(path);
-    return DONE;
-  }
-  const payload = {
-    u: path,
-    n: entry.name,
-    p: folder.id,
-    s: entry.size,
-    m: entry.modifiedAt,
-    ...existing === void 0 ? {} : { r: existing.id }
-  };
-  const where = `'${folder.name}' (${folder.id})`;
-  walk.operations.push({
-    write: existing === void 0 ? UPLOAD_WRITE : REPLACE_WRITE,
-    rowKey: walk.row.key,
-    description: shortened(
-      existing === void 0 ? `upload '${path}' (${sizeText(entry.size)}) into ${where}` : `replace '${path}' (${sizeText(entry.size)}, was ${existing.size === void 0 ? "no size" : sizeText(existing.size)}) in ${where}, keeping its id ${existing.id}`
-    ),
-    payload: { ...payload }
-  });
-  return DONE;
-}
-async function planFolder(walk, path, name, parent, parentExists, depth) {
-  if (depth > MAX_DEPTH) {
-    return { ok: false, problem: `'${path}' is over ${MAX_DEPTH} folders deep` };
-  }
-  let folder;
-  if (parentExists) {
-    const named = await childrenNamedOfType(walk.client, parent.id, name, FOLDER_MIME_TYPE);
-    if (!named.ok) return named;
-    if (named.value.length > 1) {
-      return {
-        ok: false,
-        problem: `${named.value.length} folders named '${name}' are in '${parent.name}' (${listed(named.value.map((each) => each.id))}); keep one`
-      };
-    }
-    folder = named.value[0];
-  }
-  const exists = folder !== void 0;
-  if (folder === void 0) {
-    const planned = await idFor(walk, parent.id, name);
-    if (!planned.ok) return planned;
-    const id = planned.value;
-    folder = { id, name };
-    const payload = { c: id, n: name, p: parent.id, m: FOLDER_MIME_TYPE };
-    walk.operations.push({
-      write: CREATE_WRITE,
-      rowKey: walk.row.key,
-      description: shortened(
-        `create folder '${name}' in '${parent.name}' (${parent.id}): https://drive.google.com/drive/folders/${id}`
-      ),
-      payload: { ...payload }
-    });
-  }
-  let entries;
-  try {
-    entries = await walk.host.workspace.list(path);
-  } catch (thrown) {
-    return { ok: false, problem: `'${path}' could not be listed: ${messageOf(thrown)}` };
-  }
-  let inDrive = [];
-  if (exists) {
-    const children = await allChildren(walk.client, folder.id);
-    if (!children.ok) return children;
-    inDrive = children.value;
-  }
-  for (const entry of entries) {
-    const child = path === "" ? entry.name : `${path}/${entry.name}`;
-    const step = entry.kind === "file" ? planFile(walk, child, entry, folder, inDrive) : await planFolder(walk, child, entry.name, folder, exists, depth + 1);
-    if (!step.ok) return step;
-  }
-  return DONE;
-}
-async function idFor(walk, parentId, name) {
-  const kept = await plannedFolderId(walk.host, parentId, name);
-  if (kept !== void 0) {
-    const there = await getFile(walk.client, kept);
-    if (!there.ok && there.error.status === 404) return googleOk(kept);
-    if (!there.ok) return there;
-  }
-  const ids = await generateIds(walk.client, 1);
-  if (!ids.ok) return ids;
-  const id = ids.value[0] ?? "";
-  await rememberPlannedFolder(walk.host, parentId, name, id);
-  return googleOk(id);
-}
-async function allChildren(client, folderId) {
-  const files = [];
-  let pageToken;
-  do {
-    const page = await listChildren(client, folderId, void 0, pageToken);
-    if (!page.ok) return page;
-    files.push(...page.value.files);
-    pageToken = page.value.nextPageToken;
-  } while (pageToken !== void 0);
-  return { ok: true, value: files };
-}
-async function statOf(host, path) {
-  try {
-    return await host.workspace.stat(path);
-  } catch (thrown) {
-    return `'${path}' could not be read in the workspace: ${messageOf(thrown)}`;
-  }
-}
-function isUploadPayload(value) {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const record = value;
-  const text = (key) => typeof record[key] === "string" && record[key] !== "";
-  return text("u") && text("n") && text("p") && text("m") && typeof record["s"] === "number" && Number.isSafeInteger(record["s"]) && record["s"] >= 0 && (record["r"] === void 0 || text("r"));
-}
-function cellText(value) {
-  if (value === null || value === void 0) return void 0;
-  const text = String(value).trim();
-  return text === "" ? void 0 : text;
-}
-function columnNamed(table, name, argument) {
-  const found = columnOf(table, argument, name);
-  return found.problem === void 0 ? found.name : problem6(found.problem);
-}
-
 // src/drive-url.ts
 var DRIVE_URL = "google.drive-url";
 function driveUrlVerb(host) {
@@ -4064,8 +4393,8 @@ function driveUrlVerb(host) {
     transform: (request) => folderUrls(host, request)
   };
 }
-var refused7 = (diagnostic) => ({ ok: false, error: [diagnostic] });
-var problem7 = (text) => argumentsProblem(DRIVE_URL, text);
+var refused8 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var problem8 = (text) => argumentsProblem(DRIVE_URL, text);
 function lastSegment(value) {
   if (value === null || value === void 0) return void 0;
   const name = String(value).trim().replace(/[\\/]+$/u, "").split(/[\\/]/u).at(-1);
@@ -4074,24 +4403,24 @@ function lastSegment(value) {
 async function folderUrls(host, request) {
   const { table } = request;
   const asked = textArgument(request.arguments, "path");
-  if (asked === void 0) return refused7(problem7("needs path=, the column naming each folder"));
+  if (asked === void 0) return refused8(problem8("needs path=, the column naming each folder"));
   const column = table.columns.find((each) => each.name === asked) ?? table.columns.find((each) => each.name.toLowerCase() === asked.toLowerCase());
   if (column === void 0) {
-    return refused7(
-      problem7(
+    return refused8(
+      problem8(
         `path= names the column '${asked}', which the table does not have; its columns are ` + listed(table.columns.map((each) => each.name))
       )
     );
   }
   const added = `${column.name}_url`;
   if (table.columns.some((each) => each.name.toLowerCase() === added.toLowerCase())) {
-    return refused7(problem7(`would add the column '${added}', which the table already has`));
+    return refused8(problem8(`would add the column '${added}', which the table already has`));
   }
   const names = table.rows.map((row) => lastSegment(row.values[column.name]));
   const distinct = [...new Set(names.filter((name) => name !== void 0))];
   if (distinct.length > MAX_FOLDERS) {
-    return refused7(
-      problem7(
+    return refused8(
+      problem8(
         `would look up ${distinct.length.toLocaleString("en-US")} folders, over the ${MAX_FOLDERS} one call looks up; narrow it to fewer rows first`
       )
     );
@@ -4101,12 +4430,12 @@ async function folderUrls(host, request) {
   const planned = [];
   if (distinct.length > 0) {
     const connection = await connect(host, request.section);
-    if (!connection.ok) return refused7(verbFailed(DRIVE_URL, connection.error));
+    if (!connection.ok) return refused8(verbFailed(DRIVE_URL, connection.error));
     const { client, section } = connection.value;
     const rootId = section.root;
     if (rootId === void 0) {
-      return refused7(
-        problem7("needs root in the google section of .tyto/project.json: it looks only under it")
+      return refused8(
+        problem8("needs root in the google section of .tyto/project.json: it looks only under it")
       );
     }
     let parent = rootId;
@@ -4114,15 +4443,15 @@ async function folderUrls(host, request) {
     if (within !== void 0) {
       const found = await destinationOf(rootWalk(client, rootId), rootId, rootId, within, "in=");
       if (!found.ok) {
-        return refused7(
-          "error" in found ? verbFailed(DRIVE_URL, found.error) : problem7(found.problem)
+        return refused8(
+          "error" in found ? verbFailed(DRIVE_URL, found.error) : problem8(found.problem)
         );
       }
       parent = found.folder.id;
     }
     for (const name of distinct) {
       const named = await childrenNamedOfType(client, parent, name, FOLDER_MIME_TYPE);
-      if (!named.ok) return refused7(verbFailed(DRIVE_URL, named.error));
+      if (!named.ok) return refused8(verbFailed(DRIVE_URL, named.error));
       const [only, ...more] = named.value;
       if (more.length > 0) ambiguous.push(name);
       let id = more.length > 0 ? void 0 : only?.id;
@@ -5187,7 +5516,7 @@ function cellsOf(value) {
 // src/sheet-lookup.ts
 var SHEET_LOOKUP = "google.sheet-lookup";
 var DEFAULT_PREFIX = "sheet_";
-var ARGUMENTS8 = [
+var ARGUMENTS9 = [
   { name: "spreadsheet", type: "text" },
   { name: "tab", type: "text", required: true },
   { name: "key", type: "text", required: true },
@@ -5200,28 +5529,28 @@ function sheetLookupVerb(host) {
   return {
     id: SHEET_LOOKUP,
     kind: "transform",
-    arguments: ARGUMENTS8,
+    arguments: ARGUMENTS9,
     transform: (request) => lookUp(host, request)
   };
 }
-var refused8 = (diagnostic) => ({ ok: false, error: [diagnostic] });
-var problem8 = (text) => argumentsProblem(SHEET_LOOKUP, text);
+var refused9 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var problem9 = (text) => argumentsProblem(SHEET_LOOKUP, text);
 var listOf4 = (written) => [...new Set((written ?? "").split(",").map((item) => item.trim()))].filter((item) => item !== "");
 async function lookUp(host, request) {
   const { table } = request;
   const tabName = textArgument(request.arguments, "tab");
-  if (tabName === void 0) return refused8(problem8("needs tab=, the tab to look rows up in"));
+  if (tabName === void 0) return refused9(problem9("needs tab=, the tab to look rows up in"));
   const keyName = textArgument(request.arguments, "key");
-  if (keyName === void 0) return refused8(problem8("needs key=, the column to match rows by"));
+  if (keyName === void 0) return refused9(problem9("needs key=, the column to match rows by"));
   const wanted = listOf4(textArgument(request.arguments, "columns"));
-  if (wanted.length === 0) return refused8(problem8("needs columns=, the tab columns to add"));
+  if (wanted.length === 0) return refused9(problem9("needs columns=, the tab columns to add"));
   const links = listOf4(textArgument(request.arguments, "links"));
   const notes = listOf4(textArgument(request.arguments, "notes"));
   const prefix = request.arguments["prefix"] === void 0 ? DEFAULT_PREFIX : String(request.arguments["prefix"]).trim();
   const keyColumn = table.columns.find((each) => each.name === keyName) ?? table.columns.find((each) => each.name.toLowerCase() === keyName.toLowerCase());
   if (keyColumn === void 0) {
-    return refused8(
-      problem8(
+    return refused9(
+      problem9(
         `key= names the column '${keyName}', which the table does not have; its columns are ` + listed(table.columns.map((each) => each.name))
       )
     );
@@ -5231,9 +5560,9 @@ async function lookUp(host, request) {
     request.arguments["spreadsheet"],
     request.section
   );
-  if (typeof spreadsheetId !== "string") return refused8(spreadsheetId);
+  if (typeof spreadsheetId !== "string") return refused9(spreadsheetId);
   const connection = await connect(host, request.section);
-  if (!connection.ok) return refused8(verbFailed(SHEET_LOOKUP, connection.error));
+  if (!connection.ok) return refused9(verbFailed(SHEET_LOOKUP, connection.error));
   const read = await firstSnapshot(
     host,
     SHEET_LOOKUP,
@@ -5244,14 +5573,14 @@ async function lookUp(host, request) {
     // current Drive version, which any edit to the spreadsheet raises.
     false
   );
-  if ("severity" in read) return refused8(read);
+  if ("severity" in read) return refused9(read);
   const { snapshot, names, plan } = read;
   const kc = plan.key ?? 0;
   const added = [];
   for (const written of wanted) {
     const at = columnIndexOf(names, written);
     if (at === void 0)
-      return refused8(notInTab(SHEET_LOOKUP, "columns", written, names, snapshot.title));
+      return refused9(notInTab(SHEET_LOOKUP, "columns", written, names, snapshot.title));
     const type = inferType(snapshot.values, at);
     added.push({
       column: { name: `${prefix}${names[at] ?? ""}`, type, origin: ORIGIN },
@@ -5274,8 +5603,8 @@ async function lookUp(host, request) {
   for (const { column } of added) {
     const lowered = column.name.toLowerCase();
     if (taken.has(lowered)) {
-      return refused8(
-        problem8(
+      return refused9(
+        problem9(
           `would add the column '${column.name}', which the table already has; name another prefix=`
         )
       );
@@ -5289,8 +5618,8 @@ async function lookUp(host, request) {
     const sheetRow = index + 1;
     const before = rowOfKey.get(key);
     if (before !== void 0) {
-      return refused8(
-        problem8(
+      return refused9(
+        problem9(
           `rows ${before} and ${sheetRow} of the tab '${snapshot.title}' both hold '${key}' in ${names[kc] ?? ""}; a key must be unique, and the lookup does not guess which row is it`
         )
       );
@@ -5322,7 +5651,7 @@ var PAGE_ROWS2 = 5e3;
 var PAGE_BYTES2 = 6 * 1024 * 1024;
 var DEFAULT_MAX2 = 1e5;
 var MAX_MAX2 = 1e5;
-var ARGUMENTS9 = [
+var ARGUMENTS10 = [
   { name: "spreadsheet", type: "text" },
   { name: "tab", type: "text" },
   { name: "key", type: "text" },
@@ -5334,11 +5663,11 @@ function sheetRowsVerb(host) {
   return {
     id: SHEET_ROWS,
     kind: "source",
-    arguments: ARGUMENTS9,
+    arguments: ARGUMENTS10,
     page: (request) => sheetRowsPage(host, request)
   };
 }
-var problem9 = (text) => argumentsProblem(SHEET_ROWS, text);
+var problem10 = (text) => argumentsProblem(SHEET_ROWS, text);
 var sheetFailed = (text) => failed({ severity: "error", code: "E_RECIPE_VERB", message: `'${SHEET_ROWS}' failed: ${text}.` });
 async function sheetRowsPage(host, request) {
   const asked = readArguments(request.arguments, request.section);
@@ -5427,7 +5756,7 @@ function readArguments(values, section) {
   if (written !== void 0) {
     spreadsheetId = spreadsheetIdOf(written);
     if (spreadsheetId === void 0) {
-      return problem9(
+      return problem10(
         `spreadsheet= holds '${written}', which is neither a spreadsheet id nor its address, such as https://docs.google.com/spreadsheets/d/<id>/edit`
       );
     }
@@ -5436,14 +5765,14 @@ function readArguments(values, section) {
     if (!read.ok) return verbFailed(SHEET_ROWS, read.error);
     spreadsheetId = read.value.spreadsheet;
     if (spreadsheetId === void 0) {
-      return problem9(
+      return problem10(
         "needs spreadsheet=, or spreadsheet in the google section of .tyto/project.json, and was given neither"
       );
     }
   }
   const max = values["max"] ?? DEFAULT_MAX2;
   if (typeof max !== "number" || !Number.isSafeInteger(max) || max < 1 || max > MAX_MAX2) {
-    return problem9(`max= must be a whole number from 1 to ${MAX_MAX2}, not ${String(max)}`);
+    return problem10(`max= must be a whole number from 1 to ${MAX_MAX2}, not ${String(max)}`);
   }
   const list = (name) => [...new Set((text(name) ?? "").split(",").map((item) => item.trim()))].filter(
     (item) => item !== ""
@@ -5481,7 +5810,7 @@ function shownNote(name, mode, current, value, next) {
 // src/sheet-sync.ts
 var SHEET_SYNC = "google.sheet-sync";
 var SYNC_WRITES = ["add-tab", "update", "move", "delete", "add", "format-tab"];
-var ARGUMENTS10 = [
+var ARGUMENTS11 = [
   { name: "spreadsheet", type: "text" },
   { name: "tab", type: "text", required: true },
   { name: "key", type: "text", required: true },
@@ -5495,14 +5824,14 @@ function sheetSyncVerb(host, clock = systemClock) {
   return {
     id: SHEET_SYNC,
     kind: "sink",
-    arguments: ARGUMENTS10,
+    arguments: ARGUMENTS11,
     writes: SYNC_WRITES,
     plan: (request) => planSheetSync(host, request),
     apply: (request) => applySheetSync(host, request, clock)
   };
 }
-var problem10 = (text) => argumentsProblem(SHEET_SYNC, text);
-var refused9 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var problem11 = (text) => argumentsProblem(SHEET_SYNC, text);
+var refused10 = (diagnostic) => ({ ok: false, error: [diagnostic] });
 var warning2 = (message) => ({
   severity: "warning",
   code: "E_RECIPE_VERB",
@@ -5519,9 +5848,9 @@ async function planSheetSync(host, request) {
     request.arguments["spreadsheet"],
     request.section
   );
-  if (typeof spreadsheetId !== "string") return refused9(spreadsheetId);
+  if (typeof spreadsheetId !== "string") return refused10(spreadsheetId);
   const written = writeColumns(table, "");
-  if (!Array.isArray(written)) return refused9(written);
+  if (!Array.isArray(written)) return refused10(written);
   const noteMode = text("note-mode") === "append" ? "append" : "set";
   const noteSources = [];
   for (const name of listOf5(text("notes"))) {
@@ -5529,8 +5858,8 @@ async function planSheetSync(host, request) {
       (column) => column.name.toLowerCase() === `${name.toLowerCase()}_note`
     );
     if (source === void 0) {
-      return refused9(
-        problem10(`notes= names '${name}', but the table has no column '${name}_note' to write`)
+      return refused10(
+        problem11(`notes= names '${name}', but the table has no column '${name}_note' to write`)
       );
     }
     noteSources.push({ name, source: source.name });
@@ -5541,33 +5870,33 @@ async function planSheetSync(host, request) {
   const tableColumn = (name) => columns.find((column) => column.name.toLowerCase() === name.toLowerCase());
   const keyColumn = tableColumn(text("key"));
   if (keyColumn === void 0) {
-    return refused9(problem10(`key= names '${text("key")}', which is not a column of the table`));
+    return refused10(problem11(`key= names '${text("key")}', which is not a column of the table`));
   }
   const moveName = text("move");
   const moveColumn = moveName === "" ? void 0 : tableColumn(moveName);
   if (moveName !== "" && moveColumn === void 0) {
-    return refused9(problem10(`move= names '${moveName}', which is not a column of the table`));
+    return refused10(problem11(`move= names '${moveName}', which is not a column of the table`));
   }
   const connection = await connect(host, request.section);
-  if (!connection.ok) return refused9(verbFailed(SHEET_SYNC, connection.error));
+  if (!connection.ok) return refused10(verbFailed(SHEET_SYNC, connection.error));
   const { client } = connection.value;
   const tabs = await readGridTabs(client, spreadsheetId);
-  if (!tabs.ok) return refused9(verbFailed(SHEET_SYNC, tabs.error));
+  if (!tabs.ok) return refused10(verbFailed(SHEET_SYNC, tabs.error));
   const tab = pickTab(tabs.value, text("tab"));
-  if (typeof tab === "string") return refused9(problem10(tab));
+  if (typeof tab === "string") return refused10(problem11(tab));
   const values = await readValues(client, spreadsheetId, tab);
-  if (!values.ok) return refused9(verbFailed(SHEET_SYNC, values.error));
+  if (!values.ok) return refused10(verbFailed(SHEET_SYNC, values.error));
   const names = headerOf2(values.value, tab.title);
-  if (typeof names === "string") return refused9(problem10(names));
+  if (typeof names === "string") return refused10(problem11(names));
   const kc = columnIndexOf(names, keyColumn.name);
   if (kc === void 0) {
-    return refused9(problem10(`the tab '${tab.title}' has no column '${keyColumn.name}' in row 1`));
+    return refused10(problem11(`the tab '${tab.title}' has no column '${keyColumn.name}' in row 1`));
   }
   const keep = listOf5(text("keep")).map((name) => [name, columnIndexOf(names, name)]);
   const unknownKeep = keep.filter(([, index]) => index === void 0).map(([name]) => name);
   if (unknownKeep.length > 0) {
-    return refused9(
-      problem10(`keep= names ${listed(unknownKeep)}, which the tab '${tab.title}' has no column for`)
+    return refused10(
+      problem11(`keep= names ${listed(unknownKeep)}, which the tab '${tab.title}' has no column for`)
     );
   }
   const keepIndexes = new Set(keep.map(([, index]) => index));
@@ -5575,8 +5904,8 @@ async function planSheetSync(host, request) {
   for (const { name, source } of noteSources) {
     const at = columnIndexOf(names, name);
     if (at === void 0) {
-      return refused9(
-        problem10(`notes= names '${name}', which the tab '${tab.title}' has no column for`)
+      return refused10(
+        problem11(`notes= names '${name}', which the tab '${tab.title}' has no column for`)
       );
     }
     noted.push({ at, source });
@@ -5592,8 +5921,8 @@ async function planSheetSync(host, request) {
     }
   }
   if (unplaced.length > 0) {
-    return refused9(
-      problem10(
+    return refused10(
+      problem11(
         `cannot write ${listed(unplaced)}: the tab '${tab.title}' has no column of that name in row 1. Its columns are ${listed(names)}`
       )
     );
@@ -5610,8 +5939,8 @@ async function planSheetSync(host, request) {
     }
     const before = inTab.get(key);
     if (before !== void 0) {
-      return refused9(
-        problem10(
+      return refused10(
+        problem11(
           `rows ${before.number} and ${number} of the tab '${tab.title}' both hold '${key}' in ${names[kc] ?? ""}; a key must be unique, and the sync does not guess which row is it`
         )
       );
@@ -5632,8 +5961,8 @@ async function planSheetSync(host, request) {
       continue;
     }
     if (inTable.has(key)) {
-      return refused9(
-        problem10(`the table holds '${key}' in ${keyColumn.name} twice; a key must be unique`)
+      return refused10(
+        problem11(`the table holds '${key}' in ${keyColumn.name} twice; a key must be unique`)
       );
     }
     inTable.set(key, row);
@@ -5655,15 +5984,15 @@ async function planSheetSync(host, request) {
     const found = pickTab(tabs.value, title);
     if (typeof found === "string") continue;
     const read = await readValues(client, spreadsheetId, found);
-    if (!read.ok) return refused9(verbFailed(SHEET_SYNC, read.error));
+    if (!read.ok) return refused10(verbFailed(SHEET_SYNC, read.error));
     tabsRead.set(found.title, read.value);
     if (read.value.length === 0) continue;
     const archivedNames = headerOf2(read.value, found.title);
-    if (typeof archivedNames === "string") return refused9(problem10(archivedNames));
+    if (typeof archivedNames === "string") return refused10(problem11(archivedNames));
     const at = columnIndexOf(archivedNames, keyColumn.name);
     if (at === void 0) {
-      return refused9(
-        problem10(`archived= names '${found.title}', which has no column '${keyColumn.name}'`)
+      return refused10(
+        problem11(`archived= names '${found.title}', which has no column '${keyColumn.name}'`)
       );
     }
     for (const row of read.value.slice(1)) {
@@ -5696,7 +6025,7 @@ async function planSheetSync(host, request) {
     { links: names.map((_, index) => index), notes: noted.map(({ at }) => at) },
     lastRow
   );
-  if (!extras.ok) return refused9(verbFailed(SHEET_SYNC, extras.error));
+  if (!extras.ok) return refused10(verbFailed(SHEET_SYNC, extras.error));
   const linkAt = (at, number) => extras.value.links[String(at)]?.[String(number)];
   const digestOf2 = (row) => rowDigest(
     row.cells,
@@ -5808,7 +6137,7 @@ async function planSheetSync(host, request) {
     let read = tabsRead.get(found.title);
     if (read === void 0) {
       const answer = await readValues(client, spreadsheetId, found);
-      if (!answer.ok) return refused9(verbFailed(SHEET_SYNC, answer.error));
+      if (!answer.ok) return refused10(verbFailed(SHEET_SYNC, answer.error));
       read = answer.value;
       tabsRead.set(found.title, read);
     }
@@ -5930,7 +6259,7 @@ async function planSheetSync(host, request) {
     lastRow - writes(deletes) - writes(moveDrafts) + writes(addDrafts),
     false
   );
-  if (!formatted.ok) return refused9(verbFailed(SHEET_SYNC, formatted.error));
+  if (!formatted.ok) return refused10(verbFailed(SHEET_SYNC, formatted.error));
   for (const [destination, header] of destinations) {
     if (typeof header === "string") continue;
     const into = moveDrafts.filter(
@@ -5944,7 +6273,7 @@ async function planSheetSync(host, request) {
       (tabsRead.get(found.title)?.length ?? 1) + into,
       true
     );
-    if (!done.ok) return refused9(verbFailed(SHEET_SYNC, done.error));
+    if (!done.ok) return refused10(verbFailed(SHEET_SYNC, done.error));
   }
   const ordered = [
     ...tabDrafts,
@@ -5955,8 +6284,8 @@ async function planSheetSync(host, request) {
     ...formatDrafts
   ];
   if (ordered.length > MAX_OPERATIONS) {
-    return refused9(
-      problem10(
+    return refused10(
+      problem11(
         `would plan ${ordered.length.toLocaleString("en-US")} operations, over the ${MAX_OPERATIONS.toLocaleString("en-US")} one plan holds; split the table`
       )
     );
@@ -6069,6 +6398,7 @@ function activate(host) {
     host.registerRecipeVerb(driveFolderVerb(host)),
     host.registerRecipeVerb(sheetCreateVerb(host)),
     host.registerRecipeVerb(driveUploadVerb(host)),
+    host.registerRecipeVerb(driveFetchVerb(host)),
     host.registerRecipeVerb(driveCountVerb(host)),
     host.registerRecipeVerb(sheetLookupVerb(host)),
     host.registerRecipeVerb(driveUrlVerb(host)),

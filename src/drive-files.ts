@@ -146,6 +146,17 @@ export async function downloadFile(
   });
 }
 
+/** One file's bytes as they are: Drive's `alt=media`, for a file that is not text. */
+export async function downloadBytes(
+  client: GoogleClient,
+  fileId: string,
+): Promise<GoogleResult<Uint8Array>> {
+  return client.getBytes(`${DRIVE_FILES}/${encodeURIComponent(fileId)}`, {
+    alt: 'media',
+    supportsAllDrives: true,
+  });
+}
+
 function fileOf(value: unknown): DriveFile | undefined {
   const record = recordOf(value);
   if (record === undefined) return undefined;
