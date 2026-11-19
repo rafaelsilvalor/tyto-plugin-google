@@ -32,7 +32,7 @@ describe('tyto-plugin.json', () => {
     if (loaded.ok) await loaded.value.close();
   });
 
-  it('reaches only the Sheets and Drive API hosts, reads the workspace, and holds no credential', async () => {
+  it('reaches only the Sheets and Drive API hosts, reads and writes the workspace, and holds no credential', async () => {
     const plugin = await harness();
     expect(plugin.manifest.name).toBe('google');
     expect(plugin.manifest.namespace).toBe('google');
@@ -44,8 +44,10 @@ describe('tyto-plugin.json', () => {
       'net:sheets.googleapis.com',
       'net:www.googleapis.com',
       'signin:google',
-      // `google.drive-upload` reads the files it sends, and writes none of the workspace.
+      // `google.drive-upload` reads the files it sends.
       'workspace:read',
+      // `google.drive-fetch` writes the files it fetches into a delivery's `assets/`.
+      'workspace:write',
     ]);
     await plugin.close();
   });
@@ -86,6 +88,7 @@ describe('tyto-plugin.json', () => {
       'share',
       'upload',
       'replace',
+      'fetch',
     ]);
     // `move` is both a sync's (a row to another tab) and `google.drive-move`'s.
     const declared = [
@@ -106,7 +109,7 @@ describe('tyto-plugin.json', () => {
 });
 
 describe('activate', () => {
-  it('registers no setting, the three sources, the two sheet sinks, the four actions and the transforms', async () => {
+  it('registers no setting, the three sources, the two sheet sinks, the five actions and the transforms', async () => {
     const plugin = await harness();
     expect(plugin.host.registry.configurations()).toEqual([]);
     expect(plugin.host.registry.recipeVerbs().map((verb) => `${verb.id}:${verb.kind}`)).toEqual([
@@ -119,6 +122,7 @@ describe('activate', () => {
       'google.drive-folder:action',
       'google.sheet-create:action',
       'google.drive-upload:action',
+      'google.drive-fetch:action',
       'google.drive-count:transform',
       'google.sheet-lookup:transform',
       'google.drive-url:transform',

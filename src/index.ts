@@ -2,6 +2,7 @@ import type { Disposable, PluginHost } from '@tyto/plugin-api';
 
 import { docTextVerb } from './doc-text.js';
 import { driveCountVerb } from './drive-count.js';
+import { driveFetchVerb } from './drive-fetch.js';
 import { driveFolderVerb } from './drive-folder.js';
 import { driveListVerb } from './drive-list.js';
 import { driveMoveVerb } from './drive-move.js';
@@ -18,7 +19,7 @@ import { sheetWriteVerb } from './sheet-write.js';
  * The plugin's entry point: registers the recipe verbs: the `google.sheet-rows`,
  * `google.drive-list` and `google.drive-read` sources, the `google.sheet-write` and
  * `google.sheet-sync` sinks, the `google.drive-move`, `google.drive-folder`, `google.sheet-create` and
- * `google.drive-upload` actions, and the
+ * `google.drive-upload` and `google.drive-fetch` actions, and the
  * `google.drive-count`, `google.sheet-lookup`, `google.drive-url` and `google.doc-text`
  * transforms.
  *
@@ -37,6 +38,7 @@ export function activate(host: PluginHost): Disposable {
     host.registerRecipeVerb(driveFolderVerb(host)),
     host.registerRecipeVerb(sheetCreateVerb(host)),
     host.registerRecipeVerb(driveUploadVerb(host)),
+    host.registerRecipeVerb(driveFetchVerb(host)),
     host.registerRecipeVerb(driveCountVerb(host)),
     host.registerRecipeVerb(sheetLookupVerb(host)),
     host.registerRecipeVerb(driveUrlVerb(host)),

@@ -56,6 +56,8 @@ export interface Answer {
   readonly status: number;
   readonly headers: Readonly<Record<string, string>>;
   readonly text: string;
+  /** The body as the host received it, for a 2xx whose bytes are a file (`alt=media`). */
+  readonly bytes?: Uint8Array;
 }
 
 const REDACTED = '[redacted]';
@@ -129,7 +131,9 @@ export async function send(
       );
     }
     const text = await bodyText(response);
-    if (status >= 200 && status < 300) return googleOk({ status, headers, text });
+    if (status >= 200 && status < 300) {
+      return googleOk({ status, headers, text, bytes: response.body });
+    }
 
     const rate = isRateLimited(status, readErrorBody(text));
     if (!rate && !(idempotent && status >= 500)) return googleOk({ status, headers, text });
@@ -190,6 +194,8 @@ export interface GoogleClient {
   get(url: string, query?: Query): Promise<GoogleResult<unknown>>;
   /** A GET whose 2xx body is the file itself (Drive's `alt=media`), handed back as text. */
   getText(url: string, query?: Query): Promise<GoogleResult<string>>;
+  /** The same GET, with the file's bytes as they came: an image is not text. */
+  getBytes(url: string, query?: Query): Promise<GoogleResult<Uint8Array>>;
   post(url: string, body: unknown, query?: Query): Promise<GoogleResult<unknown>>;
   put(url: string, body: unknown, query?: Query): Promise<GoogleResult<unknown>>;
   patch(url: string, body: unknown, query?: Query): Promise<GoogleResult<unknown>>;
@@ -283,7 +289,7 @@ export function createGoogleClient(options: GoogleClientOptions): GoogleClient {
         redact,
       );
       if (!answer.ok) return answer;
-      const { status, text, headers } = answer.value;
+      const { status, text, headers, bytes } = answer.value;
       if (status === 401 && attempt === 0) {
         tokens.invalidate();
         continue;
@@ -292,7 +298,7 @@ export function createGoogleClient(options: GoogleClientOptions): GoogleClient {
         const failure = classifyFailure(label, status, text);
         return { ok: false, error: { ...failure, message: redact(failure.message) } };
       }
-      return googleOk({ status, text, headers, label });
+      return googleOk({ status, text, headers, label, ...(bytes === undefined ? {} : { bytes }) });
     }
   }
 
@@ -301,6 +307,10 @@ export function createGoogleClient(options: GoogleClientOptions): GoogleClient {
     async getText(url, query) {
       const answer = await exchange('GET', url, query, { accept: '*/*' });
       return answer.ok ? googleOk(answer.value.text) : answer;
+    },
+    async getBytes(url, query) {
+      const answer = await exchange('GET', url, query, { accept: '*/*' });
+      return answer.ok ? googleOk(answer.value.bytes ?? new Uint8Array(0)) : answer;
     },
     post: (url, body, query) => request('POST', url, query, body),
     put: (url, body, query) => request('PUT', url, query, body),

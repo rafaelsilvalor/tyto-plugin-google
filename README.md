@@ -18,6 +18,7 @@ Thirteen recipe verbs, all in the `google` namespace:
 | `google.drive-folder` | action    | Creates a folder per row as you, and shares it with listed people. |
 | `google.sheet-create` | action    | Creates a spreadsheet per row as you, and shares it likewise.      |
 | `google.drive-upload` | action    | Sends each row's workspace file or folder into a Drive folder.     |
+| `google.drive-fetch`  | action    | Brings each row's Drive file or folder files into its `assets/`.   |
 | `google.drive-count`  | transform | Adds the number of PNG and JPEG files in each row's folder.        |
 | `google.sheet-lookup` | transform | Adds a tab's columns to each row, found by a key column.           |
 | `google.drive-url`    | transform | Adds the address of the Drive folder an upload sent each row to.   |
@@ -45,6 +46,7 @@ the permissions below and asks for your approval.
 | `net:www.googleapis.com`    | The Drive API: listing, reading, moving and creating. |
 | `signin:google`             | Your own Google sign-in, run by Tyto in your browser. |
 | `workspace:read`            | The open folder's files, for `google.drive-upload`.   |
+| `workspace:write`           | Writing them, for `google.drive-fetch`.               |
 
 **The plugin acts only as you, the person signed in**, with your own Google sign-in, on every
 verb: in the desktop app, and in a terminal (`tyto recipe run`, `tyto mcp`) after
@@ -583,6 +585,51 @@ It needs a Tyto on plugin API 0.26 or later, which the manifest's `engine` requi
 
 A local file changed since the plan, or while it was sent, fails with `E_GOOGLE_CHANGED`. An
 Apply run twice sends nothing again: a file already in Drive as planned counts as `applied`.
+
+## `google.drive-fetch`
+
+An action: downloads the Drive file each row names, or the files directly in the folder it
+names, into the `assets/` folder of the row's delivery folder in the open workspace, keeping
+their Drive names, as a plan you read and then apply. It writes only through Tyto (Tyto ADR 0130,
+ADR 0138), so the manifest asks for `workspace:write`.
+
+```
+with-deliveries by=Folder
+google.drive-fetch from=Assets into=record_path
+```
+
+| Argument | What it does                                                                         |
+| -------- | ------------------------------------------------------------------------------------ |
+| `from=`  | The column holding each row's Drive file or folder, as its link or its id; required. |
+| `into=`  | The column holding each row's delivery folder, relative to the workspace; required.  |
+
+Tyto's `deliveries` answers the delivery folder as `path`, and `with-deliveries` as `record_path`.
+
+- **One line per file**: `fetch` for a file the folder's `assets/` does not have, `replace` for
+  one it has of that name with another size or an older time. A folder link brings its direct
+  files only, never a subfolder's; a Google Doc or Sheet in it has no bytes and is left out with
+  a warning, and a link to one alone fails the row.
+- **A file already there is left alone** when it has Drive's size and was written no earlier than
+  Drive's file last changed, with one warning listing them. Tyto writes a file with the time it
+  was written and cannot give it Drive's, so "the same date" is read as "not older than Drive's":
+  a second run right after the first plans nothing.
+- **A file over 32 MiB is not fetched**: it shows in the plan as a line that fails, naming its
+  size, because one workspace write holds at most 32 MiB. The other files of the row still plan.
+- A row with no link or no folder is left out with a warning. A link that is neither a file nor a
+  folder, a folder path that leaves the workspace, a Drive name that cannot be a file name, and
+  two files of one name in a Drive folder each fail in the plan.
+
+### Applying a fetch
+
+Each file is downloaded whole and written whole. **Many files finish in one Apply, over several
+calls**: one call spends at most 20 s and starts a download only when the last one's time still
+fits; the files it did not reach answer `continue` with how many it fetched
+(`fetched 2 of 5 files`), and Tyto asks again within the same Apply (Tyto ADR 0216). It needs a
+Tyto on plugin API 0.26 or later, which the manifest's `engine` requires.
+
+A local file a person put or changed at that path since the plan is never written over: it fails
+with `E_GOOGLE_CHANGED`, and so does a Drive file whose size changed. An Apply run twice writes
+nothing again: a file already there as fetched counts as `applied`.
 
 ## `google.drive-count`
 
