@@ -479,11 +479,11 @@ function verbFailed(verb, error) {
     message: `'${verb}' failed: ${withoutFinalStop(describeGoogleError(error))}.`
   };
 }
-function argumentsProblem(verb, problem9) {
+function argumentsProblem(verb, problem10) {
   return {
     severity: "error",
     code: "E_RECIPE_ARGUMENTS",
-    message: `'${verb}' ${withoutFinalStop(problem9)}.`
+    message: `'${verb}' ${withoutFinalStop(problem10)}.`
   };
 }
 function failed(diagnostic) {
@@ -1150,18 +1150,18 @@ var SHEETS2 = "https://sheets.googleapis.com/v4/spreadsheets";
 function budgetedTransport(host, clock) {
   const deadline = clock.now() + APPLY_BUDGET_MILLISECONDS;
   let outOfTime = false;
-  let refused8 = false;
+  let refused9 = false;
   const expired2 = () => {
     if (clock.now() > deadline) outOfTime = true;
     return outOfTime;
   };
   return {
     expired: expired2,
-    refusedForTime: () => refused8,
+    refusedForTime: () => refused9,
     transport: {
       fetch: (url, init) => {
         if (expired2()) {
-          refused8 = true;
+          refused9 = true;
           return Promise.reject(new Error(NOT_REACHED));
         }
         return host.fetch(url, init);
@@ -1972,23 +1972,23 @@ var ROLE_STRENGTH = [
 var PERMISSIONS_PAGE_SIZE = 100;
 var OUT_OF_TIME = "could not check every row in one call's time; narrow the table to fewer rows and run again";
 async function planCreates(host, request, kind, clock = systemClock) {
-  const problem9 = (text) => refused3(argumentsProblem(kind.verb, text));
+  const problem10 = (text) => refused3(argumentsProblem(kind.verb, text));
   const { table } = request;
   const nameColumn = columnOf(
     table,
     "name",
     textArgument(request.arguments, "name") ?? DEFAULT_NAME_COLUMN
   );
-  if (nameColumn.problem !== void 0) return problem9(nameColumn.problem);
+  if (nameColumn.problem !== void 0) return problem10(nameColumn.problem);
   const shareWritten = textArgument(request.arguments, "share");
   const shareColumn = shareWritten === void 0 ? void 0 : columnOf(table, "share", shareWritten);
-  if (shareColumn?.problem !== void 0) return problem9(shareColumn.problem);
+  if (shareColumn?.problem !== void 0) return problem10(shareColumn.problem);
   const notify = textArgument(request.arguments, "notify") === "yes";
   const section = readSection(request.section);
   if (!section.ok) return refused3(verbFailed(kind.verb, section.error));
   const rootId = section.value.root;
   if (rootId === void 0) {
-    return problem9(
+    return problem10(
       `needs root in the google section of .tyto/project.json: it creates only under it`
     );
   }
@@ -2001,7 +2001,7 @@ async function planCreates(host, request, kind, clock = systemClock) {
     message: `'${kind.verb}' ${OUT_OF_TIME}.`
   }) : refused3(verbFailed(kind.verb, error));
   const parent = await parentOf(walk, rootId, textArgument(request.arguments, "parent"));
-  if (!parent.ok) return "error" in parent ? failedFor(parent.error) : problem9(parent.problem);
+  if (!parent.ok) return "error" in parent ? failedFor(parent.error) : problem10(parent.problem);
   const parentFolder = parent.folder;
   const planned = [];
   const firstRowOf = /* @__PURE__ */ new Map();
@@ -2035,7 +2035,7 @@ async function planCreates(host, request, kind, clock = systemClock) {
     const existing = await childrenNamedOfType(client, parentFolder.id, name, kind.mimeType);
     if (!existing.ok) return failedFor(existing.error);
     if (existing.value.length > 1) {
-      return problem9(
+      return problem10(
         `finds ${existing.value.length} items named '${name}' in '${parentFolder.name}' (${parentFolder.id}): ${listed(existing.value.map((each) => each.id))}; keep one, or rename the others, and run again`
       );
     }
@@ -2091,7 +2091,7 @@ async function planCreates(host, request, kind, clock = systemClock) {
     }
   }
   if (operations.length > MAX_OPERATIONS) {
-    return problem9(
+    return problem10(
       `would plan ${operations.length.toLocaleString("en-US")} operations, over the ${MAX_OPERATIONS.toLocaleString("en-US")} one plan holds; split the table`
     );
   }
@@ -3160,8 +3160,8 @@ async function driveReadPage(host, request) {
     }
     if (columns === void 0) {
       const own = new ColumnUnion(asked.columns);
-      const refused8 = own.add(file.name, read);
-      if (refused8 !== void 0) return readFailed(refused8);
+      const refused9 = own.add(file.name, read);
+      if (refused9 !== void 0) return readFailed(refused9);
       columns = own.columns();
     }
     const built = jsonRows(file, read, columns, fetchedAt);
@@ -3220,8 +3220,8 @@ async function judgeFile(client, file, asked, union) {
   if (!("body" in body)) return body;
   const read = jsonRecords(file, body.body, asked.rows);
   if (typeof read === "string") return { problem: read };
-  const refused8 = union.add(file.name, read);
-  return refused8 === void 0 ? { read } : { problem: refused8 };
+  const refused9 = union.add(file.name, read);
+  return refused9 === void 0 ? { read } : { problem: refused9 };
 }
 function skippedFile(file, reason) {
   return {
@@ -3865,6 +3865,109 @@ function cellText(value) {
 function columnNamed(table, name, argument) {
   const found = columnOf(table, argument, name);
   return found.problem === void 0 ? found.name : problem5(found.problem);
+}
+
+// src/drive-url.ts
+var DRIVE_URL = "google.drive-url";
+function driveUrlVerb(host) {
+  return {
+    id: DRIVE_URL,
+    kind: "transform",
+    arguments: [
+      { name: "path", type: "text", required: true },
+      { name: "in", type: "text" }
+    ],
+    transform: (request) => folderUrls(host, request)
+  };
+}
+var refused6 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var problem6 = (text) => argumentsProblem(DRIVE_URL, text);
+function lastSegment(value) {
+  if (value === null || value === void 0) return void 0;
+  const name = String(value).trim().replace(/[\\/]+$/u, "").split(/[\\/]/u).at(-1);
+  return name === void 0 || name === "" ? void 0 : name;
+}
+async function folderUrls(host, request) {
+  const { table } = request;
+  const asked = textArgument(request.arguments, "path");
+  if (asked === void 0) return refused6(problem6("needs path=, the column naming each folder"));
+  const column = table.columns.find((each) => each.name === asked) ?? table.columns.find((each) => each.name.toLowerCase() === asked.toLowerCase());
+  if (column === void 0) {
+    return refused6(
+      problem6(
+        `path= names the column '${asked}', which the table does not have; its columns are ` + listed(table.columns.map((each) => each.name))
+      )
+    );
+  }
+  const added = `${column.name}_url`;
+  if (table.columns.some((each) => each.name.toLowerCase() === added.toLowerCase())) {
+    return refused6(problem6(`would add the column '${added}', which the table already has`));
+  }
+  const names = table.rows.map((row) => lastSegment(row.values[column.name]));
+  const distinct = [...new Set(names.filter((name) => name !== void 0))];
+  if (distinct.length > MAX_FOLDERS) {
+    return refused6(
+      problem6(
+        `would look up ${distinct.length.toLocaleString("en-US")} folders, over the ${MAX_FOLDERS} one call looks up; narrow it to fewer rows first`
+      )
+    );
+  }
+  const urls = /* @__PURE__ */ new Map();
+  const ambiguous = [];
+  if (distinct.length > 0) {
+    const connection = await connect(host, request.section);
+    if (!connection.ok) return refused6(verbFailed(DRIVE_URL, connection.error));
+    const { client, section } = connection.value;
+    const rootId = section.root;
+    if (rootId === void 0) {
+      return refused6(
+        problem6("needs root in the google section of .tyto/project.json: it looks only under it")
+      );
+    }
+    let parent = rootId;
+    const within = textArgument(request.arguments, "in");
+    if (within !== void 0) {
+      const found = await destinationOf(rootWalk(client, rootId), rootId, rootId, within, "in=");
+      if (!found.ok) {
+        return refused6(
+          "error" in found ? verbFailed(DRIVE_URL, found.error) : problem6(found.problem)
+        );
+      }
+      parent = found.folder.id;
+    }
+    for (const name of distinct) {
+      const named = await childrenNamedOfType(client, parent, name, FOLDER_MIME_TYPE);
+      if (!named.ok) return refused6(verbFailed(DRIVE_URL, named.error));
+      const [only, ...more] = named.value;
+      if (more.length > 0) ambiguous.push(name);
+      urls.set(
+        name,
+        only === void 0 || more.length > 0 ? null : `https://drive.google.com/drive/folders/${only.id}`
+      );
+    }
+  }
+  return {
+    ok: true,
+    value: {
+      columns: [...table.columns, { name: added, type: "link", origin: ORIGIN }],
+      rows: table.rows.map((row, index) => {
+        const name = names[index];
+        return {
+          ...row,
+          values: { ...row.values, [added]: name === void 0 ? null : urls.get(name) ?? null }
+        };
+      })
+    },
+    diagnostics: ambiguous.length === 0 ? [] : [
+      {
+        severity: "warning",
+        code: "E_RECIPE_VERB",
+        message: shortened(
+          `'${DRIVE_URL}' left ${added} empty for ${listed(ambiguous)}: more than one folder of that name is there; keep one.`
+        )
+      }
+    ]
+  };
 }
 
 // src/sheet-create.ts
@@ -4908,24 +5011,24 @@ function sheetLookupVerb(host) {
     transform: (request) => lookUp(host, request)
   };
 }
-var refused6 = (diagnostic) => ({ ok: false, error: [diagnostic] });
-var problem6 = (text) => argumentsProblem(SHEET_LOOKUP, text);
+var refused7 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var problem7 = (text) => argumentsProblem(SHEET_LOOKUP, text);
 var listOf4 = (written) => [...new Set((written ?? "").split(",").map((item) => item.trim()))].filter((item) => item !== "");
 async function lookUp(host, request) {
   const { table } = request;
   const tabName = textArgument(request.arguments, "tab");
-  if (tabName === void 0) return refused6(problem6("needs tab=, the tab to look rows up in"));
+  if (tabName === void 0) return refused7(problem7("needs tab=, the tab to look rows up in"));
   const keyName = textArgument(request.arguments, "key");
-  if (keyName === void 0) return refused6(problem6("needs key=, the column to match rows by"));
+  if (keyName === void 0) return refused7(problem7("needs key=, the column to match rows by"));
   const wanted = listOf4(textArgument(request.arguments, "columns"));
-  if (wanted.length === 0) return refused6(problem6("needs columns=, the tab columns to add"));
+  if (wanted.length === 0) return refused7(problem7("needs columns=, the tab columns to add"));
   const links = listOf4(textArgument(request.arguments, "links"));
   const notes = listOf4(textArgument(request.arguments, "notes"));
   const prefix = request.arguments["prefix"] === void 0 ? DEFAULT_PREFIX : String(request.arguments["prefix"]).trim();
   const keyColumn = table.columns.find((each) => each.name === keyName) ?? table.columns.find((each) => each.name.toLowerCase() === keyName.toLowerCase());
   if (keyColumn === void 0) {
-    return refused6(
-      problem6(
+    return refused7(
+      problem7(
         `key= names the column '${keyName}', which the table does not have; its columns are ` + listed(table.columns.map((each) => each.name))
       )
     );
@@ -4935,9 +5038,9 @@ async function lookUp(host, request) {
     request.arguments["spreadsheet"],
     request.section
   );
-  if (typeof spreadsheetId !== "string") return refused6(spreadsheetId);
+  if (typeof spreadsheetId !== "string") return refused7(spreadsheetId);
   const connection = await connect(host, request.section);
-  if (!connection.ok) return refused6(verbFailed(SHEET_LOOKUP, connection.error));
+  if (!connection.ok) return refused7(verbFailed(SHEET_LOOKUP, connection.error));
   const read = await firstSnapshot(
     host,
     SHEET_LOOKUP,
@@ -4948,14 +5051,14 @@ async function lookUp(host, request) {
     // current Drive version, which any edit to the spreadsheet raises.
     false
   );
-  if ("severity" in read) return refused6(read);
+  if ("severity" in read) return refused7(read);
   const { snapshot, names, plan } = read;
   const kc = plan.key ?? 0;
   const added = [];
   for (const written of wanted) {
     const at = columnIndexOf(names, written);
     if (at === void 0)
-      return refused6(notInTab(SHEET_LOOKUP, "columns", written, names, snapshot.title));
+      return refused7(notInTab(SHEET_LOOKUP, "columns", written, names, snapshot.title));
     const type = inferType(snapshot.values, at);
     added.push({
       column: { name: `${prefix}${names[at] ?? ""}`, type, origin: ORIGIN },
@@ -4978,8 +5081,8 @@ async function lookUp(host, request) {
   for (const { column } of added) {
     const lowered = column.name.toLowerCase();
     if (taken.has(lowered)) {
-      return refused6(
-        problem6(
+      return refused7(
+        problem7(
           `would add the column '${column.name}', which the table already has; name another prefix=`
         )
       );
@@ -4993,8 +5096,8 @@ async function lookUp(host, request) {
     const sheetRow = index + 1;
     const before = rowOfKey.get(key);
     if (before !== void 0) {
-      return refused6(
-        problem6(
+      return refused7(
+        problem7(
           `rows ${before} and ${sheetRow} of the tab '${snapshot.title}' both hold '${key}' in ${names[kc] ?? ""}; a key must be unique, and the lookup does not guess which row is it`
         )
       );
@@ -5042,7 +5145,7 @@ function sheetRowsVerb(host) {
     page: (request) => sheetRowsPage(host, request)
   };
 }
-var problem7 = (text) => argumentsProblem(SHEET_ROWS, text);
+var problem8 = (text) => argumentsProblem(SHEET_ROWS, text);
 var sheetFailed = (text) => failed({ severity: "error", code: "E_RECIPE_VERB", message: `'${SHEET_ROWS}' failed: ${text}.` });
 async function sheetRowsPage(host, request) {
   const asked = readArguments(request.arguments, request.section);
@@ -5131,7 +5234,7 @@ function readArguments(values, section) {
   if (written !== void 0) {
     spreadsheetId = spreadsheetIdOf(written);
     if (spreadsheetId === void 0) {
-      return problem7(
+      return problem8(
         `spreadsheet= holds '${written}', which is neither a spreadsheet id nor its address, such as https://docs.google.com/spreadsheets/d/<id>/edit`
       );
     }
@@ -5140,14 +5243,14 @@ function readArguments(values, section) {
     if (!read.ok) return verbFailed(SHEET_ROWS, read.error);
     spreadsheetId = read.value.spreadsheet;
     if (spreadsheetId === void 0) {
-      return problem7(
+      return problem8(
         "needs spreadsheet=, or spreadsheet in the google section of .tyto/project.json, and was given neither"
       );
     }
   }
   const max = values["max"] ?? DEFAULT_MAX2;
   if (typeof max !== "number" || !Number.isSafeInteger(max) || max < 1 || max > MAX_MAX2) {
-    return problem7(`max= must be a whole number from 1 to ${MAX_MAX2}, not ${String(max)}`);
+    return problem8(`max= must be a whole number from 1 to ${MAX_MAX2}, not ${String(max)}`);
   }
   const list = (name) => [...new Set((text(name) ?? "").split(",").map((item) => item.trim()))].filter(
     (item) => item !== ""
@@ -5205,8 +5308,8 @@ function sheetSyncVerb(host, clock = systemClock) {
     apply: (request) => applySheetSync(host, request, clock)
   };
 }
-var problem8 = (text) => argumentsProblem(SHEET_SYNC, text);
-var refused7 = (diagnostic) => ({ ok: false, error: [diagnostic] });
+var problem9 = (text) => argumentsProblem(SHEET_SYNC, text);
+var refused8 = (diagnostic) => ({ ok: false, error: [diagnostic] });
 var warning2 = (message) => ({
   severity: "warning",
   code: "E_RECIPE_VERB",
@@ -5223,9 +5326,9 @@ async function planSheetSync(host, request) {
     request.arguments["spreadsheet"],
     request.section
   );
-  if (typeof spreadsheetId !== "string") return refused7(spreadsheetId);
+  if (typeof spreadsheetId !== "string") return refused8(spreadsheetId);
   const written = writeColumns(table, "");
-  if (!Array.isArray(written)) return refused7(written);
+  if (!Array.isArray(written)) return refused8(written);
   const noteMode = text("note-mode") === "append" ? "append" : "set";
   const noteSources = [];
   for (const name of listOf5(text("notes"))) {
@@ -5233,8 +5336,8 @@ async function planSheetSync(host, request) {
       (column) => column.name.toLowerCase() === `${name.toLowerCase()}_note`
     );
     if (source === void 0) {
-      return refused7(
-        problem8(`notes= names '${name}', but the table has no column '${name}_note' to write`)
+      return refused8(
+        problem9(`notes= names '${name}', but the table has no column '${name}_note' to write`)
       );
     }
     noteSources.push({ name, source: source.name });
@@ -5245,33 +5348,33 @@ async function planSheetSync(host, request) {
   const tableColumn = (name) => columns.find((column) => column.name.toLowerCase() === name.toLowerCase());
   const keyColumn = tableColumn(text("key"));
   if (keyColumn === void 0) {
-    return refused7(problem8(`key= names '${text("key")}', which is not a column of the table`));
+    return refused8(problem9(`key= names '${text("key")}', which is not a column of the table`));
   }
   const moveName = text("move");
   const moveColumn = moveName === "" ? void 0 : tableColumn(moveName);
   if (moveName !== "" && moveColumn === void 0) {
-    return refused7(problem8(`move= names '${moveName}', which is not a column of the table`));
+    return refused8(problem9(`move= names '${moveName}', which is not a column of the table`));
   }
   const connection = await connect(host, request.section);
-  if (!connection.ok) return refused7(verbFailed(SHEET_SYNC, connection.error));
+  if (!connection.ok) return refused8(verbFailed(SHEET_SYNC, connection.error));
   const { client } = connection.value;
   const tabs = await readGridTabs(client, spreadsheetId);
-  if (!tabs.ok) return refused7(verbFailed(SHEET_SYNC, tabs.error));
+  if (!tabs.ok) return refused8(verbFailed(SHEET_SYNC, tabs.error));
   const tab = pickTab(tabs.value, text("tab"));
-  if (typeof tab === "string") return refused7(problem8(tab));
+  if (typeof tab === "string") return refused8(problem9(tab));
   const values = await readValues(client, spreadsheetId, tab);
-  if (!values.ok) return refused7(verbFailed(SHEET_SYNC, values.error));
+  if (!values.ok) return refused8(verbFailed(SHEET_SYNC, values.error));
   const names = headerOf2(values.value, tab.title);
-  if (typeof names === "string") return refused7(problem8(names));
+  if (typeof names === "string") return refused8(problem9(names));
   const kc = columnIndexOf(names, keyColumn.name);
   if (kc === void 0) {
-    return refused7(problem8(`the tab '${tab.title}' has no column '${keyColumn.name}' in row 1`));
+    return refused8(problem9(`the tab '${tab.title}' has no column '${keyColumn.name}' in row 1`));
   }
   const keep = listOf5(text("keep")).map((name) => [name, columnIndexOf(names, name)]);
   const unknownKeep = keep.filter(([, index]) => index === void 0).map(([name]) => name);
   if (unknownKeep.length > 0) {
-    return refused7(
-      problem8(`keep= names ${listed(unknownKeep)}, which the tab '${tab.title}' has no column for`)
+    return refused8(
+      problem9(`keep= names ${listed(unknownKeep)}, which the tab '${tab.title}' has no column for`)
     );
   }
   const keepIndexes = new Set(keep.map(([, index]) => index));
@@ -5279,8 +5382,8 @@ async function planSheetSync(host, request) {
   for (const { name, source } of noteSources) {
     const at = columnIndexOf(names, name);
     if (at === void 0) {
-      return refused7(
-        problem8(`notes= names '${name}', which the tab '${tab.title}' has no column for`)
+      return refused8(
+        problem9(`notes= names '${name}', which the tab '${tab.title}' has no column for`)
       );
     }
     noted.push({ at, source });
@@ -5296,8 +5399,8 @@ async function planSheetSync(host, request) {
     }
   }
   if (unplaced.length > 0) {
-    return refused7(
-      problem8(
+    return refused8(
+      problem9(
         `cannot write ${listed(unplaced)}: the tab '${tab.title}' has no column of that name in row 1. Its columns are ${listed(names)}`
       )
     );
@@ -5314,8 +5417,8 @@ async function planSheetSync(host, request) {
     }
     const before = inTab.get(key);
     if (before !== void 0) {
-      return refused7(
-        problem8(
+      return refused8(
+        problem9(
           `rows ${before.number} and ${number} of the tab '${tab.title}' both hold '${key}' in ${names[kc] ?? ""}; a key must be unique, and the sync does not guess which row is it`
         )
       );
@@ -5336,8 +5439,8 @@ async function planSheetSync(host, request) {
       continue;
     }
     if (inTable.has(key)) {
-      return refused7(
-        problem8(`the table holds '${key}' in ${keyColumn.name} twice; a key must be unique`)
+      return refused8(
+        problem9(`the table holds '${key}' in ${keyColumn.name} twice; a key must be unique`)
       );
     }
     inTable.set(key, row);
@@ -5359,15 +5462,15 @@ async function planSheetSync(host, request) {
     const found = pickTab(tabs.value, title);
     if (typeof found === "string") continue;
     const read = await readValues(client, spreadsheetId, found);
-    if (!read.ok) return refused7(verbFailed(SHEET_SYNC, read.error));
+    if (!read.ok) return refused8(verbFailed(SHEET_SYNC, read.error));
     tabsRead.set(found.title, read.value);
     if (read.value.length === 0) continue;
     const archivedNames = headerOf2(read.value, found.title);
-    if (typeof archivedNames === "string") return refused7(problem8(archivedNames));
+    if (typeof archivedNames === "string") return refused8(problem9(archivedNames));
     const at = columnIndexOf(archivedNames, keyColumn.name);
     if (at === void 0) {
-      return refused7(
-        problem8(`archived= names '${found.title}', which has no column '${keyColumn.name}'`)
+      return refused8(
+        problem9(`archived= names '${found.title}', which has no column '${keyColumn.name}'`)
       );
     }
     for (const row of read.value.slice(1)) {
@@ -5400,7 +5503,7 @@ async function planSheetSync(host, request) {
     { links: names.map((_, index) => index), notes: noted.map(({ at }) => at) },
     lastRow
   );
-  if (!extras.ok) return refused7(verbFailed(SHEET_SYNC, extras.error));
+  if (!extras.ok) return refused8(verbFailed(SHEET_SYNC, extras.error));
   const linkAt = (at, number) => extras.value.links[String(at)]?.[String(number)];
   const digestOf2 = (row) => rowDigest(
     row.cells,
@@ -5512,7 +5615,7 @@ async function planSheetSync(host, request) {
     let read = tabsRead.get(found.title);
     if (read === void 0) {
       const answer = await readValues(client, spreadsheetId, found);
-      if (!answer.ok) return refused7(verbFailed(SHEET_SYNC, answer.error));
+      if (!answer.ok) return refused8(verbFailed(SHEET_SYNC, answer.error));
       read = answer.value;
       tabsRead.set(found.title, read);
     }
@@ -5634,7 +5737,7 @@ async function planSheetSync(host, request) {
     lastRow - writes(deletes) - writes(moveDrafts) + writes(addDrafts),
     false
   );
-  if (!formatted.ok) return refused7(verbFailed(SHEET_SYNC, formatted.error));
+  if (!formatted.ok) return refused8(verbFailed(SHEET_SYNC, formatted.error));
   for (const [destination, header] of destinations) {
     if (typeof header === "string") continue;
     const into = moveDrafts.filter(
@@ -5648,7 +5751,7 @@ async function planSheetSync(host, request) {
       (tabsRead.get(found.title)?.length ?? 1) + into,
       true
     );
-    if (!done.ok) return refused7(verbFailed(SHEET_SYNC, done.error));
+    if (!done.ok) return refused8(verbFailed(SHEET_SYNC, done.error));
   }
   const ordered = [
     ...tabDrafts,
@@ -5659,8 +5762,8 @@ async function planSheetSync(host, request) {
     ...formatDrafts
   ];
   if (ordered.length > MAX_OPERATIONS) {
-    return refused7(
-      problem8(
+    return refused8(
+      problem9(
         `would plan ${ordered.length.toLocaleString("en-US")} operations, over the ${MAX_OPERATIONS.toLocaleString("en-US")} one plan holds; split the table`
       )
     );
@@ -5774,7 +5877,8 @@ function activate(host) {
     host.registerRecipeVerb(sheetCreateVerb(host)),
     host.registerRecipeVerb(driveUploadVerb(host)),
     host.registerRecipeVerb(driveCountVerb(host)),
-    host.registerRecipeVerb(sheetLookupVerb(host))
+    host.registerRecipeVerb(sheetLookupVerb(host)),
+    host.registerRecipeVerb(driveUrlVerb(host))
   ];
   return {
     dispose() {

@@ -119,6 +119,7 @@ describe('activate', () => {
       'google.drive-upload:action',
       'google.drive-count:transform',
       'google.sheet-lookup:transform',
+      'google.drive-url:transform',
     ]);
     await plugin.close();
   });
